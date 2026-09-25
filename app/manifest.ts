@@ -1,0 +1,29 @@
+import type { MetadataRoute } from "next";
+
+export default function manifest(): MetadataRoute.Manifest {
+  return {
+    name: "DASH BOARD - MONITORAMENTO DE COLETA",
+    short_name: "DASH BOARD",
+    description: "Dashboard de coletas J&T Express com upload de Excel e filtros operacionais.",
+    start_url: "/",
+    scope: "/",
+    display: "standalone",
+    background_color: "#f5f7fa",
+    theme_color: "#e60000",
+    orientation: "portrait",
+    icons: [
+      {
+        src: "/app-icon-192.png",
+        sizes: "192x192",
+        type: "image/png",
+        purpose: "any maskable",
+      },
+      {
+        src: "/app-icon-512.png",
+        sizes: "512x512",
+        type: "image/png",
+        purpose: "any maskable",
+      },
+    ],
+  };
+}
