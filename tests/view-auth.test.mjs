@@ -21,13 +21,13 @@ function request(username, password) {
 test("regional logins never inherit the first (Matriz) account", async () => {
   for (const account of accounts.filter((account) => account.region)) {
     assert.deepEqual(await authenticateViewer(request(account.username, account.password)), {
-      username: account.username, role: "regional", region: account.region,
+      username: account.username, role: "regional", region: account.region, base: null,
     });
   }
 });
 
 test("only matching Matriz credentials grant matrix access", async () => {
-  assert.deepEqual(await authenticateViewer(request("Matriz", "matrix-test")), { username: "Matriz", role: "matrix", region: null });
+  assert.deepEqual(await authenticateViewer(request("Matriz", "matrix-test")), { username: "Matriz", role: "matrix", region: null, base: null });
   assert.equal(await authenticateViewer(request("JT_SPS", "matrix-test")), null);
   assert.equal(await authenticateViewer(request("Matriz", "test-SPS")), null);
   assert.equal(await authenticateViewer(request("JT_SPS", "wrong")), null);
@@ -39,6 +39,9 @@ test("only matching Matriz credentials grant matrix access", async () => {
 test("every viewer endpoint awaits authentication before returning data", async () => {
   for (const path of ["../app/api/view-auth/route.ts", "../app/api/workbook/route.ts"]) {
     const route = await readFile(new URL(path, import.meta.url), "utf8");
-    assert.match(route, /await authenticateViewer\(request\)/);
+    assert.match(route, /await dashboardViewer\(request\)/);
   }
+
+  const viewAuth = await readFile(new URL("../app/api/view-auth/route.ts", import.meta.url), "utf8");
+  assert.match(viewAuth, /if \(!isDevelopmentEnvironment\(\)\) return viewerAuthorizationError\(401\)/);
 });

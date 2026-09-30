@@ -26,16 +26,16 @@ test("parses the Chinese responsibility columns and links a base to RM and RGM",
     {
       "区域": "SPS",
       "网点编号": 311428,
-      "网点名称": "F S-CMBC-SP",
+      "网点名称": "TEST-BASE-SPS",
       "RM区域": "SPS-CAP",
       "RM名称": "Rick",
       "RM分组": "产粮组",
       "RM\n负责人": "Ana",
     },
   ]), "responsaveis.xlsx");
-  assert.deepEqual(responsibilityForBase(data, "F S-CMBC-SP"), { rm: "Rick", rgm: "@熊志远 XIONG ZHIYUAN（Amos）" });
-  assert.equal(registeredRegionForBase(data, "F S-CMBC-SP", "SPN"), "SPS");
-  assert.equal(rmAreaForBase(data, "F S-CMBC-SP"), "SPS-CAP");
+  assert.deepEqual(responsibilityForBase(data, "TEST-BASE-SPS"), { rm: "Rick", rgm: "@熊志远 XIONG ZHIYUAN（Amos）" });
+  assert.equal(registeredRegionForBase(data, "TEST-BASE-SPS", "SPN"), "SPS");
+  assert.equal(rmAreaForBase(data, "TEST-BASE-SPS"), "SPS-CAP");
   assert.equal(data.records[0]?.baseCode, "311428");
 });
 
@@ -53,7 +53,7 @@ test("prioritizes the official REGIONAL, BASE and RM columns and applies the reg
     headers: ["REGIONAL", "BASE", "RM ", "RGM", "RM\n负责人"],
     rows: [{
       "REGIONAL": "MG",
-      "BASE": "F EXT-MG",
+      "BASE": "TEST-BASE-MG",
       "RM ": "Alex",
       "RGM": "Grupo oficial",
       "RM\n负责人": "Valor antigo que deve ser ignorado",
@@ -63,7 +63,7 @@ test("prioritizes the official REGIONAL, BASE and RM columns and applies the reg
   };
   const data = buildResponsibilityData(parsed, "novo.xlsx");
   assert.equal(data.records[0]?.region, "MG");
-  assert.equal(data.records[0]?.base, "F EXT-MG");
+  assert.equal(data.records[0]?.base, "TEST-BASE-MG");
   assert.equal(data.records[0]?.rm, "Alex");
   assert.equal(data.records[0]?.rgm, "@王龙 LONG WANG（Matt）");
 });
@@ -96,7 +96,7 @@ test("reads the new workbook's RM responsible name and RM region columns", () =>
     headers: ["Regional\n区域", "Nome da Base\n网点名称", "RM临时名称", "Região do RM\nRM区域", "Responsável do RM\nRM负责人", "RM"],
     rows: [{
       "Regional\n区域": "SPS",
-      "Nome da Base\n网点名称": "F S-CMBC-SP",
+      "Nome da Base\n网点名称": "TEST-BASE-SPS",
       "RM临时名称": "SPS1",
       "Região do RM\nRM区域": "SPS-CAP",
       "Responsável do RM\nRM负责人": "Rick",

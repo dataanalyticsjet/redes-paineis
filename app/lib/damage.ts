@@ -1,4 +1,4 @@
-import { normalizeHeader, toISODate, type ParsedWorkbook, type WorkbookRow } from "./workbook";
+import { normalizeHeader, toISODate, type ParsedWorkbook } from "./workbook.ts";
 
 export interface DamageRecord { date: string; ticket: string; shipment: string; region: string; base: string; type: string; reason: string; origin: string; tickets: number; value: number; }
 export interface DamageData { parsed: ParsedWorkbook; fileName: string; updatedAt?: string; records: DamageRecord[]; dates: string[]; regions: string[]; bases: string[]; }

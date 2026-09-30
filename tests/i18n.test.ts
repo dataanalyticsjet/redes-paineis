@@ -10,7 +10,7 @@ import {
 } from "../app/lib/i18n.ts";
 
 test("offers Portuguese, English, and Simplified Chinese", () => {
-  assert.deepEqual(DASHBOARD_LANGUAGES.map(({ code }) => code), ["pt", "en", "zh"]);
+  assert.deepEqual(DASHBOARD_LANGUAGES.map(({ code }) => code), ["pt", "zh", "en"]);
   assert.equal(dashboardHtmlLang("pt"), "pt-BR");
   assert.equal(dashboardHtmlLang("en"), "en");
   assert.equal(dashboardHtmlLang("zh"), "zh-CN");

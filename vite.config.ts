@@ -1,5 +1,5 @@
 import vinext from "vinext";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
 
@@ -7,6 +7,26 @@ const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
 
 const { d1, r2 } = hostingConfig;
+
+function redactFeishuCallbackQuery(): Plugin {
+  return {
+    name: "redact-feishu-callback-query",
+    enforce: "pre" as const,
+    configureServer(server) {
+      server.middlewares.use((request, _response, next) => {
+        if (request.url?.startsWith("/api/auth/feishu/callback?")) {
+          const callbackUrl = new URL(request.url, "http://localhost");
+          const code = callbackUrl.searchParams.get("code");
+          const state = callbackUrl.searchParams.get("state");
+          if (code) request.headers["x-jt-feishu-oauth-code"] = code;
+          if (state) request.headers["x-jt-feishu-oauth-state"] = state;
+          request.url = callbackUrl.pathname;
+        }
+        next();
+      });
+    },
+  };
+}
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -44,10 +64,14 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      host: "localhost",
+      port: 3000,
+      strictPort: true,
+      ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
+    },
     plugins: [
+      redactFeishuCallbackQuery(),
       vinext(),
       sites(),
       cloudflare({

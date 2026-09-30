@@ -1,5 +1,5 @@
 import type { ParsedWorkbook } from "./workbook";
-import { UPDATED_RM_BY_BASE } from "./updated-rm";
+import { UPDATED_RM_BY_BASE } from "./updated-rm.ts";
 
 export const UNASSIGNED_RM = "Sem RM";
 export const UNASSIGNED_RGM = "Sem RGM";

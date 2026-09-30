@@ -8,8 +8,10 @@ import {
   uploadSecretsConfigured,
 } from "../../lib/upload-auth.server";
 import {
-  authenticateViewer,
-  viewerAccountsConfigured,
+  dashboardAuthConfigured,
+  dashboardViewer,
+} from "../../lib/feishu-auth.server";
+import {
   viewerAuthorizationError,
 } from "../../lib/view-auth.server";
 
@@ -92,11 +94,23 @@ async function ensureSchema(db: D1Database) {
 }
 
 function responseError(error: unknown, status = 500) {
-  const message =
-    error instanceof Error
+  const message = status >= 500
+    ? "Não foi possível acessar os dados salvos do dashboard."
+    : error instanceof Error
       ? error.message
-      : "Não foi possível acessar os dados salvos do dashboard.";
-  return Response.json({ error: message }, { status });
+      : "Não foi possível processar a solicitação.";
+
+  if (status >= 500) {
+    console.error("[api/workbook] unexpected request error", {
+      status,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    });
+  }
+
+  return Response.json(
+    { error: message },
+    { status, headers: { "cache-control": "no-store" } },
+  );
 }
 
 function streamWorkbookPayload(
@@ -141,9 +155,8 @@ async function scopeForViewer(parsed: ParsedWorkbook, region: string, kind: Work
 }
 
 export async function GET(request: Request) {
-  if (!viewerAccountsConfigured()) return viewerAuthorizationError(503);
-  const viewer = await authenticateViewer(request);
-  if (!viewer) return viewerAuthorizationError();
+  const viewer = await dashboardViewer(request);
+  if (!viewer) return viewerAuthorizationError(dashboardAuthConfigured() ? 401 : 503);
   try {
     const kind = normalizeKind(new URL(request.url).searchParams.get("kind"));
     const target = WORKBOOK_TARGETS[kind];

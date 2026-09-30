@@ -27,9 +27,19 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
 
-# env files (can opt-in for committing if needed)
+# local environment files and secrets
 .env*
+!.env.example
+.dev.vars*
+
+# local credentials and private keys
+/credentials/
+/secrets/
+*.key
+*.p12
+*.pfx
 
 # vercel
 .vercel

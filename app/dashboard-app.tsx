@@ -1,6 +1,11 @@
 "use client";
 
 import Image from "next/image";
+import { AssistantHome } from "./components/assistant-home";
+import { DashboardActionBand } from "./components/dashboard-action-band";
+import { DemoUserControl } from "./components/demo-user-control";
+import { FeishuShareDialog, type FeishuSharePreview } from "./components/feishu-share-dialog";
+import { PresentationLogin } from "./components/presentation-login";
 import {
   Activity,
   ArrowLeft,
@@ -14,12 +19,11 @@ import {
   FileSpreadsheet,
   Filter,
   Info,
-  Languages,
   Layers3,
   LockKeyhole,
+  LogOut,
   MapPin,
   PackageCheck,
-  Printer,
   RotateCcw,
   Search,
   ShieldCheck,
@@ -27,6 +31,7 @@ import {
   Target,
   TrendingUp,
   Upload,
+  UsersRound,
   X,
 } from "lucide-react";
 import {
@@ -66,7 +71,6 @@ import {
 } from "./lib/seller-monitoring";
 import {
   DASHBOARD_LANGUAGES,
-  bilingualDashboardText,
   dashboardHtmlLang,
   dashboardLocale,
   isDashboardLanguage,
@@ -75,7 +79,7 @@ import {
   type DashboardTranslator,
 } from "./lib/i18n";
 import type { ParsedWorkbook, WorkbookRow } from "./lib/workbook";
-import { buildDamageData, type DamageData, type DamageRecord } from "./lib/damage";
+import { buildDamageData, type DamageData } from "./lib/damage";
 import { MOVEMENT_SUMMARY_METRICS, selectMovementSummaryMetric } from "./lib/movement-summary";
 import { summarizeTaxaPeriod } from "./lib/taxa-summary";
 import {
@@ -84,6 +88,12 @@ import {
   monitoringCollectionRate,
 } from "./lib/monitoring-formulas";
 import { extractSpecialSellerCodes } from "./lib/special-sellers";
+import {
+  DASHBOARD_DEMO_FIXTURES,
+  DEMO_WORKBOOK_NAME,
+  scopeDemoSellerReference,
+  scopeDemoWorkbook,
+} from "./lib/demo-fixtures";
 import {
   buildResponsibilityData,
   matchesResponsibility,
@@ -124,6 +134,11 @@ const SELLER_REGIONAL_RATE_TARGET = 0.98;
 const MONITORING_METRIC_OPTIONS = ["Previsto a coletar", "Aguardando coleta", "Coletado"] as const;
 type MonitoringMetric = (typeof MONITORING_METRIC_OPTIONS)[number];
 const DASHBOARD_LANGUAGE_STORAGE_KEY = "jt-dashboard-language";
+const LOCAL_DASHBOARD_DEMO_MODE = (import.meta as ImportMeta & {
+  env: { DEV: boolean; VITE_DASHBOARD_DEMO_MODE?: string };
+}).env.DEV && (import.meta as ImportMeta & {
+  env: { DEV: boolean; VITE_DASHBOARD_DEMO_MODE?: string };
+}).env.VITE_DASHBOARD_DEMO_MODE === "true";
 const MODULE_IMPORT_RELOAD_PARAMETER = "module_refresh";
 const MODULE_IMPORT_FAILURE_PATTERN = /importing a module script failed|failed to fetch dynamically imported module|error loading dynamically imported module|loading chunk .+ failed/i;
 
@@ -186,6 +201,43 @@ const MONITORING_STATUS_LABELS: Record<string, string> = {
 };
 
 type DashboardView = "home" | "monitoramento" | "taxa" | "epop" | "movimentacao" | "sellers" | "bipagem" | "damage";
+
+function selectedShareFilter(
+  selected: ReadonlySet<string>,
+  options: readonly string[],
+  allLabel: string,
+  t: DashboardTranslator,
+) {
+  if (options.length > 0 && selected.size >= options.length) return t(allLabel);
+  if (selected.size === 0) return t("Nenhum selecionado");
+  const values = [...selected];
+  return values.length <= 4 ? values.join(", ") : t("{count} selecionados", { count: values.length });
+}
+const FEISHU_COOKIE_SESSION = "feishu-cookie-session";
+const FEISHU_AUTH_ERROR_MESSAGES: Record<string, string> = {
+  feishu_not_configured: "Configure o App ID, o App Secret, o callback e a chave de sessão no arquivo local de variáveis.",
+  feishu_access_denied: "Não foi possível vincular esta identidade Feishu a uma conta local.",
+  feishu_consent_denied: "O acesso foi recusado no Feishu. Autorize o aplicativo e tente novamente.",
+  feishu_email_missing: "O Feishu não forneceu um e-mail para esta conta. Peça ao administrador a permissão de e-mail necessária.",
+  feishu_identity_incomplete: "O Feishu não retornou a organização e a identidade necessárias para o login.",
+  feishu_token_exchange_failed: "O Feishu não aceitou a troca do código. Confira o App ID, App Secret e callback cadastrados.",
+  feishu_token_credentials_invalid: "O Feishu não reconheceu as credenciais. Confirme se App ID e App Secret são do mesmo aplicativo.",
+  feishu_token_grant_invalid: "O Feishu recusou o código de autorização. Inicie um novo login e confira callback e PKCE no aplicativo.",
+  feishu_token_pkce_invalid: "O Feishu rejeitou a validação PKCE. Inicie um login novo e confira a configuração OAuth do aplicativo.",
+  feishu_token_redirect_invalid: "O callback enviado ao Feishu não corresponde ao autorizado no aplicativo. Confira a URL cadastrada.",
+  feishu_token_code_expired_or_used: "O código de autorização expirou ou já foi usado. Inicie o login novamente e conclua sem reutilizar a página anterior.",
+  feishu_token_app_unauthorized: "O aplicativo Feishu não está autorizado a usar este fluxo OAuth. Confira as configurações do aplicativo.",
+  feishu_token_request_invalid: "O Feishu rejeitou os parâmetros OAuth. Confira o callback e a configuração PKCE do aplicativo.",
+  feishu_token_response_invalid: "O Feishu respondeu sem um token utilizável. Confira a versão e as configurações OAuth do aplicativo.",
+  feishu_user_info_failed: "O token foi recebido, mas o Feishu não retornou o perfil. Confira as permissões básicas e de e-mail do aplicativo.",
+  feishu_user_provision_failed: "Não foi possível salvar a conta no banco local de autenticação.",
+  feishu_session_failed: "A conta foi validada, mas não foi possível criar a sessão local.",
+  feishu_state_invalid: "O estado do login Feishu expirou ou não corresponde a este navegador. Inicie novamente.",
+  feishu_storage_not_ready: "O banco local de autenticação não está pronto. Aplique o SQL local aprovado e tente novamente.",
+  feishu_callback_mismatch: "O callback não corresponde a este endereço local. Abra a plataforma em http://localhost:3000.",
+  feishu_local_only: "O login Feishu deste ambiente está disponível somente no desenvolvimento local.",
+  feishu_auth_failed: "Não foi possível concluir o login Feishu. Tente novamente.",
+};
 type BipagemProblemType = "collection" | "receipt";
 type SellerTier = SellerCategory;
 type UploadKind = "monitoring" | "taxa" | "epop" | "movement" | "sellerList" | "sellerSpecialList" | "sellerPerformance" | "bipagem" | "damage";
@@ -498,6 +550,7 @@ interface ViewerIdentity {
   username: string;
   role: "matrix" | "regional";
   region: string | null;
+  base: string | null;
 }
 
 interface StatusSummary {
@@ -2015,13 +2068,29 @@ function BilingualText({
   values?: Record<string, string | number>;
   language: DashboardLanguage;
 }) {
-  if (language !== "pt") return <>{translateDashboardText(language, source, values)}</>;
-  const { portuguese, mandarin } = bilingualDashboardText(source, values);
+  return <>{translateDashboardText(language, source, values)}</>;
+}
+
+function LanguageSwitcher({ language, onChange, t }: {
+  language: DashboardLanguage;
+  onChange: (nextLanguage: DashboardLanguage) => void;
+  t: DashboardTranslator;
+}) {
   return (
-    <span className="bilingual-text">
-      <span className="bilingual-pt">{portuguese}</span>
-      {mandarin ? <span className="bilingual-zh">{mandarin}</span> : null}
-    </span>
+    <div className="presentation-language-switcher" role="group" aria-label={t("Selecionar idioma")}>
+      {DASHBOARD_LANGUAGES.map((option) => (
+        <button
+          type="button"
+          key={option.code}
+          className={language === option.code ? "active" : ""}
+          aria-pressed={language === option.code}
+          aria-label={t(option.code === "pt" ? "Português" : option.code === "zh" ? "Chinês simplificado" : "Inglês")}
+          onClick={() => onChange(option.code)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -2122,102 +2191,18 @@ function EmptyChart({ message }: { message: string }) {
   );
 }
 
-function DashboardHome({
-  onSelect,
-  monitoringUpdatedAt,
-  taxaUpdatedAt,
-  movementUpdatedAt,
-  sellersUpdatedAt,
-  bipagemUpdatedAt,
-  damageUpdatedAt,
-  language,
-  t,
-}: {
-  onSelect: (view: Exclude<DashboardView, "home">) => void;
-  monitoringUpdatedAt?: string;
-  taxaUpdatedAt?: string;
-  movementUpdatedAt?: string;
-  sellersUpdatedAt?: string;
-  bipagemUpdatedAt?: string;
-  damageUpdatedAt?: string;
-  language: DashboardLanguage;
-  t: DashboardTranslator;
-}) {
-  return (
-    <section className="home-panel" aria-labelledby="home-title">
-      <div className="home-copy">
-        <div className="eyebrow"><Activity size={15} /> {t("Central operacional")}</div>
-        <h1 id="home-title">{t("DASH BOARD - MONITORAMENTO DE COLETA")}</h1>
-        <p>{t("Selecione qual painel deseja abrir. Cada painel mantém sua última planilha publicada para todos que acessarem o link.")}</p>
-        <small className="home-upload-note">{t("Aguardando dados publicados · Carregar arquivo Excel dentro do painel escolhido.")}</small>
-      </div>
-      <div className="home-actions-grid">
-        <button type="button" className="home-action-card" onClick={() => onSelect("monitoramento")}>
-          <span className="home-action-icon"><PackageCheck size={28} /></span>
-          <span className="card-eyebrow">{t("OPERAÇÃO")}</span>
-          <strong>{t("Monitoramento de coleta")}</strong>
-          <small>{t("Pedidos parados por regional, base, status e período.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(monitoringUpdatedAt) })}</em>
-        </button>
-        <button type="button" className="home-action-card accent" onClick={() => onSelect("taxa")}>
-          <span className="home-action-icon"><Target size={28} /></span>
-          <span className="card-eyebrow">{t("PERFORMANCE")}</span>
-          <strong>{t("Taxa de coleta")}</strong>
-          <small>{t("Taxa de coleta, tentativa, origem do pedido e performance por regional.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(taxaUpdatedAt) })}</em>
-        </button>
-        <button type="button" className="home-action-card accent" onClick={() => onSelect("epop")}>
-          <span className="home-action-icon"><Check size={28} /></span>
-          <span className="card-eyebrow">EPOP / ePOD</span>
-          <strong>{t("Cobertura EPOP")}</strong>
-          <small>{t("Comprovantes EPOP por regional, base e seller TikTok.")}</small>
-          <em>{t("Última atualização: {date}", { date: "—" })}</em>
-        </button>
-        <button type="button" className="home-action-card sellers" onClick={() => onSelect("sellers")}>
-          <span className="home-action-icon"><ShieldCheck size={28} /></span>
-          <span className="card-eyebrow">{t("SELLERS J&T 重点保障")}</span>
-          <strong>{t("Monitoramento J&T 重点保障")}</strong>
-          <small>{t("Processamento por seller, categoria, regional e base com foco nos sellers importantes.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(sellersUpdatedAt) })}</em>
-        </button>
-        <button type="button" className="home-action-card movement" onClick={() => onSelect("movimentacao")}>
-          <span className="home-action-icon"><CircleAlert size={28} /></span>
-          <span className="card-eyebrow">{t("MOVIMENTAÇÃO")}</span>
-          <strong>{t("Sem movimentação")}</strong>
-          <small>{t("Pedidos sem movimentação por AGING, regional, RM, base, status, origem e período.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(movementUpdatedAt) })}</em>
-        </button>
-        <button type="button" className="home-action-card accent" onClick={() => onSelect("bipagem")}>
-          <span className="home-action-icon"><CircleAlert size={28} /></span>
-          <span className="card-eyebrow">PDD</span>
-          <strong>{t("Falha na coleta PDD")}</strong>
-          <small>{t("Volume a digitalizar, falhas na coleta e taxa por regional, RM e RGM.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(bipagemUpdatedAt) })}</em>
-        </button>
-        <button type="button" className="home-action-card movement" onClick={() => onSelect("damage")}>
-          <span className="home-action-icon"><CircleAlert size={28} /></span>
-          <span className="card-eyebrow">{t("QUALIDADE")}</span>
-          <strong><BilingualText language={language} source="Extravio" /></strong>
-          <small>{t("Pedidos, valor de arbitragem, RM/RGM, base, origem e motivos.")}</small>
-          <em>{t("Última atualização: {date}", { date: formatDateTime(damageUpdatedAt) })}</em>
-        </button>
-      </div>
-    </section>
-  );
-}
-
 export function DashboardApp() {
   const [language, setLanguage] = useState<DashboardLanguage>("pt");
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
   const [viewerChecked, setViewerChecked] = useState(false);
-  const [viewerUsername, setViewerUsername] = useState("");
-  const [viewerPassword, setViewerPassword] = useState("");
   const [viewerAuthError, setViewerAuthError] = useState<string | null>(null);
   const [viewerAuthLoading, setViewerAuthLoading] = useState(false);
   const [view, setView] = useState<DashboardView>("home");
+  const [showUserControl, setShowUserControl] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisCopied, setAnalysisCopied] = useState(false);
+  const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
   const [loaded, setLoaded] = useState<LoadedData | null>(null);
   const [selectedBases, setSelectedBases] = useState<Set<string>>(new Set());
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
@@ -2331,67 +2316,67 @@ export function DashboardApp() {
 
   useEffect(() => {
     let active = true;
-    const authorization = window.sessionStorage.getItem("jt-dashboard-viewer-authorization");
-    if (!authorization) {
-      const frame = window.requestAnimationFrame(() => setViewerChecked(true));
-      return () => window.cancelAnimationFrame(frame);
-    }
-    void fetch("/api/view-auth", { method: "POST", headers: { authorization } })
+    const authError = new URLSearchParams(window.location.search).get("authError");
+    void fetch("/api/view-auth", { method: "GET", cache: "no-store" })
       .then(async (response) => {
+        if (active && authError) setViewerAuthError(FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed);
         if (!response.ok) throw new Error("Sessão inválida");
         const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
         if (!active) return;
-        setViewerAuthorization(authorization);
+        setViewerAuthorization(FEISHU_COOKIE_SESSION);
         setViewerIdentity(identity);
       })
-      .catch(() => {
-        window.sessionStorage.removeItem("jt-dashboard-viewer-authorization");
-      })
+      .catch(() => {})
       .finally(() => {
         if (active) setViewerChecked(true);
       });
     return () => { active = false; };
   }, []);
 
-  const submitViewerLogin = useCallback(async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const submitDevelopmentViewerLogin = useCallback(async (username: string, password: string) => {
     setViewerAuthLoading(true);
     setViewerAuthError(null);
     try {
-      const authorization = `Basic ${window.btoa(`${viewerUsername}:${viewerPassword}`)}`;
+      const authorization = `Basic ${window.btoa(`${username}:${password}`)}`;
       const response = await fetch("/api/view-auth", { method: "POST", headers: { authorization } });
-      if (!response.ok) throw new Error("Usuário ou senha inválidos.");
+      if (!response.ok) throw new Error(response.status === 503 ? "O acesso local ainda não está configurado." : "Usuário ou senha inválidos.");
       const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
-      window.sessionStorage.setItem("jt-dashboard-viewer-authorization", authorization);
       setViewerAuthorization(authorization);
       setViewerIdentity(identity);
-      setViewerPassword("");
       setError(null);
     } catch (cause) {
       setViewerAuthError(cause instanceof Error ? cause.message : "Usuário ou senha inválidos.");
     } finally {
       setViewerAuthLoading(false);
     }
-  }, [viewerPassword, viewerUsername]);
+  }, []);
 
   const endViewerSession = useCallback(() => {
-    window.sessionStorage.removeItem("jt-dashboard-viewer-authorization");
+    void fetch("/api/logout", { method: "POST" }).catch(() => {});
     setViewerAuthorization(null);
     setViewerIdentity(null);
-    setViewerUsername("");
     setLoaded(null);
     setTaxaLoaded(null);
+    setEpopLoaded(null);
     setMovementLoaded(null);
     setSellerPerformanceLoaded(null);
     setSellerReferenceLoaded(null);
     setSpecialSellerLoaded(null);
     setResponsibilityLoaded(null);
     setBipagemLoaded(null);
+    setDamageLoaded(null);
     uploadAuthorizationRef.current = null;
     setUploadAuthorization(null);
     setPendingUpload(null);
     setUploadLoginOpen(false);
     setView("home");
+    setShowUserControl(false);
+  }, []);
+
+  const startFeishuLogin = useCallback(() => {
+    setViewerAuthError(null);
+    setViewerAuthLoading(true);
+    window.location.assign("/api/auth/feishu/login");
   }, []);
 
   const changeLanguage = useCallback((nextLanguage: DashboardLanguage) => {
@@ -2585,6 +2570,7 @@ export function DashboardApp() {
 
     async function loadSavedWorkbook() {
       if (!viewerAuthorization) return;
+      const authorizationHeaders = viewerAuthorization === FEISHU_COOKIE_SESSION ? {} : { authorization: viewerAuthorization };
       let primaryWorkbookLoaded = false;
       setLoading(true);
       setTaxaLoading(true);
@@ -2593,9 +2579,60 @@ export function DashboardApp() {
       setBipagemLoading(true);
       setDamageLoading(true);
       try {
+        if (LOCAL_DASHBOARD_DEMO_MODE) {
+          if (!viewerIdentity) throw new Error("Não foi possível confirmar o escopo de acesso para a demonstração.");
+          const demoUpdatedAt = "2026-09-23T12:00:00.000Z";
+          const fixtures = DASHBOARD_DEMO_FIXTURES;
+          const responsibilityParsed = scopeDemoWorkbook(fixtures.responsibilityList, viewerIdentity);
+          if (responsibilityParsed.rows.length === 0) {
+            throw new Error("Não há dados simulados compatíveis com o escopo desta conta.");
+          }
+          const responsibility = buildResponsibilityData(responsibilityParsed, DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const monitoring = buildLoadedData(scopeDemoWorkbook(fixtures.monitoring, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const taxa = buildTaxaLoadedData(scopeDemoWorkbook(fixtures.taxa, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const epop = buildEpopLoadedData(scopeDemoWorkbook(fixtures.epop, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const sellerPerformanceParsed = scopeDemoWorkbook(fixtures.sellerPerformance, viewerIdentity);
+          const sellerListParsed = scopeDemoSellerReference(fixtures.sellerList, sellerPerformanceParsed, viewerIdentity, false);
+          const specialSellerParsed = scopeDemoSellerReference(fixtures.sellerSpecialList, sellerPerformanceParsed, viewerIdentity, true);
+          const specialSeller = buildSpecialSellerData(specialSellerParsed, DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const sellerReference = mergeSellerReferenceData(
+            buildSellerReferenceData(sellerListParsed, DEMO_WORKBOOK_NAME, demoUpdatedAt),
+            specialSeller,
+          );
+          const sellerPerformance = buildSellerPerformanceData(
+            sellerPerformanceParsed,
+            sellerReference,
+            DEMO_WORKBOOK_NAME,
+            demoUpdatedAt,
+          );
+          const bipagem = buildBipagemLoadedData(scopeDemoWorkbook(fixtures.bipagem, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          const damage = buildDamageData(scopeDemoWorkbook(fixtures.damage, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+
+          setResponsibilityLoaded(responsibility);
+          setSelectedRms(new Set([...responsibility.rms, UNASSIGNED_RM]));
+          setSelectedRgms(new Set([...responsibility.rgms, UNASSIGNED_RGM]));
+          setSpecialSellerLoaded(specialSeller);
+          setSellerReferenceLoaded(sellerReference);
+          applyLoadedData(monitoring, responsibility);
+          applyTaxaLoadedData(taxa, responsibility);
+          setEpopLoaded(epop);
+          setEpopSelectedRegions(new Set(epop.regions));
+          setEpopSelectedBases(new Set(epop.bases));
+          setEpopDateStart(epop.dates[0] ?? "");
+          setEpopDateEnd(epop.dates.at(-1) ?? "");
+          applyMovementLoadedData(movement, responsibility);
+          applySellerPerformanceLoadedData(sellerPerformance, responsibility);
+          applyBipagemLoadedData(bipagem, responsibility);
+          applyDamageLoadedData(damage, responsibility);
+          setError(null);
+          primaryWorkbookLoaded = true;
+          return;
+        }
+
         const fetchOptionalWorkbook = async (kind: string): Promise<Response | null> => {
           try {
-            return await fetch(`/api/workbook?kind=${kind}`, { cache: "no-store", headers: { authorization: viewerAuthorization } });
+            return await fetch(`/api/workbook?kind=${kind}`, { cache: "no-store", headers: authorizationHeaders });
           } catch {
             return null;
           }
@@ -2610,7 +2647,7 @@ export function DashboardApp() {
           const workbooks: ParsedWorkbook[] = [];
           for (const part of parts) {
             const partResponse = await fetch(`/api/workbook?kind=${kind}&part=${encodeURIComponent(part)}`, {
-              cache: "no-store", headers: { authorization: viewerAuthorization },
+              cache: "no-store", headers: authorizationHeaders,
             });
             const partPayload = (await partResponse.json()) as SavedWorkbookResponse;
             if (!partResponse.ok || !partPayload.workbook) throw new Error("Não foi possível carregar uma parte do histórico de taxa.");
@@ -2623,7 +2660,7 @@ export function DashboardApp() {
         let payload: SavedWorkbookResponse | null = null;
         for (let attempt = 0; attempt < 3 && !payload; attempt += 1) {
           try {
-            const monitoringResponse = await fetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: { authorization: viewerAuthorization } });
+            const monitoringResponse = await fetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
             if (!monitoringResponse.ok) throw new Error("Não foi possível carregar a última atualização.");
             payload = (await monitoringResponse.json()) as SavedWorkbookResponse;
           } catch (cause) {
@@ -2801,7 +2838,7 @@ export function DashboardApp() {
     return () => {
       active = false;
     };
-  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, viewerAuthorization, viewerIdentity?.region]);
+  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
 
   const loadFile = useCallback(async (file: File) => {
     setError(null);
@@ -3222,6 +3259,10 @@ export function DashboardApp() {
 
   const queueUpload = useCallback((upload: PendingUpload) => {
     if (viewerIdentity?.role !== "matrix") return;
+    if (LOCAL_DASHBOARD_DEMO_MODE) {
+      setError("O envio de planilhas está desativado no modo de demonstração.");
+      return;
+    }
     if (uploadAuthorizationRef.current) {
       void runUpload(upload);
       return;
@@ -4835,6 +4876,107 @@ export function DashboardApp() {
   }, [responsibilityLoaded, sellerFilteredRecords, sellerPeriod, sellerRowsBySeller]);
   const analysisText = view === "sellers" ? sellerAnalysisText : view === "movimentacao" ? movementAnalysisText : baseAnalysisText;
 
+  const currentPanelShareFilters = () => {
+    const line = (label: string, selected: ReadonlySet<string>, options: readonly string[], allLabel: string) =>
+      `${t(label)}: ${selectedShareFilter(selected, options, allLabel, t)}`;
+    const period = (start: string, end: string) => `${t("Período")}: ${formatPeriod(start, end)}`;
+    if (view === "damage") return [
+      period(damageDateStart, damageDateEnd),
+      line("Regional", damageSelectedRegions, damageRegionOptions, "Todas as regionais"),
+      line("RM", damageSelectedRms, damageRmOptions, "Todos os RM"),
+      line("RGM", damageSelectedRgms, damageRgmOptions, "Todos os RGM"),
+      line("Base", damageSelectedBases, damageBaseOptions, "Todas as bases"),
+    ];
+    if (view === "bipagem") return [
+      period(bipagemDateStart, bipagemDateEnd),
+      line("Regional", bipagemSelectedRegions, bipagemRegionOptions, "Todas as regionais"),
+      line("RM", bipagemSelectedRms, bipagemRmOptions, "Todos os RM"),
+      line("RGM", bipagemSelectedRgms, bipagemRgmOptions, "Todos os RGM"),
+      line("Base", bipagemSelectedBases, bipagemBaseOptions, "Todas as bases"),
+      ...(bipagemLoaded ? [line("Origem do pedido", bipagemSelectedOrigins, bipagemLoaded.origins, "Todas as origens")] : []),
+    ];
+    if (view === "movimentacao") return [
+      period(movementDateStart, movementDateEnd),
+      line("Regional", movementSelectedRegions, movementRegionOptions, "Todas as regionais"),
+      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("Base", movementSelectedBases, movementBaseOptions, "Todas as bases"),
+      ...(movementLoaded ? [
+        line("Origem do pedido", movementSelectedOrigins, movementLoaded.origins, "Todas as origens"),
+        line("Status", movementSelectedStatuses, movementLoaded.statuses, "Todos os status"),
+        line("AGING", movementSelectedAgings, movementLoaded.agings, "Todos os AGING"),
+      ] : []),
+    ];
+    if (view === "sellers") return [
+      period(sellerDateStart, sellerDateEnd),
+      line("Regional", sellerSelectedRegions, sellerRegionOptions, "Todas as regionais"),
+      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("Base", sellerSelectedBases, sellerBaseOptions, "Todas as bases"),
+      line("Categoria", sellerSelectedTiers, SELLER_CATEGORIES, "Todas as categorias"),
+      line("Seller", sellerSelectedSellers, sellerOptionList, "Todos os sellers"),
+    ];
+    if (view === "epop" && epopLoaded) return [
+      period(epopDateStart, epopDateEnd),
+      line("Regional", epopSelectedRegions, epopLoaded.regions, "Todas as regionais"),
+      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("Base", epopSelectedBases, epopLoaded.bases, "Todas as bases"),
+    ];
+    if (view === "taxa") return [
+      period(taxaDateStart, taxaDateEnd),
+      line("Regional", taxaSelectedRegions, taxaRegionOptions, "Todas as regionais"),
+      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("Base", taxaSelectedBases, taxaBaseOptions, "Todas as bases"),
+      ...(taxaLoaded ? [line("Origem do pedido", taxaSelectedOrigins, taxaLoaded.origins, "Todas as origens")] : []),
+      line("Região do RM", taxaSelectedRmAreas, taxaRmAreaOptions, "Todas as regiões do RM"),
+    ];
+    return [
+      period(dateStart, dateEnd),
+      line("Regional", selectedRegions, monitoringRegionOptions, "Todas as regionais"),
+      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("Base", selectedBases, baseOptions, "Todas as bases"),
+      ...(loaded ? [
+        line("Origem do pedido", selectedOrigins, loaded.origins, "Todas as origens"),
+        line("Status", selectedStatuses, loaded.statuses, "Todos os status"),
+      ] : []),
+    ];
+  };
+  const openPanelFeishuShare = () => {
+    const panelNames: Record<Exclude<DashboardView, "home">, string> = {
+      monitoramento: "Monitoramento de coleta",
+      taxa: "Taxa de coleta",
+      epop: "Cobertura EPOP",
+      movimentacao: "Sem movimentação",
+      sellers: "Monitoramento de sellers prioritários J&T",
+      bipagem: "Falha na coleta PDD",
+      damage: "Extravio",
+    };
+    const contentAvailable = ["taxa", "movimentacao", "sellers", "bipagem"].includes(view) && Boolean(analysisText.trim());
+    setFeishuSharePreview({
+      title: t(panelNames[view === "home" ? "monitoramento" : view]),
+      filters: currentPanelShareFilters(),
+      content: contentAvailable ? analysisText : "",
+      contentAvailable,
+    });
+  };
+  const reportGeneratedAt = formatDateTime(new Date().toISOString());
+  const handlePrintReport = () => {
+    window.setTimeout(() => window.print(), 30);
+  };
+  const dashboardActionBand = (
+    <DashboardActionBand
+      reportDate={reportGeneratedAt}
+      demoMode={LOCAL_DASHBOARD_DEMO_MODE}
+      onPrint={handlePrintReport}
+      onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
+      onShare={openPanelFeishuShare}
+      t={t}
+    />
+  );
+
   const downloadMonitoringTableExcel = useCallback(async () => {
     if (tableRows.length === 0) return;
     try {
@@ -5482,39 +5624,6 @@ export function DashboardApp() {
       bipagemDateStart === bipagemLoaded.dates[0] &&
       bipagemDateEnd === bipagemLoaded.dates[bipagemLoaded.dates.length - 1],
   );
-  const activeLoadedFile =
-    view === "damage"
-      ? damageLoaded
-      : view === "bipagem"
-      ? bipagemLoaded
-      : view === "taxa"
-      ? taxaLoaded
-      : view === "epop"
-      ? epopLoaded
-      : view === "movimentacao"
-        ? movementLoaded
-        : view === "sellers"
-          ? sellerPerformanceLoaded ?? sellerReferenceLoaded
-          : loaded;
-  const activeUploadId =
-    view === "damage"
-      ? "damage-upload"
-      : view === "bipagem"
-      ? "bipagem-upload"
-      : view === "taxa"
-      ? "taxa-upload"
-      : view === "epop"
-      ? "epop-upload"
-      : view === "movimentacao"
-        ? "movement-upload"
-        : view === "sellers"
-          ? "seller-performance-upload"
-          : "monitoring-upload";
-  const activeLoading = view === "damage" ? damageLoading : view === "bipagem" ? bipagemLoading : view === "taxa" ? taxaLoading : view === "epop" ? epopLoading : view === "movimentacao" ? movementLoading : view === "sellers" ? sellerLoading : loading;
-  const reportGeneratedAt = formatDateTime(new Date().toISOString());
-  const handlePrintReport = () => {
-    window.setTimeout(() => window.print(), 30);
-  };
   const taxaGeneralTrendPanel = (
     <div className="general-rate-trend-block taxa-general-aligned-panel">
       <div className="critical-bases-heading">
@@ -5603,24 +5712,13 @@ export function DashboardApp() {
 
   if (!viewerChecked || !viewerAuthorization || !viewerIdentity) {
     return (
-      <main className="viewer-login-page">
-        <section className="viewer-login-card" aria-labelledby="viewer-login-title">
-          <Image src="/jnt-logo.png" alt="J&T Express" width={189} height={41} priority />
-          <span className="viewer-login-icon"><LockKeyhole size={25} /></span>
-          <h1 id="viewer-login-title">{t("Acesso ao dashboard")}</h1>
-          <p>{t("Entre para visualizar os indicadores da sua regional.")}</p>
-          {!viewerChecked ? <p className="viewer-login-checking">{t("Verificando...")}</p> : (
-            <form onSubmit={submitViewerLogin}>
-              <label htmlFor="viewer-username">{t("Usuário")}</label>
-              <input id="viewer-username" autoComplete="username" value={viewerUsername} onChange={(event) => setViewerUsername(event.target.value)} required />
-              <label htmlFor="viewer-password">{t("Senha")}</label>
-              <input id="viewer-password" type="password" autoComplete="current-password" value={viewerPassword} onChange={(event) => setViewerPassword(event.target.value)} required />
-              {viewerAuthError ? <p className="viewer-login-error" role="alert">{t(viewerAuthError)}</p> : null}
-              <button type="submit" disabled={viewerAuthLoading}>{viewerAuthLoading ? t("Verificando...") : t("Entrar")}</button>
-            </form>
-          )}
-        </section>
-      </main>
+      <PresentationLogin
+        error={!viewerChecked ? null : viewerAuthError ? t(viewerAuthError) : null}
+        loading={viewerAuthLoading}
+        showDevelopmentLogin={process.env.NODE_ENV === "development"}
+        onFeishuLogin={startFeishuLogin}
+        onDevelopmentLogin={submitDevelopmentViewerLogin}
+      />
     );
   }
 
@@ -5693,87 +5791,26 @@ export function DashboardApp() {
         disabled={damageLoading}
       />
 
-      <header className="brand-header">
-        <div className="header-inner">
-          <div className="brand-block">
-            <Image src="/jnt-logo.png" alt="J&T Express" width={189} height={41} priority />
-            <span className="brand-divider" aria-hidden="true" />
-            <div>
-              <strong>{t("Monitoramento de Coletas")}</strong>
-              <span>{t("Inteligência operacional")}</span>
-            </div>
-          </div>
-          <div className="header-actions">
-            <button type="button" className="viewer-session-chip" onClick={endViewerSession} title={t("Sair do dashboard")}>
-              <LockKeyhole size={15} /> {viewerIdentity.region ? `${t("Regional")} ${viewerIdentity.region}` : t("Matriz")} · {t("Sair")}
+      <header className="presentation-home-header">
+        <div className="presentation-home-header-inner">
+          <Image src="/jnt-logo.png" alt="J&T Express" width={375} height={50} priority />
+          <div className="presentation-header-actions">
+            {view === "home" && LOCAL_DASHBOARD_DEMO_MODE ? <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button> : null}
+            <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
+            <button className="presentation-logout-button" type="button" onClick={endViewerSession}>
+              <LogOut size={18} /> {t("Sair")}
             </button>
-            <label className="language-selector">
-              <Languages size={16} aria-hidden="true" />
-              <span className="sr-only">{t("Idioma")}</span>
-              <select
-                value={language}
-                onChange={(event) => {
-                  const nextLanguage = event.target.value;
-                  if (isDashboardLanguage(nextLanguage)) changeLanguage(nextLanguage);
-                }}
-                aria-label={t("Selecionar idioma")}
-              >
-                {DASHBOARD_LANGUAGES.map((option) => (
-                  <option value={option.code} key={option.code}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            {view !== "home" ? (
-              <button type="button" className="header-back-button" onClick={() => setView("home")}>
-                <ArrowLeft size={17} /> {t("Início")}
-              </button>
-            ) : null}
-            {activeLoadedFile ? (
-              <div className="loaded-file" title={activeLoadedFile.fileName}>
-                <FileSpreadsheet size={17} />
-                <span>{activeLoadedFile.fileName}</span>
-              </div>
-            ) : (
-              <div className="secure-chip"><ShieldCheck size={16} /> {t("Dados protegidos")}</div>
-            )}
-            {view !== "home" && activeLoadedFile ? (
-              <div className="report-generated-chip">
-                <CalendarDays size={16} />
-                <span>{t("Relatório gerado em: {date}", { date: reportGeneratedAt })}</span>
-              </div>
-            ) : null}
-            {view !== "home" && activeLoadedFile ? (
-              <button type="button" className="header-report-button" onClick={handlePrintReport}>
-                <Printer size={17} /> {t("Gerar PDF")}
-              </button>
-            ) : null}
-            {view !== "home" && activeLoadedFile ? (
-              <button type="button" className="header-report-button" onClick={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}>
-                <Sparkles size={17} /> {t("Análise IA")}
-              </button>
-            ) : null}
-            {uploadAuthorization ? (
-              <button
-                type="button"
-                className="upload-session-chip"
-                onClick={() => {
-                  uploadAuthorizationRef.current = null;
-                  setUploadAuthorization(null);
-                  setUploadUsername("");
-                }}
-                title={t("Encerrar autorização de upload")}
-              >
-                <LockKeyhole size={15} /> {t("Upload autorizado")}
-              </button>
-            ) : null}
-            {view !== "home" && viewerIdentity.role === "matrix" ? (
-              <label className="header-upload-button" htmlFor={activeUploadId}>
-                <Upload size={17} /> {t(activeLoading ? "Processando..." : view === "taxa" ? "Adicionar planilha(s)" : view === "epop" ? "Adicionar relatório EPOP" : "Carregar arquivo Excel")}
-              </label>
-            ) : null}
           </div>
         </div>
       </header>
+
+      {view !== "home" || showUserControl ? (
+        <div className="dashboard-back-row">
+          <button className="dashboard-back-link" type="button" onClick={() => { setView("home"); setShowUserControl(false); }}>
+            <ArrowLeft size={17} /> {t("Voltar para o início")}
+          </button>
+        </div>
+      ) : null}
 
       {uploadLoginOpen ? (
         <div
@@ -5842,22 +5879,15 @@ export function DashboardApp() {
         </div>
       ) : null}
 
-      <main className="dashboard-main">
+      <FeishuShareDialog preview={feishuSharePreview} onClose={() => setFeishuSharePreview(null)} t={t} />
+
+      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : "dashboard-main"}>
         {view === "home" ? (
-          <DashboardHome
-            onSelect={(nextView) => {
-              setError(null);
-              setView(nextView);
-            }}
-            monitoringUpdatedAt={loaded?.updatedAt}
-            taxaUpdatedAt={taxaLoaded?.updatedAt}
-            movementUpdatedAt={movementLoaded?.updatedAt}
-            sellersUpdatedAt={sellerPerformanceLoaded?.updatedAt ?? sellerReferenceLoaded?.updatedAt}
-            bipagemUpdatedAt={bipagemLoaded?.updatedAt}
-            damageUpdatedAt={damageLoaded?.updatedAt}
-            language={language}
-            t={t}
-          />
+          showUserControl ? <DemoUserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
+            setError(null);
+            setView(nextView);
+            setShowUserControl(false);
+          }} />
         ) : view === "damage" ? (
           !damageLoaded ? (
             <EmptyDashboardPanel loading={damageLoading} error={error} onDrop={(file) => queueUpload({ kind: "damage", files: [file] })} inputId="damage-upload" t={t} />
@@ -5867,6 +5897,7 @@ export function DashboardApp() {
                 <div><div className="eyebrow"><CircleAlert size={15} /> {t("QUALIDADE OPERACIONAL")}</div><h1><BilingualText language={language} source="Extravio" /></h1><p>{t("Pedidos avariados e extraviados, valor de arbitragem em reais, responsáveis, bases, origem e principais motivos.")}</p></div>
                 <div className="dataset-meta"><span><Layers3 size={16} /> {t("{count} linhas", { count: formatNumber(damageRecords.length) })}</span><span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(damageRegionOptions.length) })}</span><span><Database size={16} /> {t("{count} bases", { count: formatNumber(damageBaseOptions.length) })}</span><span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(damageLoaded.updatedAt) })}</span></div>
               </section>
+              {dashboardActionBand}
               {error ? <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{t(error)}</span><button type="button" onClick={() => setError(null)} aria-label={t("Fechar aviso")}><X size={16} /></button></div> : null}
               <section className="filters-card taxa-filters-card" aria-labelledby="damage-filters-heading"><div className="filters-card-top"><h2 id="damage-filters-heading"><Filter size={18} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={() => applyDamageLoadedData(damageLoaded, responsibilityLoaded)}><RotateCcw size={15} /> {t("Limpar filtros")}</button></div><div className="filter-grid damage-filter-grid">
                 <MultiSelect label={t("Regional")} options={damageRegionOptions} selected={damageSelectedRegions} onChange={(next) => { const matching = damageLoaded.records.filter((r) => next.has(registeredRegionForBase(responsibilityLoaded, r.base, r.region))); setDamageSelectedRegions(next); setDamageSelectedRms(new Set(matching.map((r) => responsibilityForBase(responsibilityLoaded, r.base).rm))); setDamageSelectedRgms(new Set(matching.map((r) => responsibilityForBase(responsibilityLoaded, r.base).rgm))); setDamageSelectedBases(new Set(matching.map((r) => r.base))); }} allLabel={t("Todas as regionais")} singular={t("regional")} plural={t("regionais")} searchable t={t} />
@@ -5915,6 +5946,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(bipagemLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {dashboardActionBand}
 
               {error ? (
                 <div className="inline-alert error" role="alert">
@@ -6126,6 +6158,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {dashboardActionBand}
 
               {error ? (
                 <div className="inline-alert error" role="alert">
@@ -6587,6 +6620,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(sellerPerformanceLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {dashboardActionBand}
 
               {error ? (
                 <div className="inline-alert error" role="alert">
@@ -7187,6 +7221,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 </div>
               </section>
               <section className="dashboard-intro"><div><div className="eyebrow"><Check size={15} /> EPOP / ePOD</div><h1>{t("Cobertura EPOP")}</h1><p>{t("Brasil → Região RM → RM → Regional → Base → Seller")}</p></div><div className="dataset-meta"><span><Layers3 size={16} /> {t("{count} linhas", {count: formatNumber(epopLoaded.records.length)})}</span><span><CalendarDays size={16} /> {t("Última atualização: {date}", {date: formatDateTime(epopLoaded.updatedAt)})}</span></div></section>
+              {dashboardActionBand}
               {epopHistoryNotice ? <div className="inline-alert success" role="status"><Check size={18} /><span>{t("Histórico EPOP atualizado: {added} nova(s) data(s), {replaced} data(s) atualizada(s) e {total} data(s) disponíveis nos filtros.", { added: formatNumber(epopHistoryNotice.addedDates), replaced: formatNumber(epopHistoryNotice.replacedDates), total: formatNumber(epopHistoryNotice.totalDates) })}</span><button type="button" onClick={() => setEpopHistoryNotice(null)} aria-label={t("Fechar aviso")}><X size={16} /></button></div> : null}
               <section className="filters-card taxa-filters-card"><div className="filters-card-top"><h2><Filter size={18} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={() => { setEpopSelectedRegions(new Set(epopLoaded.regions)); setEpopSelectedBases(new Set(epopLoaded.bases)); setEpopDateStart(epopLoaded.dates[0] ?? ""); setEpopDateEnd(epopLoaded.dates.at(-1) ?? ""); }}><RotateCcw size={15} /> {t("Limpar filtros")}</button></div><div className="filter-grid taxa-filter-grid"><MultiSelect label={t("Regional")} options={epopLoaded.regions} selected={epopSelectedRegions} onChange={setEpopSelectedRegions} allLabel={t("Todas as regionais")} singular={t("regional")} plural={t("regionais")} searchable t={t}/><MultiSelect label={t("Base")} options={epopLoaded.bases.filter((base) => epopLoaded.records.some((row) => row.base === base && epopSelectedRegions.has(row.region)))} selected={epopSelectedBases} onChange={setEpopSelectedBases} allLabel={t("Todas as bases")} singular={t("base")} plural={t("bases")} searchable t={t}/><div className="filter-field date-field"><label className="filter-label">{t("Data inicial")}</label><div className="date-input-wrap"><CalendarDays size={16}/><input type="date" value={epopDateStart} onChange={(e) => setEpopDateStart(e.target.value)} /></div></div><div className="filter-field date-field"><label className="filter-label">{t("Data final")}</label><div className="date-input-wrap"><CalendarDays size={16}/><input type="date" value={epopDateEnd} onChange={(e) => setEpopDateEnd(e.target.value)} /></div></div></div></section>
               <section className="kpi-grid"><KpiCard icon={<Target size={20}/>} label={t("Taxa EPOP")} value={formatRate(rate)} detail={t("Meta: 100%")}/><KpiCard icon={<ShieldCheck size={20}/>} label={t("Sellers elegíveis")} value={formatNumber(eligible.length)} detail={t("有效商家数")}/><KpiCard icon={<Check size={20}/>} label={t("Sellers com EPOP")} value={formatNumber(withEpop.length)} detail={t("已有EPOP商家")} tone="orange"/><KpiCard icon={<CircleAlert size={20}/>} label={t("Sellers sem EPOP")} value={formatNumber(without.length)} detail={t("Gap para 100%: {count}", {count: formatNumber(without.length)})} tone="soft"/></section>
@@ -7288,6 +7323,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(taxaLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {dashboardActionBand}
 
               {error ? (
                 <div className="inline-alert error" role="alert">
@@ -7862,6 +7898,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <span><CalendarDays size={16} /> <BilingualText language={language} source="Última atualização: {date}" values={{ date: formatDateTime(loaded.updatedAt) }} /></span>
               </div>
             </section>
+            {dashboardActionBand}
 
             {error ? (
               <div className="inline-alert error" role="alert">
