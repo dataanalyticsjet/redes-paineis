@@ -1,0 +1,24 @@
+[Unit]
+Description=Redes Paineis frontend
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/redes-paineis
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+# Create this file outside the repository after checking a free port.
+# It should define FRONTEND_PORT with the selected numeric value.
+EnvironmentFile=/etc/redes-paineis/web.env
+ExecStart=/usr/bin/env PORT=${FRONTEND_PORT} pnpm start
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

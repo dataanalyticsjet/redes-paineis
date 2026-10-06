@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeTaxaHistory } from "../app/lib/taxa-history.ts";
-import { parseTabularData } from "../app/lib/workbook.ts";
+import { mergeTaxaHistory } from "../src/lib/taxa-history.ts";
+import { parseTabularData } from "../src/lib/workbook.ts";
 
 const headers = [
   "Horário de término do prazo de coleta",

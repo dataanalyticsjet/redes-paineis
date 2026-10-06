@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { extractSpecialSellerCodes } from "../app/lib/special-sellers.ts";
-import type { ParsedWorkbook } from "../app/lib/workbook.ts";
+import { extractSpecialSellerCodes } from "../src/lib/special-sellers.ts";
+import type { ParsedWorkbook } from "../src/lib/workbook.ts";
 
 function workbook(header: string, values: unknown[]): ParsedWorkbook {
   return {

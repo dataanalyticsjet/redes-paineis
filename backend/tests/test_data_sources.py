@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import pytest
+import json
+from pathlib import Path
+from fastapi.testclient import TestClient
+
+from app.core.config import get_settings
+from app.main import app
+from app.services import data_sources, feishu_auth
+from app.services.data_sources import TAXA_REQUIRED_HEADERS
+
+
+@pytest.fixture
+def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("FEISHU_SESSION_SECRET", "test-session-secret-with-at-least-32-chars")
+    monkeypatch.setenv("FEISHU_OAUTH_ENABLED", "true")
+    monkeypatch.setenv("FEISHU_OAUTH_APP_ID", "test-app")
+    monkeypatch.setenv("FEISHU_OAUTH_APP_SECRET", "test-secret")
+    monkeypatch.setenv("FEISHU_OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/api/auth/feishu/callback")
+    monkeypatch.setenv("FEISHU_VIEWER_ACCOUNTS_JSON", "[]")
+    monkeypatch.setenv("DATA_DIRECTORY", str(tmp_path / "local-data"))
+    get_settings.cache_clear()
+    feishu_auth.reset_temporary_auth_state()
+    data_sources.reset_temporary_data_sources()
+
+    token = feishu_auth.create_local_session(
+        {
+            "username": "Example Viewer",
+            "role": "regional",
+            "region": "SPS",
+            "base": None,
+            "_owner_subject": "test-user-example-viewer",
+        },
+        get_settings(),
+    )
+    client = TestClient(app, base_url="http://localhost:3000")
+    client.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    yield client
+    data_sources.reset_temporary_data_sources()
+    feishu_auth.reset_temporary_auth_state()
+    get_settings.cache_clear()
+
+
+def parsed_monitoring_workbook() -> dict[str, object]:
+    headers = ["Data", "Regional Origem", "PDD de saída", "Origem do Pedido", "dorp off应揽收"]
+    return {
+        "sheetName": "JMS",
+        "headers": headers,
+        "rows": [
+            {"Data": "2026-09-30", "Regional Origem": "SPS", "PDD de saída": "Base SPS 1", "Origem do Pedido": "TikTok", "dorp off应揽收": 25},
+            {"Data": "2026-09-30", "Regional Origem": "RJ", "PDD de saída": "Base RJ 1", "Origem do Pedido": "TEMU", "dorp off应揽收": 50},
+        ],
+        "dateColumn": "Data",
+        "baseColumn": "PDD de saída",
+        "regionColumn": "Regional Origem",
+        "originColumn": "Origem do Pedido",
+        "statusColumn": None,
+        "statusColumns": ["dorp off应揽收"],
+        "metadata": {
+            "sheetNames": ["JMS"],
+            "headerRow": 1,
+            "rowCount": 2,
+            "columnCount": len(headers),
+            "columns": [],
+            "date1904": False,
+            "dateRange": {"min": "2026-09-30", "max": "2026-09-30"},
+        },
+        "warnings": [],
+    }
+
+
+def parsed_taxa_workbook() -> dict[str, object]:
+    headers = list(TAXA_REQUIRED_HEADERS)
+    rows = []
+    for region, base in [("SPS", "Base SPS 1"), ("RJ", "Base RJ 1")]:
+        row = {header: 1 for header in headers}
+        row.update({
+            "Horário de término do prazo de coleta": "2026-09-30",
+            "Nome da regional": region,
+            "Nome da base de coleta": base,
+            "Origem do Pedido": "TikTok",
+            "Tipo de produto": "Demonstração",
+        })
+        rows.append(row)
+    return {
+        "sheetName": "sheet0",
+        "headers": headers,
+        "rows": rows,
+        "dateColumn": "Horário de término do prazo de coleta",
+        "baseColumn": "Nome da base de coleta",
+        "regionColumn": "Nome da regional",
+        "originColumn": "Origem do Pedido",
+        "statusColumn": None,
+        "statusColumns": [],
+        "metadata": {"sheetNames": ["sheet0"], "headerRow": 1, "rowCount": 2, "columnCount": len(headers), "columns": [], "date1904": False},
+        "warnings": [],
+    }
+
+
+def preview(client: TestClient, parsed: dict[str, object] | None = None, file_name: str = "monitoramento.xlsx"):
+    return client.post(
+        "/api/data-sources/monitoring/preview",
+        json={
+            "fileName": file_name,
+            "fileSizeBytes": 2048,
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "parsed": parsed or parsed_monitoring_workbook(),
+        },
+    )
+
+
+def preview_taxa(client: TestClient, parsed: dict[str, object] | None = None):
+    return client.post(
+        "/api/data-sources/taxa/preview",
+        json={
+            "fileName": "taxa-coleta.xlsx",
+            "fileSizeBytes": 2048,
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "parsed": parsed or parsed_taxa_workbook(),
+        },
+    )
+
+
+def test_data_source_api_requires_local_session() -> None:
+    with TestClient(app, base_url="http://localhost:3000") as client:
+        response = client.get("/api/data-sources/monitoring")
+
+    assert response.status_code == 401
+
+
+def test_preview_import_get_and_remove_are_local_and_scoped(authenticated_client: TestClient) -> None:
+    preview_response = preview(authenticated_client)
+    assert preview_response.status_code == 200
+    preview_payload = preview_response.json()
+    assert preview_payload["canImport"] is True
+    assert preview_payload["rowCount"] == 1
+    assert preview_payload["period"] == {"start": "2026-09-30", "end": "2026-09-30"}
+    assert {field["classification"] for field in preview_payload["fields"]} == {"required", "optional"}
+
+    imported = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+    assert imported.status_code == 200
+    source = imported.json()
+    assert source["sourceType"] == "MANUAL_UPLOAD"
+    assert source["rowCount"] == 1
+    assert source["parsed"]["rows"][0]["Regional Origem"] == "SPS"
+
+    current = authenticated_client.get("/api/data-sources/monitoring")
+    assert current.status_code == 200
+    assert current.json()["source"]["fileName"] == "monitoramento.xlsx"
+
+    removed = authenticated_client.delete("/api/data-sources/monitoring")
+    assert removed.status_code == 204
+    assert authenticated_client.get("/api/data-sources/monitoring").json() == {"source": None}
+
+
+def test_taxa_source_uses_its_own_local_store_and_applies_user_scope(authenticated_client: TestClient) -> None:
+    preview_response = preview_taxa(authenticated_client)
+    assert preview_response.status_code == 200
+    preview_payload = preview_response.json()
+    assert preview_payload["canImport"] is True
+    assert preview_payload["rowCount"] == 1
+    assert preview_payload["period"] == {"start": "2026-09-30", "end": "2026-09-30"}
+    assert len([field for field in preview_payload["fields"] if field["classification"] == "required" and field["present"]]) == 22
+
+    imported = authenticated_client.post(
+        "/api/data-sources/taxa/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+    assert imported.status_code == 200
+    source = imported.json()
+    assert source["fileName"] == "taxa-coleta.xlsx"
+    assert len(source["parsed"]["rows"]) == 1
+    assert source["parsed"]["rows"][0]["Nome da regional"] == "SPS"
+    assert authenticated_client.get("/api/data-sources/taxa").json()["source"]["fileName"] == "taxa-coleta.xlsx"
+    assert authenticated_client.get("/api/data-sources/monitoring").json() == {"source": None}
+
+    removed = authenticated_client.delete("/api/data-sources/taxa")
+    assert removed.status_code == 204
+    assert authenticated_client.get("/api/data-sources/taxa").json() == {"source": None}
+
+
+def test_unconfigured_and_unknown_dashboards_are_rejected(authenticated_client: TestClient) -> None:
+    unconfigured = authenticated_client.get("/api/data-sources/epop")
+    unknown = authenticated_client.get("/api/data-sources/not-a-dashboard")
+
+    assert unconfigured.status_code == 409
+    assert unconfigured.json()["detail"] == "data_source_dashboard_unconfigured"
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"] == "data_source_dashboard_not_found"
+
+
+def test_data_source_is_isolated_by_dashboard_and_session(authenticated_client: TestClient) -> None:
+    preview_payload = preview(authenticated_client).json()
+    imported = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+    cross_dashboard = authenticated_client.post(
+        "/api/data-sources/taxa/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+
+    other_token = feishu_auth.create_local_session(
+        {
+            "username": "Example Viewer",
+            "role": "regional",
+            "region": "SPS",
+            "base": None,
+            "_owner_subject": "different-feishu-open-id",
+        },
+        get_settings(),
+    )
+    other_client = TestClient(app, base_url="http://localhost:3000")
+    other_client.cookies.set(feishu_auth.SESSION_COOKIE, other_token)
+    other_source = other_client.get("/api/data-sources/monitoring")
+    cross_session = other_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+
+    assert imported.status_code == 200
+    assert cross_dashboard.status_code == 404
+    assert cross_dashboard.json()["detail"] == "data_source_preview_not_found"
+    assert other_source.status_code == 200
+    assert other_source.json() == {"source": None}
+    assert cross_session.status_code == 404
+
+
+def test_import_replaces_only_the_current_dashboard_source(authenticated_client: TestClient) -> None:
+    first_preview = preview(authenticated_client).json()
+    first_import = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": first_preview["previewId"]},
+    )
+    second_preview = preview(authenticated_client, file_name="monitoramento-atualizado.xlsx").json()
+    second_import = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": second_preview["previewId"]},
+    )
+
+    assert first_import.status_code == 200
+    assert second_import.status_code == 200
+    assert authenticated_client.get("/api/data-sources/monitoring").json()["source"]["fileName"] == "monitoramento-atualizado.xlsx"
+    assert authenticated_client.get("/api/data-sources/taxa").json() == {"source": None}
+
+
+def test_uploaded_xlsx_and_source_survive_preview_service_reset(authenticated_client: TestClient, tmp_path: Path) -> None:
+    xlsx = bytes([0x50, 0x4B, 0x03, 0x04]) + b"local-xlsx"
+    payload = {
+        "fileName": "monitoramento.xlsx",
+        "fileSizeBytes": len(xlsx),
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "parsed": parsed_monitoring_workbook(),
+    }
+    response = authenticated_client.post(
+        "/api/data-sources/monitoring/preview",
+        data={"payload": json.dumps(payload, ensure_ascii=False)},
+        files={"file": ("monitoramento.xlsx", xlsx, payload["contentType"])},
+    )
+    assert response.status_code == 200
+    preview_payload = response.json()
+    same_identity_token = feishu_auth.create_local_session(
+        {
+            "username": "Example Viewer",
+            "role": "regional",
+            "region": "SPS",
+            "base": None,
+            "_owner_subject": "test-user-example-viewer",
+        },
+        get_settings(),
+    )
+    same_identity_client = TestClient(app, base_url="http://localhost:3000")
+    same_identity_client.cookies.set(feishu_auth.SESSION_COOKIE, same_identity_token)
+    cross_session_preview = same_identity_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+    assert cross_session_preview.status_code == 404
+    imported = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": preview_payload["previewId"]},
+    )
+    assert imported.status_code == 200
+    # Simulate an API process restart: preview state is cleared, while the
+    # committed dataset and source workbook remain available to a new session.
+    data_sources.reset_temporary_data_sources()
+    new_token = feishu_auth.create_local_session(
+        {
+            "username": "Example Viewer",
+            "role": "regional",
+            "region": "SPS",
+            "base": None,
+            "_owner_subject": "test-user-example-viewer",
+        },
+        get_settings(),
+    )
+    reauthenticated = TestClient(app, base_url="http://localhost:3000")
+    reauthenticated.cookies.set(feishu_auth.SESSION_COOKIE, new_token)
+    current = reauthenticated.get("/api/data-sources/monitoring")
+    assert current.status_code == 200
+    assert current.json()["source"]["parsed"]["rows"][0]["Regional Origem"] == "SPS"
+    assert any((tmp_path / "local-data" / "sources").rglob("source-00-monitoramento.xlsx"))
+
+
+def test_invalid_taxa_contract_keeps_previous_local_source(authenticated_client: TestClient) -> None:
+    valid = preview_taxa(authenticated_client).json()
+    imported = authenticated_client.post("/api/data-sources/taxa/import", json={"previewId": valid["previewId"]})
+    assert imported.status_code == 200
+
+    invalid = parsed_taxa_workbook()
+    invalid["headers"] = [header for header in invalid["headers"] if header != "Taxa de coleta no prazo"]
+    for row in invalid["rows"]:
+        row.pop("Taxa de coleta no prazo", None)
+    result = preview_taxa(authenticated_client, invalid)
+    assert result.status_code == 200
+    assert result.json()["canImport"] is False
+    assert "Taxa de coleta no prazo" in result.json()["missingFields"]
+    assert authenticated_client.get("/api/data-sources/taxa").json()["source"]["fileName"] == "taxa-coleta.xlsx"
+
+
+def test_invalid_preview_does_not_replace_previous_source(authenticated_client: TestClient) -> None:
+    valid_preview = preview(authenticated_client).json()
+    imported = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": valid_preview["previewId"]},
+    )
+    assert imported.status_code == 200
+
+    invalid_parsed = parsed_monitoring_workbook()
+    invalid_parsed["rows"] = [
+        {"Data": "not-a-date", "Regional Origem": "SPS", "PDD de saída": "Base SPS 1", "Origem do Pedido": "TikTok", "dorp off应揽收": 25},
+    ]
+    result = preview(authenticated_client, invalid_parsed)
+    assert result.status_code == 200
+    assert result.json()["canImport"] is False
+    assert "Data" in result.json()["missingFields"]
+    assert authenticated_client.get("/api/data-sources/monitoring").json()["source"]["fileName"] == "monitoramento.xlsx"
+
+
+def test_unsafe_name_and_wrong_mime_are_rejected(authenticated_client: TestClient) -> None:
+    unsafe = authenticated_client.post(
+        "/api/data-sources/monitoring/preview",
+        json={
+            "fileName": "..\\outside.xlsx",
+            "fileSizeBytes": 10,
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "parsed": parsed_monitoring_workbook(),
+        },
+    )
+    assert unsafe.status_code == 200
+    assert unsafe.json()["fileName"] == "outside.xlsx"
+
+    wrong_mime = authenticated_client.post(
+        "/api/data-sources/monitoring/preview",
+        json={
+            "fileName": "monitoramento.xlsx",
+            "fileSizeBytes": 10,
+            "contentType": "text/plain",
+            "parsed": parsed_monitoring_workbook(),
+        },
+    )
+    assert wrong_mime.status_code == 422
+    assert wrong_mime.json()["detail"] == "data_source_mime_invalid"

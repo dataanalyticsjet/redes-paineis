@@ -6,8 +6,8 @@ import {
   summarizeBipagem,
   summarizeBipagemByBase,
   summarizeBipagemByRegional,
-} from "../app/lib/bipagem.ts";
-import type { ParsedWorkbook } from "../app/lib/workbook.ts";
+} from "../src/lib/bipagem.ts";
+import type { ParsedWorkbook } from "../src/lib/workbook.ts";
 
 const headers = [
   "Data considerada",
@@ -60,6 +60,14 @@ function workbook(): ParsedWorkbook {
       },
     ],
     statusColumns: [],
+    metadata: {
+      sheetNames: ["sheet0"],
+      headerRow: 1,
+      rowCount: 2,
+      columnCount: headers.length,
+      columns: [],
+      date1904: false,
+    },
     warnings: [],
   } as ParsedWorkbook;
 }

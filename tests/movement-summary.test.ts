@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectMovementSummaryMetric } from "../app/lib/movement-summary.ts";
+import { selectMovementSummaryMetric } from "../src/lib/movement-summary.ts";
 
 const source = Object.freeze({
   totalStopped: 14387, quantity: 14387, inTransit: 42181,

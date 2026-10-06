@@ -5,10 +5,10 @@ import {
   DEMO_WORKBOOK_NAME,
   scopeDemoSellerReference,
   scopeDemoWorkbook,
-} from "../app/lib/demo-fixtures.ts";
-import { buildBipagemLoadedData } from "../app/lib/bipagem.ts";
-import { buildDamageData } from "../app/lib/damage.ts";
-import { buildResponsibilityData } from "../app/lib/responsibility.ts";
+} from "../src/lib/demo-fixtures.ts";
+import { buildBipagemLoadedData } from "../src/lib/bipagem.ts";
+import { buildDamageData } from "../src/lib/damage.ts";
+import { buildResponsibilityData } from "../src/lib/responsibility.ts";
 
 const regionalScope = { region: "SPN-DEMO", base: null };
 const baseScope = { region: null, base: "BASE RESTRITA DEMO" };

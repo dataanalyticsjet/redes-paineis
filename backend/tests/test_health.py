@@ -20,7 +20,7 @@ def test_development_cors_uses_configured_frontend_origin() -> None:
         if middleware.cls is CORSMiddleware
     )
 
-    assert cors_middleware.kwargs["allow_origins"] == ["http://localhost:3000"]
+    assert cors_middleware.kwargs["allow_origins"] == ["http://localhost:3001"]
     assert "*" not in cors_middleware.kwargs["allow_origins"]
 
 

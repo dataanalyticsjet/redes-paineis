@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { summarizeTaxaPeriod } from "../app/lib/taxa-summary.ts";
+import { summarizeTaxaPeriod } from "../src/lib/taxa-summary.ts";
 
 test("calculates the JMS total row after consolidating multiple selected dates", () => {
   const summary = summarizeTaxaPeriod([

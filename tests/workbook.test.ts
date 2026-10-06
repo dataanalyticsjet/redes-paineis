@@ -8,7 +8,7 @@ import {
   richTextXmlToPlainText,
   toISODate,
   type WorkbookRow,
-} from "../app/lib/workbook.ts";
+} from "../src/lib/workbook.ts";
 
 test("normalizes Portuguese punctuation without discarding Chinese text", () => {
   assert.equal(normalizeHeader("  Status atual – Recebído na BASE  "), "status atual recebido na base");

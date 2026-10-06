@@ -13,13 +13,16 @@
 # testing
 /coverage
 /backend/.venv/
+/.venv/
 __pycache__/
 .pytest_cache/
 *.py[cod]
 
-# next.js
+# local build outputs
 /.next/
 /.vinext/
+/.output/
+/.tanstack/
 /out/
 
 # misc
@@ -45,11 +48,15 @@ yarn-error.log*
 *.p12
 *.pfx
 
-# vercel
+# deployment/local platform metadata
 .vercel
 
 /dist/
 /.wrangler/
 /outputs/
 /work/
+/data/
+/backend/data/
+/backend/local-data/
+/redes-paineis-data/
 *.tsbuildinfo

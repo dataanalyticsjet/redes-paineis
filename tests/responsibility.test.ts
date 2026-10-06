@@ -8,15 +8,28 @@ import {
   registeredRegionForBase,
   rmAreaForBase,
   responsibilityForBase,
-} from "../app/lib/responsibility.ts";
-import type { ParsedWorkbook } from "../app/lib/workbook.ts";
+} from "../src/lib/responsibility.ts";
+import type { ParsedWorkbook } from "../src/lib/workbook.ts";
+
+function workbookMetadata(headers: string[], rows: ParsedWorkbook["rows"]): ParsedWorkbook["metadata"] {
+  return {
+    sheetNames: ["responsibility"],
+    headerRow: 1,
+    rowCount: rows.length,
+    columnCount: headers.length,
+    columns: [],
+    date1904: false,
+  };
+}
 
 function workbook(rows: ParsedWorkbook["rows"]): ParsedWorkbook {
+  const headers = ["区域", "网点编号", "网点名称", "RM区域", "RM名称", "RM分组", "RM\n负责人"];
   return {
     sheetName: "RM区域网点明细",
-    headers: ["区域", "网点编号", "网点名称", "RM区域", "RM名称", "RM分组", "RM\n负责人"],
+    headers,
     rows,
     statusColumns: [],
+    metadata: workbookMetadata(headers, rows),
     warnings: [],
   };
 }
@@ -59,6 +72,13 @@ test("prioritizes the official REGIONAL, BASE and RM columns and applies the reg
       "RM\n负责人": "Valor antigo que deve ser ignorado",
     }],
     statusColumns: [],
+    metadata: workbookMetadata(["REGIONAL", "BASE", "RM ", "RGM", "RM\n负责人"], [{
+      "REGIONAL": "MG",
+      "BASE": "TEST-BASE-MG",
+      "RM ": "Alex",
+      "RGM": "Grupo oficial",
+      "RM\n负责人": "Valor antigo que deve ser ignorado",
+    }]),
     warnings: [],
   };
   const data = buildResponsibilityData(parsed, "novo.xlsx");
@@ -103,6 +123,17 @@ test("reads the new workbook's RM responsible name and RM region columns", () =>
       "RM": "—",
     }],
     statusColumns: [],
+    metadata: workbookMetadata(
+      ["Regional\n区域", "Nome da Base\n网点名称", "RM临时名称", "Região do RM\nRM区域", "Responsável do RM\nRM负责人", "RM"],
+      [{
+        "Regional\n区域": "SPS",
+        "Nome da Base\n网点名称": "TEST-BASE-SPS",
+        "RM临时名称": "SPS1",
+        "Região do RM\nRM区域": "SPS-CAP",
+        "Responsável do RM\nRM负责人": "Rick",
+        "RM": "—",
+      }],
+    ),
     warnings: [],
   };
   const data = buildResponsibilityData(parsed, "novo.xlsx");

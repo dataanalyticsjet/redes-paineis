@@ -12,7 +12,7 @@ import {
   summarizeAwaitingByBaseAndRm,
   summarizeSellerOutcomes,
   type SellerMetricRecord,
-} from "../app/lib/seller-monitoring.ts";
+} from "../src/lib/seller-monitoring.ts";
 
 const records: SellerMetricRecord[] = [
   {

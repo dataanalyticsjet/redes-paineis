@@ -7,7 +7,7 @@ import {
   dashboardLocale,
   isDashboardLanguage,
   translateDashboardText,
-} from "../app/lib/i18n.ts";
+} from "../src/lib/i18n.ts";
 
 test("offers Portuguese, English, and Simplified Chinese", () => {
   assert.deepEqual(DASHBOARD_LANGUAGES.map(({ code }) => code), ["pt", "zh", "en"]);

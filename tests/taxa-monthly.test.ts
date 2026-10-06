@@ -5,7 +5,7 @@ import {
   buildTaxaMonthlyRegionalSeries,
   isExcludedMonthlyRegion,
   type TaxaMonthlyRecord,
-} from "../app/lib/taxa-monthly.ts";
+} from "../src/lib/taxa-monthly.ts";
 
 const records: TaxaMonthlyRecord[] = [
   { date: "2026-01-02", region: "SPE", toCollect: 100, collectedWithAttempts: 90 },

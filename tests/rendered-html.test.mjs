@@ -1,37 +1,67 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:net";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import test, { after, before } from "node:test";
 
-async function render() {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+let appBaseUrl;
+let serverProcess;
 
-  return worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html", host: "localhost" },
-    }),
+async function startNodeServer() {
+  const portProbe = createServer();
+  await new Promise((resolve, reject) => {
+    portProbe.once("error", reject);
+    portProbe.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = portProbe.address();
+  if (!address || typeof address === "string") throw new Error("Unable to reserve test port");
+  const port = address.port;
+  await new Promise((resolve, reject) => portProbe.close((error) => error ? reject(error) : resolve()));
+
+  serverProcess = spawn(
+    process.execPath,
+    [fileURLToPath(new URL("../.output/server/index.mjs", import.meta.url))],
     {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), NODE_ENV: "production" },
+      stdio: "ignore",
     },
   );
+  appBaseUrl = `http://127.0.0.1:${port}`;
+
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (serverProcess.exitCode !== null) throw new Error(`Node server exited with code ${serverProcess.exitCode}`);
+    try {
+      const response = await fetch(appBaseUrl, { headers: { accept: "text/html" } });
+      if (response.ok) return;
+    } catch {
+      // Wait for Nitro to bind its listener.
+    }
+    await delay(100);
+  }
+  throw new Error("Node server did not become ready for the SSR smoke test");
 }
 
-test("server-renders the protected Feishu presentation login", async () => {
-  const response = await render();
+before(startNodeServer);
+after(async () => {
+  if (!serverProcess || serverProcess.exitCode !== null) return;
+  const exited = once(serverProcess, "exit");
+  serverProcess.kill("SIGTERM");
+  await exited;
+});
+
+test("Node server-renders the protected Feishu presentation login", async () => {
+  const response = await fetch(appBaseUrl, { headers: { accept: "text/html" } });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<html[^>]+lang="pt-BR"/i);
   assert.match(html, /<title>DASH BOARD - MONITORAMENTO DE COLETA<\/title>/i);
-  assert.match(html, /J&amp;T Express/);
+  assert.match(html, /class="presentation-login-page"/);
   assert.match(html, /Central de Painéis/);
   assert.match(html, /Acesse seus indicadores e dashboards/);
   assert.match(html, /Entrar com Feishu/);
@@ -40,30 +70,32 @@ test("server-renders the protected Feishu presentation login", async () => {
 });
 
 test("persists the latest workbook and exposes all requested filters", async () => {
-  const source = await readFile(new URL("../app/dashboard-app.tsx", import.meta.url), "utf8");
-  const route = await readFile(new URL("../app/api/workbook/route.ts", import.meta.url), "utf8");
-  const parser = await readFile(new URL("../app/lib/workbook.ts", import.meta.url), "utf8");
-  const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
-  const hosting = await readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8");
-  const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  const i18n = await readFile(new URL("../app/lib/i18n.ts", import.meta.url), "utf8");
-  const actionBand = await readFile(new URL("../app/components/dashboard-action-band.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const route = await readFile(new URL("../backend/app/api/workbooks.py", import.meta.url), "utf8");
+  const parser = await readFile(new URL("../src/lib/workbook.ts", import.meta.url), "utf8");
+  const layout = await readFile(new URL("../src/routes/__root.tsx", import.meta.url), "utf8");
+  const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+  const apiMain = await readFile(new URL("../backend/app/main.py", import.meta.url), "utf8");
+  const localWorkbooks = await readFile(new URL("../backend/app/services/local_workbooks.py", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../src/styles/globals.css", import.meta.url), "utf8");
+  const i18n = await readFile(new URL("../src/lib/i18n.ts", import.meta.url), "utf8");
+  const actionBand = await readFile(new URL("../src/features/dashboards/dashboard-action-band.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /import\("\.\/lib\/workbook"\)/);
+  assert.match(source, /import\("\.\.\/\.\.\/lib\/workbook"\)/);
   assert.match(source, /fetch\("\/api\/workbook"/);
   assert.match(source, /Última atualização/);
   assert.match(source, /formatDateTime/);
-  assert.match(route, /dashboard_state/);
-  assert.match(route, /WORKBOOKS/);
-  assert.match(route, /function streamWorkbookPayload/);
-  assert.match(route, /body\.pipeThrough\(new TransformStream/);
-  assert.match(route, /return streamWorkbookPayload\(object\.body, row\.fileName, row\.updatedAt\)/);
-  assert.match(route, /LATEST_OBJECT_KEY/);
-  assert.match(route, /movement-latest\.json/);
-  assert.match(route, /seller-list-latest\.json/);
-  assert.match(route, /seller-performance-latest\.json/);
-  assert.match(route, /bipagem-latest\.json/);
-  assert.match(route, /ON CONFLICT\(id\) DO UPDATE/);
+  assert.match(route, /async def read_workbook/);
+  assert.match(route, /async def write_workbook/);
+  assert.match(route, /get_local_session/);
+  assert.match(route, /save_workbook/);
+  assert.match(route, /get_workbook/);
+  assert.match(localWorkbooks, /HISTORY_KINDS/);
+  assert.match(localWorkbooks, /historyParts/);
+  assert.match(apiMain, /include_router\(workbooks_router, prefix="\/api"\)/);
+  assert.match(viteConfig, /fastApiDevProxy\(fastApiDevTarget\)/);
+  assert.match(viteConfig, /pathname !== "\/api" && !pathname\.startsWith\("\/api\/"\)/);
+  assert.doesNotMatch(viteConfig, /@cloudflare\/vite-plugin|vinext|wrangler/);
   assert.match(source, /id="taxa-upload"[\s\S]*?multiple/);
   assert.match(source, /mergeHistory: true/);
   assert.match(source, /Histórico atualizado/);
@@ -192,8 +224,9 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /downloadTaxaTableExcel/);
   assert.match(source, /downloadMonitoringTableExcel/);
   assert.match(source, /downloadMovementTableExcel/);
-  assert.match(source, /downloadSellerTableExcel/);
-  assert.match(source, /header: "RM", value: \(row\) => row\.rmLabel/);
+  assert.match(source, /downloadSellerManagementExcel/);
+  assert.match(source, /row\.rmLabel, row\.sellerCount, row\.sellerCode/);
+  assert.match(source, /"RM\\nRM负责人"/);
   assert.match(source, /<th>RM<\/th>/);
   assert.match(source, /<td>\{row\.rmLabel\}<\/td>/);
   assert.match(source, /downloadRowsAsExcel/);
@@ -201,14 +234,14 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /XLSX\.writeFile/);
   assert.match(source, /Baixar Excel/);
   assert.ok((source.match(/className="table-download-button/g) ?? []).length >= 14);
-  assert.match(source, /downloadSellerRegionalPerformanceExcel/);
+  assert.match(source, /const regionalRows: ExcelExportValue\[\]\[\] = sellerRegionalPerformance\.map/);
   assert.match(source, /formatSellerExcelPeriod\(sellerDateStart, sellerDateEnd\)/);
   assert.match(source, /J&T重点保障及单商多服监控/);
-  assert.match(source, /区域（Regional）/);
-  assert.match(source, /网点（Base）/);
+  assert.match(source, /Regional\\n区域/);
+  assert.match(source, /Base\\n网点/);
   assert.match(source, /Aguardando coleta\\n待揽收订单量/);
   assert.match(source, /totalMergeEndColumn: 2/);
-  assert.match(source, /header: "RGM", value: \(row\) => row\.rgmLabel/);
+  assert.match(source, /row\.base, row\.rm, responsibilityForBase\(responsibilityLoaded, row\.base\)\.rgm/);
   assert.match(source, /officialRgmForRegion\(row\.region\)/);
   assert.match(source, /responsibilityForBase\(responsibilityLoaded, row\.base\)\.rgm/);
   assert.match(source, /kind: "bipagem"/);
@@ -230,11 +263,11 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /downloadBipagemRegionalExcel/);
   assert.match(source, /downloadBipagemBaseExcel/);
   assert.match(source, /index % 2 === 0 \? 7 : 14/);
-  assert.match(route, /mergeTaxaHistory/);
-  assert.match(route, /payload\.mergeHistory/);
+  assert.match(route, /merge_history: bool = Field\(default=False, alias="mergeHistory"\)/);
+  assert.match(route, /response\["historyMerge"\] = \{"addedDates": 0/);
   assert.doesNotMatch(source, /label=\{t\("Bases com movimento"\)\}/);
-  assert.match(hosting, /"d1":\s*"DB"/);
-  assert.match(hosting, /"r2":\s*"WORKBOOKS"/);
+  assert.match(apiMain, /include_router\(workbooks_router, prefix="\/api"\)/);
+  assert.doesNotMatch(apiMain, /cloudflare|D1Database|R2Bucket/i);
   assert.match(source, /label=\{t\("Regional"\)\}/);
   assert.match(source, /label=\{t\("Base"\)\}/);
   assert.match(source, /basesForRegions/);
@@ -261,9 +294,10 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /record\.over30Days/);
   assert.match(source, /Sem movimentação por regional/);
   assert.match(source, /Sem movimentação por RM/);
-  assert.match(source, /downloadMovementRegionalOver2Excel/);
-  assert.match(source, /downloadMovementRmOver2Excel/);
-  const movementMetrics = await readFile(new URL("../app/lib/movement-summary.ts", import.meta.url), "utf8");
+  assert.match(source, /const downloadMovementTableExcel = useCallback/);
+  assert.match(source, /movementRegionalOver2Summary\.map/);
+  assert.match(source, /movementRmOver2Summary\.map/);
+  const movementMetrics = await readFile(new URL("../src/lib/movement-summary.ts", import.meta.url), "utf8");
   assert.match(movementMetrics, /Total há 2 dias ou mais/);
   assert.match(source, /MOVEMENT_SUMMARY_METRICS\.map/);
   assert.doesNotMatch(source, /TOP 10 sem movimentação há mais de 2 dias/);
@@ -273,7 +307,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /kind: "sellerList"/);
   assert.match(source, /kind: "sellerSpecialList"/);
   assert.doesNotMatch(source, /id="seller-special-filter"/);
-  assert.match(route, /seller-special-list-latest\.json/);
+  assert.match(route, /kind == "sellerSpecialList"/);
   assert.match(source, /kind: "sellerPerformance"/);
   assert.match(source, /buildSellerReferenceData/);
   assert.match(source, /buildSellerPerformanceData/);
@@ -288,11 +322,11 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /Aguardando coleta por base e RM/);
   assert.match(source, /Pedidos aguardando coleta/);
   assert.match(source, /seller-rm-awaiting-table-wrap/);
-  assert.match(source, /downloadSellerRmAwaitingExcel/);
-  assert.match(source, /aguardando_coleta_por_base_rm_/);
+  assert.match(source, /onClick=\{downloadSellerManagementExcel\}/);
+  assert.match(source, /monitoramento_jt_\$\{periodLabel\.replaceAll\(" ", "_"\)\}/);
   assert.match(source, /seller-rm-download-button/);
   assert.match(source, /Volume de pedidos\\n总订单量/);
-  assert.match(source, /Taxa de coleta\\n揽收率 %/);
+  assert.match(source, /Taxa de coleta\\n揽收率/);
   assert.match(source, /percentageColumns: \[6\]/);
   assert.match(source, /Composição \{categories\}/);
   assert.match(source, /SELLER_CATEGORIES = \["J&T 重点保障", "单商多服"\]/);
@@ -325,8 +359,9 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /className="presentation-language-switcher"/);
   assert.match(source, /Autorizar envio de Excel/);
   assert.match(source, /\/api\/upload-auth/);
-  assert.match(route, /isUploadAuthorized/);
-  assert.match(route, /if \(!uploadSecretsConfigured\(\)\)/);
+  assert.match(route, /async def verify_upload_auth/);
+  assert.match(route, /def _upload_authorized\(request: Request\)/);
+  assert.match(route, /upload_auth_not_configured/);
   assert.match(source, /DASHBOARD_LANGUAGES\.map/);
   assert.match(source, /document\.documentElement\.lang\s*=\s*dashboardHtmlLang/);
   assert.match(source, /MODULE_IMPORT_FAILURE_PATTERN/);
@@ -358,8 +393,9 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.doesNotMatch(source, /<h2>\{t\("Composição por status"\)\}<\/h2>/);
   assert.match(source, /monitoringRegionalSummary/);
   assert.match(source, /monitoringRmSummary/);
-  assert.match(source, /downloadMonitoringRegionalSummaryExcel/);
-  assert.match(source, /downloadMonitoringRmSummaryExcel/);
+  assert.match(source, /const downloadMonitoringTableExcel = useCallback/);
+  assert.match(source, /monitoringRegionalSummary\.map/);
+  assert.match(source, /monitoringRmSummary\.map/);
   assert.match(source, /Taxa de pedidos aguardando coleta/);
   assert.match(source, /MONITORING_STATUS_LABELS/);
   assert.match(source, /options=\{\[\.\.\.MONITORING_METRIC_OPTIONS\]\}/);
@@ -384,6 +420,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.doesNotMatch(source, /XMLHttpRequest/);
   assert.doesNotMatch(source, /sessionStorage/);
   assert.match(source, /FEISHU_COOKIE_SESSION/);
-  assert.match(source, /\/api\/view-auth/);
-  assert.match(route, /filterWorkbookForRegion/);
+  assert.doesNotMatch(source, /\/api\/view-auth/);
+  assert.match(route, /def _filter_rows\(/);
+  assert.match(route, /def _scope_kind\(/);
 });

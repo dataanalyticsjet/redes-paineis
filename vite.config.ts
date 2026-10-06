@@ -1,83 +1,86 @@
-import vinext from "vinext";
-import { defineConfig, type Plugin } from "vite";
-import hostingConfig from "./.openai/hosting.json";
-import { sites } from "./build/sites-vite-plugin";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import { nitro } from "nitro/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
-const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  "00000000-0000-4000-8000-000000000000";
-
-const { d1, r2 } = hostingConfig;
-
-function redactFeishuCallbackQuery(): Plugin {
+function fastApiDevProxy(target: string): Plugin {
   return {
-    name: "redact-feishu-callback-query",
-    enforce: "pre" as const,
+    name: "redes-paineis-fastapi-dev-proxy",
+    apply: "serve",
     configureServer(server) {
-      server.middlewares.use((request, _response, next) => {
-        if (request.url?.startsWith("/api/auth/feishu/callback?")) {
-          const callbackUrl = new URL(request.url, "http://localhost");
-          const code = callbackUrl.searchParams.get("code");
-          const state = callbackUrl.searchParams.get("state");
-          if (code) request.headers["x-jt-feishu-oauth-code"] = code;
-          if (state) request.headers["x-jt-feishu-oauth-state"] = state;
-          request.url = callbackUrl.pathname;
+      server.middlewares.use((request, response, next) => {
+        const requestUrl = request.url ?? "/";
+        if (
+          (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST" && request.method !== "PUT" && request.method !== "PATCH" && request.method !== "DELETE" && request.method !== "OPTIONS") ||
+          !requestUrl.startsWith("/") ||
+          requestUrl.startsWith("//")
+        ) {
+          return next();
         }
-        next();
+
+        let pathname: string;
+        let targetUrl: URL;
+        try {
+          pathname = new URL(requestUrl, "http://vite.local").pathname;
+          if (pathname !== "/api" && !pathname.startsWith("/api/")) return next();
+          targetUrl = new URL(requestUrl, target);
+        } catch {
+          return next();
+        }
+
+        const requestUpstream = targetUrl.protocol === "https:" ? httpsRequest : httpRequest;
+        const upstream = requestUpstream(
+          targetUrl,
+          { method: request.method, headers: request.headers },
+          (upstreamResponse) => {
+            response.writeHead(
+              upstreamResponse.statusCode ?? 502,
+              upstreamResponse.statusMessage,
+              upstreamResponse.headers,
+            );
+            upstreamResponse.pipe(response);
+          },
+        );
+        upstream.on("error", () => {
+          if (response.headersSent) {
+            response.destroy();
+            return;
+          }
+          response.statusCode = 502;
+          response.setHeader("Content-Type", "application/json; charset=utf-8");
+          response.end(JSON.stringify({ error: "fastapi_unavailable" }));
+        });
+        request.pipe(upstream);
       });
     },
   };
 }
 
-// macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
-const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
-
-const localBindingConfig = {
-  main: "./worker/index.ts",
-  compatibility_flags: ["nodejs_compat"],
-  d1_databases: d1
-    ? [
-        {
-          binding: d1,
-          database_name: "site-creator-d1",
-          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
-        },
-      ]
-    : [],
-  r2_buckets: r2
-    ? [
-        {
-          binding: r2,
-          bucket_name: "site-creator-r2",
-        },
-      ]
-    : [],
-};
-
-export default defineConfig(async () => {
-  // Keep Wrangler and Miniflare state project-local. These are non-secret tool
-  // settings; application environment belongs in ignored `.env*` files.
-  process.env.WRANGLER_WRITE_LOGS ??= "false";
-  process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
-  process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
-
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import("@cloudflare/vite-plugin");
+export default defineConfig(({ mode }) => {
+  const viteEnv = loadEnv(mode, process.cwd(), "");
+  const fastApiDevTarget =
+    process.env.FASTAPI_DEV_TARGET ??
+    viteEnv.FASTAPI_DEV_TARGET ??
+    "http://127.0.0.1:8001";
+  const frontendPort = Number(
+    process.env.FRONTEND_PORT ?? viteEnv.FRONTEND_PORT ?? 3001,
+  );
+  const nitroPreset =
+    process.env.NITRO_PRESET ?? viteEnv.NITRO_PRESET ?? "node-server";
 
   return {
-    server: {
-      host: "localhost",
-      port: 3000,
-      strictPort: true,
-      ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
-    },
     plugins: [
-      redactFeishuCallbackQuery(),
-      vinext(),
-      sites(),
-      cloudflare({
-        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-        config: localBindingConfig,
-      }),
+      fastApiDevProxy(fastApiDevTarget),
+      tanstackStart(),
+      nitro({ preset: nitroPreset }),
+      react(),
     ],
+    server: {
+      host: "127.0.0.1",
+      port: frontendPort,
+      strictPort: true,
+    },
   };
 });

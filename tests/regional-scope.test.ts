@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterWorkbookForRegion, filterSellerReferenceForRegion, readRegionalWorkbook } from "../app/lib/regional-scope.ts";
-import type { ParsedWorkbook } from "../app/lib/workbook.ts";
+import { filterWorkbookForRegion, filterSellerReferenceForRegion, readRegionalWorkbook } from "../src/lib/regional-scope.ts";
+import type { ParsedWorkbook } from "../src/lib/workbook.ts";
 
 function workbook(headers: string[], rows: Record<string, unknown>[]): ParsedWorkbook {
   return { sheetName: "Dados", headers, rows, statusColumns: [], warnings: [], metadata: { sheetNames: ["Dados"], headerRow: 1, rowCount: rows.length, columnCount: headers.length, columns: [], date1904: false } };

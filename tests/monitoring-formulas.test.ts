@@ -5,7 +5,7 @@ import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
   monitoringCollectionRate,
-} from "../app/lib/monitoring-formulas.ts";
+} from "../src/lib/monitoring-formulas.ts";
 
 test("reproduces the monitoring workbook formulas", () => {
   const input = { orderVolume: 2_505, awaiting: 849 };
