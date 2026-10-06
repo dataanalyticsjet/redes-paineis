@@ -5,11 +5,13 @@ import test from "node:test";
 const frontend = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
 const api = await readFile(new URL("../backend/app/api/auth.py", import.meta.url), "utf8");
 const service = await readFile(new URL("../backend/app/services/feishu_auth.py", import.meta.url), "utf8");
+const apiClient = await readFile(new URL("../src/lib/api-url.ts", import.meta.url), "utf8");
 
 test("frontend delegates Feishu login and session lifecycle to FastAPI", () => {
-  assert.match(frontend, /fetch\("\/api\/auth\/me"[\s\S]*?credentials: "include"/);
-  assert.match(frontend, /window\.location\.assign\("\/api\/auth\/feishu\/login"\)/);
-  assert.match(frontend, /fetch\("\/api\/auth\/logout", \{ method: "POST", credentials: "include" \}\)/);
+  assert.match(frontend, /apiFetch\("\/api\/auth\/me"/);
+  assert.match(frontend, /window\.location\.assign\(apiUrl\("\/api\/auth\/feishu\/login"\)\)/);
+  assert.match(frontend, /apiFetch\("\/api\/auth\/logout", \{ method: "POST" \}\)/);
+  assert.match(apiClient, /credentials: "include"/);
   assert.doesNotMatch(frontend, /\/api\/(?:view-auth|logout)(?:["`/])/);
   assert.doesNotMatch(frontend, /localStorage\.(?:getItem|setItem)\([^)]*(?:token|secret)/i);
 });

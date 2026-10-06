@@ -1,4 +1,5 @@
 import type { ParsedWorkbook } from "../workbook";
+import { apiFetch } from "../api-url.ts";
 
 export type DashboardSourceId =
   | "monitoring"
@@ -91,9 +92,8 @@ export function validateWorkbookFile(file: File): void {
 async function requestDataSource<T>(dashboardId: DashboardSourceId, action = "", init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`/api/data-sources/${encodeURIComponent(dashboardId)}${action}`, {
+    response = await apiFetch(`/api/data-sources/${encodeURIComponent(dashboardId)}${action}`, {
       cache: "no-store",
-      credentials: "same-origin",
       ...init,
     });
   } catch {

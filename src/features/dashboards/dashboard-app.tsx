@@ -7,6 +7,7 @@ import { DemoUserControl } from "../users/demo-user-control";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
 import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-source-dialog";
 import { PresentationLogin } from "../auth/presentation-login";
+import { apiFetch, apiUrl } from "../../lib/api-url.ts";
 import {
   Activity,
   ArrowLeft,
@@ -316,7 +317,7 @@ async function postWorkbook(
   const body = new FormData();
   body.append("payload", JSON.stringify(payload));
   for (const file of files) body.append("files", file, file.name);
-  return fetch("/api/workbook", {
+  return apiFetch("/api/workbook", {
     method: "POST",
     headers: { authorization: authorization ?? "" },
     body,
@@ -2378,7 +2379,7 @@ export function DashboardApp() {
   useEffect(() => {
     let active = true;
     const authError = new URLSearchParams(window.location.search).get("authError");
-    void fetch("/api/auth/me", { method: "GET", cache: "no-store", credentials: "include" })
+    void apiFetch("/api/auth/me", { method: "GET", cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) throw new Error("Sessão inválida");
         if (active && authError) setViewerAuthError(FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed);
@@ -2395,7 +2396,7 @@ export function DashboardApp() {
   }, []);
 
   const endViewerSession = useCallback(() => {
-    void fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+    void apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setViewerAuthorization(null);
     setViewerIdentity(null);
     setLoaded(null);
@@ -2418,7 +2419,7 @@ export function DashboardApp() {
   const startFeishuLogin = useCallback(() => {
     setViewerAuthError(null);
     setViewerAuthLoading(true);
-    window.location.assign("/api/auth/feishu/login");
+    window.location.assign(apiUrl("/api/auth/feishu/login"));
   }, []);
 
   const changeLanguage = useCallback((nextLanguage: DashboardLanguage) => {
@@ -2717,7 +2718,7 @@ export function DashboardApp() {
 
         const fetchOptionalWorkbook = async (kind: string): Promise<Response | null> => {
           try {
-            return await fetch(`/api/workbook?kind=${kind}`, { cache: "no-store", headers: authorizationHeaders });
+            return await apiFetch(`/api/workbook?kind=${kind}`, { cache: "no-store", headers: authorizationHeaders });
           } catch {
             return null;
           }
@@ -2731,7 +2732,7 @@ export function DashboardApp() {
           const { mergeTaxaHistory } = await import("../../lib/taxa-history");
           const workbooks: ParsedWorkbook[] = [];
           for (const part of parts) {
-            const partResponse = await fetch(`/api/workbook?kind=${kind}&part=${encodeURIComponent(part)}`, {
+            const partResponse = await apiFetch(`/api/workbook?kind=${kind}&part=${encodeURIComponent(part)}`, {
               cache: "no-store", headers: authorizationHeaders,
             });
             const partPayload = (await partResponse.json()) as SavedWorkbookResponse;
@@ -2745,7 +2746,7 @@ export function DashboardApp() {
         let payload: SavedWorkbookResponse | null = null;
         for (let attempt = 0; attempt < 3 && !payload; attempt += 1) {
           try {
-            const monitoringResponse = await fetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
+            const monitoringResponse = await apiFetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
             if (!monitoringResponse.ok) throw new Error("Não foi possível carregar a última atualização.");
             payload = (await monitoringResponse.json()) as SavedWorkbookResponse;
           } catch (cause) {
@@ -3364,7 +3365,7 @@ export function DashboardApp() {
     setUploadAuthError(null);
     try {
       const authorization = `Basic ${window.btoa(`${uploadUsername}:${uploadPassword}`)}`;
-      const response = await fetch("/api/upload-auth", {
+      const response = await apiFetch("/api/upload-auth", {
         method: "POST",
         headers: { authorization },
       });

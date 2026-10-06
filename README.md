@@ -14,7 +14,7 @@ O histórico veio de [`apvalan-maker/dashboard-jt-t4t5-coletas`](https://github.
 
 O backend não abre conexão SQL no startup e não cria tabelas. A persistência atual de workbooks/fontes é local em `DATA_DIRECTORY`; não usa D1/R2. A sessão Feishu e os estados OAuth são mantidos em memória do processo e precisam de armazenamento compartilhado antes de produção.
 
-Os arquivos-fonte rastreados do runtime antigo (`app/`, `worker/`, `db/`, `drizzle/`, `build/` e exemplos D1) estão removidos da árvore de trabalho e aparecem como exclusões pendentes no Git. Os diretórios locais correspondentes ainda aparecem como reparse points do Windows, sem destino informado pelo sistema; foram deixados intactos e não serão percorridos nem removidos recursivamente. Eles não são usados pelo build novo. Nenhuma conexão ou gravação em Cloudflare foi feita.
+Cloudflare Worker, D1, R2 e Drizzle não fazem parte do runtime atual. O histórico técnico do repositório foi preservado; o backend atual não acessa serviços Cloudflare nem banco SQL.
 
 ## Estrutura
 
@@ -63,7 +63,8 @@ Preencha `backend/.env` localmente. Nunca coloque App Secret, senha, token ou cr
 | Variável | Uso |
 | --- | --- |
 | `FRONTEND_PORT` | Porta do Vite; padrão local `3001`. |
-| `FASTAPI_DEV_TARGET` | Destino do proxy local; padrão `http://127.0.0.1:8001`. |
+| `VITE_API_BASE_URL` | Origem da API chamada pelo browser. Use a origem do FastAPI para chamada direta; vazia, mantém `/api` na mesma origem. |
+| `FASTAPI_DEV_TARGET` | Destino do proxy local do Vite; usado quando `VITE_API_BASE_URL` está vazio. |
 | `NITRO_PRESET` | Preset do servidor de produção; `node-server`. |
 | `VITE_DASHBOARD_DEMO_MODE` | `true` usa fixtures locais e bloqueia o caminho de upload; padrão `false`. |
 
@@ -72,19 +73,19 @@ Preencha `backend/.env` localmente. Nunca coloque App Secret, senha, token ou cr
 | Variáveis | Uso |
 | --- | --- |
 | `APP_ENV` | `development` habilita CORS apenas para `FRONTEND_BASE_URL`. |
-| `FRONTEND_BASE_URL` | Origem local, por padrão `http://localhost:3001`. |
+| `FRONTEND_BASE_URL` | Origem do browser permitida no CORS; localmente `http://127.0.0.1:3001`. |
 | `DATA_DIRECTORY` | Pasta persistente de workbooks/fontes. Em produção é obrigatória, absoluta e fora do checkout; localmente mantém o fallback do sistema operacional. |
 | `UPLOAD_USERNAME`, `UPLOAD_PASSWORD` | Credenciais server-side do fluxo clássico de upload. |
 | `FEISHU_OAUTH_ENABLED` | Habilita o login Feishu. |
 | `FEISHU_OAUTH_APP_ID`, `FEISHU_OAUTH_APP_SECRET` | Credenciais do aplicativo; exclusivamente no servidor. |
 | `FEISHU_OAUTH_AUTHORIZE_URL`, `FEISHU_OAUTH_TOKEN_URL`, `FEISHU_OAUTH_USERINFO_URL` | Endpoints Feishu mantidos na configuração server-side; o fluxo atual usa token v2. |
-| `FEISHU_OAUTH_REDIRECT_URI` | Callback cadastrado no Feishu. Local: `http://localhost:3001/api/auth/feishu/callback`. |
+| `FEISHU_OAUTH_REDIRECT_URI` | Callback cadastrado no Feishu. Exemplo local com chamada direta ao FastAPI: `http://127.0.0.1:8001/api/auth/feishu/callback`. |
 | `FEISHU_SESSION_SECRET` | Chave aleatória local da sessão, independente do App Secret. |
 | `FEISHU_VIEWER_ACCOUNTS_JSON` | Allowlist explícita com e-mail, tenant e escopo autorizado. |
 | `ALLOWED_CORPORATE_DOMAINS` | Domínios aceitos para identidade Feishu. |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Reservadas para uso futuro de MySQL; não são usadas nem conectadas nesta etapa. |
 
-Os endpoints Feishu e a versão do fluxo estão centralizados nas configurações do backend. O login real exige credenciais válidas, callback cadastrado e conta correspondente à allowlist; sem isso, a aplicação mostra falha e não cria sessão. `FEISHU_OAUTH_REDIRECT_URI` de produção deve ser `https://DOMINIO_PRODUCAO/api/auth/feishu/callback` e precisa ser cadastrado manualmente no aplicativo Feishu.
+Os endpoints Feishu e a versão do fluxo estão centralizados nas configurações do backend. O login real exige credenciais válidas, callback cadastrado e conta correspondente à allowlist; sem isso, a aplicação mostra falha e não cria sessão. O callback deve usar o mesmo valor em autorização, troca do código e configuração do aplicativo Feishu. Em produção, configure `FEISHU_OAUTH_REDIRECT_URI` com a URL HTTPS do domínio publicado.
 
 ## Executar localmente
 
@@ -107,7 +108,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Abra `http://localhost:3001`. O Vite encaminha `/api/auth/*`, `/api/data-sources/*`, `/api/workbook`, `/api/upload-auth` e `/api/health` para o FastAPI local. Se a porta estiver ocupada, o servidor encerra com erro em vez de escolher outra porta silenciosamente; ajuste `FRONTEND_PORT` e o callback local em conjunto.
+Abra `http://127.0.0.1:3001`. Com `VITE_API_BASE_URL=http://127.0.0.1:8001`, o browser chama o FastAPI diretamente; `FRONTEND_BASE_URL` deve corresponder exatamente à origem do frontend para o CORS com credenciais. Se `VITE_API_BASE_URL` estiver vazio, o Vite encaminha `/api/*` para `FASTAPI_DEV_TARGET`. O callback local de exemplo aponta diretamente ao FastAPI em `http://127.0.0.1:8001/api/auth/feishu/callback`; cadastre exatamente o valor escolhido no aplicativo Feishu. Se uma porta estiver ocupada, o servidor encerra com erro em vez de escolhê-la silenciosamente; ajuste as variáveis de ambiente correspondentes.
 
 ## Build, testes e lint
 
@@ -149,4 +150,4 @@ O chat ainda apresenta “Assistente em preparação”; não chama IA. Envio Fe
 - `develop`: integração.
 - `feat/feishu-fastapi`: branch atual desta linha de migração.
 
-Não faça push ou deploy como parte da migração local. Revise o diff, os segredos locais, os testes e os requisitos de produção separadamente antes de publicar.
+Envie alterações desta linha para a branch de trabalho; revisão, merge em `main` e deploy são etapas separadas.

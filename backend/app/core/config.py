@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     db_user: str | None = None
     db_password: str | None = None
 
-    frontend_base_url: AnyHttpUrl = "http://localhost:3001"
+    frontend_base_url: AnyHttpUrl = "http://127.0.0.1:3001"
     data_directory: Path = DEFAULT_DATA_DIRECTORY
     upload_username: str | None = None
     upload_password: str | None = None

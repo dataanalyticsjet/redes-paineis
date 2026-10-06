@@ -82,7 +82,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   const actionBand = await readFile(new URL("../src/features/dashboards/dashboard-action-band.tsx", import.meta.url), "utf8");
 
   assert.match(source, /import\("\.\.\/\.\.\/lib\/workbook"\)/);
-  assert.match(source, /fetch\("\/api\/workbook"/);
+  assert.match(source, /apiFetch\("\/api\/workbook"/);
   assert.match(source, /Última atualização/);
   assert.match(source, /formatDateTime/);
   assert.match(route, /async def read_workbook/);

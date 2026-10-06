@@ -42,5 +42,3 @@ class PreviewSourceRequest(ApiSchema):
 
 class ImportSourceRequest(ApiSchema):
     preview_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
-
-\n
