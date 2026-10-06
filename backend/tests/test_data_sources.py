@@ -14,6 +14,7 @@ from app.services.data_sources import TAXA_REQUIRED_HEADERS
 @pytest.fixture
 def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
     monkeypatch.setenv("FEISHU_SESSION_SECRET", "test-session-secret-with-at-least-32-chars")
     monkeypatch.setenv("FEISHU_OAUTH_ENABLED", "true")
     monkeypatch.setenv("FEISHU_OAUTH_APP_ID", "test-app")
@@ -123,11 +124,46 @@ def preview_taxa(client: TestClient, parsed: dict[str, object] | None = None):
     )
 
 
-def test_data_source_api_requires_local_session() -> None:
+def test_data_source_api_requires_feishu_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "true")
+    monkeypatch.setenv("DATA_DIRECTORY", str(tmp_path / "production-data"))
+    get_settings.cache_clear()
     with TestClient(app, base_url="http://localhost:3000") as client:
         response = client.get("/api/data-sources/monitoring")
+    get_settings.cache_clear()
 
     assert response.status_code == 401
+
+
+def test_data_sources_disabled_returns_not_found_even_with_a_session(
+    authenticated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATA_SOURCES_ENABLED", "false")
+    get_settings.cache_clear()
+
+    response = authenticated_client.get("/api/data-sources/monitoring")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "local_data_sources_only"
+
+
+def test_data_sources_can_be_enabled_in_production_with_a_feishu_session(
+    authenticated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
+    monkeypatch.setenv("DATA_DIRECTORY", str(tmp_path / "production-data"))
+    get_settings.cache_clear()
+
+    response = preview(authenticated_client)
+
+    assert response.status_code == 200
+    assert response.json()["canImport"] is True
 
 
 def test_preview_import_get_and_remove_are_local_and_scoped(authenticated_client: TestClient) -> None:

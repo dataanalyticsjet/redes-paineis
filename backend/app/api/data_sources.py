@@ -29,7 +29,7 @@ MAX_PREVIEW_REQUEST_BYTES = 64 * 1024 * 1024
 
 def _authenticated_owner(request: Request) -> tuple[str, str, dict[str, str | None]]:
     settings = get_settings()
-    if settings.app_env != "development":
+    if not settings.data_sources_enabled:
         raise HTTPException(status_code=404, detail="local_data_sources_only")
     token = request.cookies.get(SESSION_COOKIE)
     identity = get_local_session(token, settings)

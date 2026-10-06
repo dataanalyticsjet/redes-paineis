@@ -23,6 +23,7 @@ DEFAULT_DATA_DIRECTORY = (
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    data_sources_enabled: bool = False
 
     db_host: str | None = None
     db_port: int = 3306

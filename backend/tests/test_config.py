@@ -30,3 +30,11 @@ def test_development_keeps_the_existing_data_directory_fallback() -> None:
     settings = Settings(_env_file=None, app_env="development")
 
     assert settings.data_directory == DEFAULT_DATA_DIRECTORY
+
+
+def test_data_sources_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATA_SOURCES_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None, app_env="development")
+
+    assert settings.data_sources_enabled is False
