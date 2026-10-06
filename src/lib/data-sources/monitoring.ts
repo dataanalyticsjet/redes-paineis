@@ -25,8 +25,8 @@ export async function parseMonitoringWorkbookFile(file: File): Promise<ParsedWor
 }
 
 export async function normalizeMonitoringWorkbook(parsed: ParsedWorkbook): Promise<ParsedWorkbook> {
-  const { compactMonitoringWorkbook } = await import("../workbook");
-  return compactMonitoringWorkbook(parsed);
+  const { compactMonitoringWorkbook, latestMonitoringSnapshot } = await import("../workbook");
+  return compactMonitoringWorkbook(latestMonitoringSnapshot(parsed));
 }
 
 export async function parseMonitoringSourceFile(file: File): Promise<ParsedWorkbook> {

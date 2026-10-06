@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  compactMonitoringWorkbook,
   detectColumns,
+  latestMonitoringSnapshot,
   normalizeHeader,
   parseTabularData,
   richTextXmlToPlainText,
@@ -109,6 +111,29 @@ test("detects every operational transit status used by the monitoring workbook",
     "网点发件在途(集散)",
     "集散发件在途",
   ]);
+});
+
+test("keeps only the latest monitoring snapshot and compacts its operational totals", () => {
+  const parsed = parseTabularData([
+    ["Data", "Regional Origem", "PDD de saida", "Coleta Prevista Drop-off", "Aguardando Coleta Drop-off", "Status atual – Coletado"],
+    ["05/10/2026", "SPS", "BASE-01", 40, 8, 32],
+    ["06/10/2026", "SPS", "BASE-01", 20, 3, 17],
+    ["06/10/2026", "SPS", "BASE-01", 10, 2, 8],
+    ["07/10/2026", "SPS", "BASE-01", 12, 4, 8],
+    ["07/10/2026", "SPS", "BASE-01", 3, 1, 2],
+  ], { sheetName: "sheet0" });
+
+  const latest = latestMonitoringSnapshot(parsed);
+  assert.equal(latest.rows.length, 2);
+  assert.ok(latest.rows.every((row) => row.Data === "2026-10-07"));
+  assert.deepEqual(latest.metadata.dateRange, { min: "2026-10-07", max: "2026-10-07" });
+
+  const compacted = compactMonitoringWorkbook(latest);
+  assert.equal(compacted.rows.length, 1);
+  assert.equal(compacted.rows[0]["Coleta Prevista Drop-off"], 15);
+  assert.equal(compacted.rows[0]["Aguardando Coleta Drop-off"], 5);
+  assert.equal(compacted.rows[0]["Status atual – Coletado"], 10);
+  assert.deepEqual(compacted.metadata.dateRange, { min: "2026-10-07", max: "2026-10-07" });
 });
 
 test("finds a header below a title, drops empty rows, and keeps every column", () => {

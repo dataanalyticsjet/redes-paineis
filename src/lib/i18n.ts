@@ -269,6 +269,12 @@ const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "Coleta": { en: "Collection", zh: "揽收" },
   "Recebimento": { en: "Receipt", zh: "接收" },
   "Variação entre os dias": { en: "Change between days", zh: "日期间变化" },
+  "Variação": { en: "Change", zh: "变化" },
+  "Atual": { en: "Current", zh: "当前" },
+  "Última data do filtro; D-1 e variação aparecem quando há histórico anterior disponível.": {
+    en: "Latest date in the filter; D-1 and change appear when earlier history is available.",
+    zh: "筛选范围内的最新日期；有较早历史数据时显示 D-1 和变化。",
+  },
   "Comparativo": { en: "Comparison", zh: "对比" },
   "{rate} de falta de bipagem": { en: "{rate} missing scan rate", zh: "漏扫描率 {rate}" },
   "Volume total no período": { en: "Total volume in the period", zh: "周期总单量" },

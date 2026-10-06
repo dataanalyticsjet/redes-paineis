@@ -35,7 +35,18 @@ export interface ResponsibilityData {
   rgms: string[];
   rmAreas: string[];
   byBase: Map<string, ResponsibilityRecord>;
+  byExactBaseName: Map<string, ResponsibilityRecord>;
+  exactNameJoinOnly: boolean;
   updatedAt?: string;
+}
+
+export type ResponsibilityResolutionSource = "de-para" | "legado" | "não encontrado";
+
+export interface ResponsibilityResolution {
+  rm: string;
+  rgm: string;
+  rmArea: string;
+  source: ResponsibilityResolutionSource;
 }
 
 function clean(value: unknown): string {
@@ -76,69 +87,150 @@ export function normalizeBaseKey(value: unknown): string {
     .replace(/[^A-Z0-9]/g, "");
 }
 
+/** Conservative name key for joining a monitoring base to an official de-para.
+ * Keeps punctuation and words intact; only removes invisible Excel characters,
+ * normalizes NBSP/whitespace and spaces around a hyphen, and folds case.
+ */
+export function normalizeMappedBaseName(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s*-\s*/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
 export function buildResponsibilityData(
   parsed: ParsedWorkbook,
   fileName: string,
   updatedAt?: string,
 ): ResponsibilityData {
-  const baseColumn = findHeader(parsed.headers, ["网点名称", "Base", "Nome da base"]);
-  const baseCodeColumn = findHeader(parsed.headers, ["网点编号", "Código base", "Codigo base"]);
+  // Prefer the explicit name column before the generic "Base" alias, which
+  // can otherwise match "Código da base" in the official de-para sheet.
+  const baseColumn = findHeader(parsed.headers, ["网点名称", "Nome da base", "Base"]);
+  const baseCodeColumn = findHeader(parsed.headers, ["网点编号", "Código da base", "Codigo da base", "Código base", "Codigo base"]);
   const regionColumn = findHeader(parsed.headers, ["区域", "Regional"]);
-  const rmAreaColumn = findHeader(parsed.headers, ["Região do RM", "Nome da Região do RM", "RM区域", "Área RM", "Area RM"]);
+  const rmAreaColumn = findHeader(parsed.headers, ["Região RM", "Região do RM", "Nome da Região do RM", "RM区域", "Área RM", "Area RM"]);
   const rmTemporaryColumn = findHeader(parsed.headers, ["RM临时名称"]);
   const rmResponsibleColumn = findHeader(parsed.headers, ["Responsável do RM", "Responsável RM", "RM负责人"]);
   const rmColumn = rmTemporaryColumn && rmResponsibleColumn
     ? rmResponsibleColumn
     : findHeader(parsed.headers, ["RM名称"]) || findHeader(parsed.headers, ["RM"]) || rmResponsibleColumn || rmTemporaryColumn;
   const rmGroupColumn = findHeader(parsed.headers, ["RM分组", "Grupo RM"]);
-  const rgmColumn = findHeader(parsed.headers, ["RGM", "RGM负责人", "RGM Responsável", "RM负责人"]);
-  if (!baseColumn || !rmColumn || !rgmColumn) {
-    throw new Error("A planilha de responsáveis precisa conter Base, RM e RGM.");
+  const rgmColumn = findHeader(parsed.headers, ["RGM", "RGM负责人", "RGM Responsável"]);
+  const exactNameJoinOnly = Boolean(
+    rmAreaColumn && rmResponsibleColumn && baseCodeColumn &&
+    parsed.headers.some((header) => normalizedHeader(header) === normalizedHeader("Descrição")),
+  );
+  if (!baseColumn || !rmColumn || (!rgmColumn && !regionColumn)) {
+    throw new Error("A planilha de responsáveis precisa conter Base, RM e RGM ou Regional para localizar o RGM oficial.");
   }
 
   const byBase = new Map<string, ResponsibilityRecord>();
+  const byExactBaseName = new Map<string, ResponsibilityRecord>();
   for (const row of parsed.rows) {
     const base = clean(row[baseColumn]);
     const key = normalizeBaseKey(base);
-    if (!key) continue;
+    const exactKey = normalizeMappedBaseName(base);
+    if (!key || !exactKey) continue;
     const region = regionColumn ? clean(row[regionColumn]) || "Sem regional" : "Sem regional";
     const record: ResponsibilityRecord = {
       region,
       baseCode: baseCodeColumn ? clean(row[baseCodeColumn]) : "",
       base,
       rmArea: rmAreaColumn ? clean(row[rmAreaColumn]) || UNASSIGNED_RM_AREA : UNASSIGNED_RM_AREA,
-      // The current De-Para de bases is the authoritative RM assignment for
-      // every dashboard. RGM continues to come from the saved responsibility
-      // source and its official regional mapping below.
-      rm: UPDATED_RM_BY_BASE[key] ?? responsibleName(row[rmColumn], UNASSIGNED_RM),
+      // Keep the loaded row intact. The legacy static map is consulted only
+      // after an exact official-name lookup fails in responsibilityForBase.
+      rm: responsibleName(row[rmColumn], UNASSIGNED_RM),
       rmGroup: rmGroupColumn ? clean(row[rmGroupColumn]) : "",
-      rgm: officialRgmForRegion(region) || responsibleName(row[rgmColumn], UNASSIGNED_RGM),
+      rgm: officialRgmForRegion(region) || responsibleName(rgmColumn ? row[rgmColumn] : "", UNASSIGNED_RGM),
     };
     const current = byBase.get(key);
-    if (current && (current.rm !== record.rm || current.rgm !== record.rgm)) {
+    if (!exactNameJoinOnly && current && (current.rm !== record.rm || current.rgm !== record.rgm)) {
+      throw new Error(`A base ${base} aparece ligada a responsáveis diferentes.`);
+    }
+    const exactCurrent = byExactBaseName.get(exactKey);
+    if (exactCurrent && (exactCurrent.rm !== record.rm || exactCurrent.rgm !== record.rgm || exactCurrent.rmArea !== record.rmArea)) {
       throw new Error(`A base ${base} aparece ligada a responsáveis diferentes.`);
     }
     byBase.set(key, record);
+    byExactBaseName.set(exactKey, record);
   }
-  const records = [...byBase.values()].sort((a, b) => a.base.localeCompare(b.base, "pt-BR", { numeric: true }));
+  const records = [...(exactNameJoinOnly ? byExactBaseName.values() : byBase.values())]
+    .sort((a, b) => a.base.localeCompare(b.base, "pt-BR", { numeric: true }));
   if (records.length === 0) throw new Error("Nenhuma base foi encontrada na planilha de responsáveis.");
   const rms = [...new Set(records.map((record) => record.rm))].sort((a, b) => a.localeCompare(b, "pt-BR"));
   const rgms = [...new Set(records.map((record) => record.rgm))].sort((a, b) => a.localeCompare(b, "pt-BR"));
   const rmAreas = [...new Set(records.map((record) => record.rmArea))].sort((a, b) => a.localeCompare(b, "pt-BR"));
-  return { parsed, fileName, records, rms, rgms, rmAreas, byBase, updatedAt };
+  return { parsed, fileName, records, rms, rgms, rmAreas, byBase, byExactBaseName, exactNameJoinOnly, updatedAt };
+}
+
+function recordForBase(data: ResponsibilityData | null, base: string): ResponsibilityRecord | undefined {
+  if (!data) return undefined;
+  const exact = data.byExactBaseName.get(normalizeMappedBaseName(base));
+  if (exact || data.exactNameJoinOnly) return exact;
+  return data.byBase.get(normalizeBaseKey(base));
 }
 
 export function rmAreaForBase(data: ResponsibilityData | null, base: string): string {
-  return data?.byBase.get(normalizeBaseKey(base))?.rmArea || UNASSIGNED_RM_AREA;
+  return recordForBase(data, base)?.rmArea || UNASSIGNED_RM_AREA;
+}
+
+/** Resolve a base using the official name join first and the legacy exact key map second. */
+export function resolveResponsibilityForBase(data: ResponsibilityData | null, base: string): ResponsibilityResolution {
+  const record = recordForBase(data, base);
+  const hasOfficialNameMatch = Boolean(data?.exactNameJoinOnly && record);
+  if (record && record.rm !== UNASSIGNED_RM) {
+    return {
+      rm: record.rm,
+      rgm: record.rgm,
+      rmArea: record.rmArea || UNASSIGNED_RM_AREA,
+      source: hasOfficialNameMatch ? "de-para" : "legado",
+    };
+  }
+
+  // A matching official row is authoritative even when its RM field is blank
+  // or marked "-"; do not override that row with a coincidental legacy key.
+  if (hasOfficialNameMatch && record) {
+    return {
+      rm: UNASSIGNED_RM,
+      rgm: record.rgm || UNASSIGNED_RGM,
+      rmArea: record.rmArea || UNASSIGNED_RM_AREA,
+      source: "não encontrado",
+    };
+  }
+
+  const legacyRm = responsibleName(UPDATED_RM_BY_BASE[normalizeBaseKey(base)], UNASSIGNED_RM);
+  if (legacyRm !== UNASSIGNED_RM) {
+    return { rm: legacyRm, rgm: record?.rgm || UNASSIGNED_RGM, rmArea: record?.rmArea || UNASSIGNED_RM_AREA, source: "legado" };
+  }
+
+  return {
+    rm: UNASSIGNED_RM,
+    rgm: record?.rgm || UNASSIGNED_RGM,
+    rmArea: record?.rmArea || UNASSIGNED_RM_AREA,
+    source: "não encontrado",
+  };
 }
 
 export function responsibilityForBase(data: ResponsibilityData | null, base: string): { rm: string; rgm: string } {
-  const record = data?.byBase.get(normalizeBaseKey(base));
-  return record ? { rm: record.rm, rgm: record.rgm } : { rm: UNASSIGNED_RM, rgm: UNASSIGNED_RGM };
+  const { rm, rgm } = resolveResponsibilityForBase(data, base);
+  return { rm, rgm };
+}
+
+/** Monitoring keeps RM from the resolver but always sources RGM from the Excel regional. */
+export function monitoringResponsibilityForBase(
+  data: ResponsibilityData | null,
+  base: string,
+  regionalOrigin: string,
+): ResponsibilityResolution {
+  const assignment = resolveResponsibilityForBase(data, base);
+  return { ...assignment, rgm: officialRgmForRegion(regionalOrigin) ?? assignment.rgm };
 }
 
 export function registeredRegionForBase(data: ResponsibilityData | null, base: string, fallback: string): string {
-  return data?.byBase.get(normalizeBaseKey(base))?.region || fallback;
+  return recordForBase(data, base)?.region || fallback;
 }
 
 export function matchesResponsibility(

@@ -100,6 +100,7 @@ import {
 import {
   buildResponsibilityData,
   matchesResponsibility,
+  monitoringResponsibilityForBase,
   officialRgmForRegion,
   registeredRegionForBase,
   rmAreaForBase,
@@ -898,19 +899,8 @@ function firstScanTotalRetained(metrics: FirstScanMetrics): number {
   return metrics.baseRetained + metrics.baseDispatched + metrics.hubArrived;
 }
 
-/** In this report a smaller retention rate is healthier. */
-function firstScanRateTone(rate: number): string {
-  if (rate <= 0.01) return "is-good";
-  if (rate <= 0.025) return "is-warning";
-  if (rate <= 0.05) return "is-orange";
-  return "is-critical";
-}
-
-function firstScanShareTone(rate: number): string {
-  if (rate <= 0.05) return "is-good";
-  if (rate <= 0.15) return "is-warning";
-  if (rate <= 0.25) return "is-orange";
-  return "is-critical";
+function firstScanDisplayMeasures(metrics: FirstScanMetrics): number[] {
+  return [firstScanTotalRetained(metrics), metrics.baseRetained, metrics.baseDispatched, metrics.hubArrived];
 }
 
 function PtZhHeader({ pt, zh }: { pt: string; zh: string }) {
@@ -2133,6 +2123,51 @@ function PendingLastMileDashboard({ title, onOpenSource, t }: {
   );
 }
 
+function matchesMonitoringResponsibility(
+  data: ResponsibilityData | null,
+  base: string,
+  regionalOrigin: string,
+  selectedRms: ReadonlySet<string>,
+  selectedRgms: ReadonlySet<string>,
+): boolean {
+  const { rm, rgm } = monitoringResponsibilityForBase(data, base, regionalOrigin);
+  return selectedRms.has(rm) && selectedRgms.has(rgm);
+}
+
+function monitoringResponsibilityOptionsForData(data: LoadedData, responsibility: ResponsibilityData | null) {
+  const rms = new Set<string>();
+  const rgms = new Set<string>();
+  if (data.parsed.baseColumn) {
+    for (const row of data.parsed.rows) {
+      const base = rowBase(row, data.parsed.baseColumn);
+      const assignment = monitoringResponsibilityForBase(responsibility, base, rowRegion(row, data.parsed.regionColumn));
+      rms.add(assignment.rm);
+      rgms.add(assignment.rgm);
+    }
+  }
+  return {
+    rms: [...rms].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    rgms: [...rgms].sort((a, b) => a.localeCompare(b, "pt-BR")),
+  };
+}
+
+function monitoringBasesForSelection(
+  data: LoadedData,
+  regions: Set<string>,
+  responsibility: ResponsibilityData | null,
+  selectedRms: ReadonlySet<string>,
+  selectedRgms: ReadonlySet<string>,
+): string[] {
+  if (!data.parsed.baseColumn) return [];
+  const basesInSourceRegions = new Set(basesForRegions(data, regions));
+  return Array.from(new Set(data.parsed.rows.filter((row) => {
+    const base = rowBase(row, data.parsed.baseColumn as string);
+    const region = rowRegion(row, data.parsed.regionColumn);
+    return basesInSourceRegions.has(base) && matchesMonitoringResponsibility(responsibility, base, region, selectedRms, selectedRgms);
+  }).map((row) => rowBase(row, data.parsed.baseColumn as string))))
+    .sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+}
+
 function LanguageSwitcher({ language, onChange, t }: {
   language: DashboardLanguage;
   onChange: (nextLanguage: DashboardLanguage) => void;
@@ -2435,12 +2470,14 @@ export function DashboardApp() {
 
   const resetFilters = useCallback((data = loaded) => {
     if (!data) return;
-    const regions = new Set(data.parsed.rows.map((row) => {
-      const base = rowBase(row, data.parsed.baseColumn as string);
-      return registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, data.parsed.regionColumn));
-    }));
-    setSelectedBases(new Set(basesForRegions(data, regions, responsibilityLoaded)));
+    const regions = new Set(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)));
     setSelectedRegions(regions);
+    const availableResponsibility = monitoringResponsibilityOptionsForData(data, responsibilityLoaded);
+    const rms = new Set([...availableResponsibility.rms, UNASSIGNED_RM]);
+    const rgms = new Set([...availableResponsibility.rgms, UNASSIGNED_RGM]);
+    setSelectedBases(new Set(monitoringBasesForSelection(data, regions, responsibilityLoaded, rms, rgms)));
+    setSelectedRms(rms);
+    setSelectedRgms(rgms);
     const monitoringMetrics = new Set<MonitoringMetric>(MONITORING_METRIC_OPTIONS);
     setSelectedMonitoringMetrics(monitoringMetrics);
     setSelectedStatuses(new Set(monitoringStatusesForMetrics(data.statuses, monitoringMetrics)));
@@ -2449,17 +2486,18 @@ export function DashboardApp() {
     setDateEnd(data.initialEnd);
     setTableQuery("");
     setPage(1);
-    resetResponsibilityFilters();
-  }, [loaded, resetResponsibilityFilters, responsibilityLoaded]);
+  }, [loaded, responsibilityLoaded]);
 
   const applyLoadedData = useCallback((data: LoadedData, responsibility: ResponsibilityData | null = null) => {
     setLoaded(data);
-    const initialRegions = new Set(data.parsed.rows.map((row) => {
-      const base = rowBase(row, data.parsed.baseColumn as string);
-      return registeredRegionForBase(responsibility, base, rowRegion(row, data.parsed.regionColumn));
-    }));
-    setSelectedBases(new Set(basesForRegions(data, initialRegions, responsibility)));
+    const initialRegions = new Set(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)));
     setSelectedRegions(initialRegions);
+    const availableResponsibility = monitoringResponsibilityOptionsForData(data, responsibility);
+    const rms = new Set([...availableResponsibility.rms, UNASSIGNED_RM]);
+    const rgms = new Set([...availableResponsibility.rgms, UNASSIGNED_RGM]);
+    setSelectedBases(new Set(monitoringBasesForSelection(data, initialRegions, responsibility, rms, rgms)));
+    setSelectedRms(rms);
+    setSelectedRgms(rgms);
     const monitoringMetrics = new Set<MonitoringMetric>(MONITORING_METRIC_OPTIONS);
     setSelectedMonitoringMetrics(monitoringMetrics);
     setSelectedStatuses(new Set(monitoringStatusesForMetrics(data.statuses, monitoringMetrics)));
@@ -2744,6 +2782,20 @@ export function DashboardApp() {
         // Large workbooks are intentionally requested one at a time. Concurrent
         // streams can exhaust a browser/edge connection and surface as “Load failed”.
         let payload: SavedWorkbookResponse | null = null;
+        try {
+          const manualSource = (await getMonitoringSource()).source;
+          if (manualSource) {
+            payload = {
+              workbook: {
+                fileName: manualSource.fileName,
+                updatedAt: manualSource.importedAt,
+                parsed: manualSource.parsed,
+              },
+            };
+          }
+        } catch {
+          // Older saved workbooks remain a fallback when no local manual source is available.
+        }
         for (let attempt = 0; attempt < 3 && !payload; attempt += 1) {
           try {
             const monitoringResponse = await apiFetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
@@ -3452,11 +3504,7 @@ export function DashboardApp() {
     return loaded.parsed.rows.filter((row) => {
       const date = String(row[dateColumn] ?? "");
       const base = rowBase(row, baseColumn);
-      const region = registeredRegionForBase(
-        responsibilityLoaded,
-        base,
-        rowRegion(row, loaded.parsed.regionColumn),
-      );
+      const region = rowRegion(row, loaded.parsed.regionColumn);
       const origin = rowOrigin(row, loaded.originColumn);
       return (
         date >= dateStart &&
@@ -3464,7 +3512,7 @@ export function DashboardApp() {
         selectedBases.has(base) &&
         selectedRegions.has(region) &&
         selectedOrigins.has(origin) &&
-        matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms)
+        matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms)
       );
     });
   }, [loaded, dateStart, dateEnd, responsibilityLoaded, selectedBases, selectedOrigins, selectedRegions, selectedRgms, selectedRms]);
@@ -3491,8 +3539,7 @@ export function DashboardApp() {
     if (!loaded?.parsed.baseColumn) return [];
     const groups = new Map<string, MonitoringRegionalSummaryRow>();
     for (const row of monitoringSummaryRows) {
-      const base = rowBase(row, loaded.parsed.baseColumn);
-      const region = registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
+      const region = rowRegion(row, loaded.parsed.regionColumn);
       const current = groups.get(region) ?? {
         region,
         rgm: officialRgmForRegion(region) ?? UNASSIGNED_RGM,
@@ -3514,7 +3561,7 @@ export function DashboardApp() {
     const groups = new Map<string, MonitoringRmSummaryRow>();
     for (const row of monitoringSummaryRows) {
       const base = rowBase(row, loaded.parsed.baseColumn);
-      const responsibility = responsibilityForBase(responsibilityLoaded, base);
+      const responsibility = monitoringResponsibilityForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
       const rmArea = rmAreaForBase(responsibilityLoaded, base);
       const key = `${rmArea}::${responsibility.rm}::${responsibility.rgm}`;
       const current = groups.get(key) ?? {
@@ -3545,8 +3592,7 @@ export function DashboardApp() {
     if (!loaded?.parsed.baseColumn) return [] as Array<{ region: string; rgm: string } & FirstScanMetrics>;
     const groups = new Map<string, { region: string; rgm: string } & FirstScanMetrics>();
     for (const row of monitoringSummaryRows) {
-      const base = rowBase(row, loaded.parsed.baseColumn);
-      const region = registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
+      const region = rowRegion(row, loaded.parsed.regionColumn);
       const current = groups.get(region) ?? { region, rgm: officialRgmForRegion(region) ?? UNASSIGNED_RGM, orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
       addFirstScanMetrics(current, firstScanMetricsForRow(row, loaded.statuses));
       groups.set(region, current);
@@ -3558,7 +3604,7 @@ export function DashboardApp() {
     const groups = new Map<string, { rmArea: string; rm: string; rgm: string } & FirstScanMetrics>();
     for (const row of monitoringSummaryRows) {
       const base = rowBase(row, loaded.parsed.baseColumn);
-      const responsibility = responsibilityForBase(responsibilityLoaded, base);
+      const responsibility = monitoringResponsibilityForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
       const rmArea = rmAreaForBase(responsibilityLoaded, base);
       const key = `${rmArea}\u0000${responsibility.rm}\u0000${responsibility.rgm}`;
       const current = groups.get(key) ?? { rmArea, rm: responsibility.rm, rgm: responsibility.rgm, orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
@@ -3577,9 +3623,9 @@ export function DashboardApp() {
     for (const row of loaded.parsed.rows) {
       if (String(row[loaded.parsed.dateColumn] ?? "") !== previousDate) continue;
       const base = rowBase(row, loaded.parsed.baseColumn);
-      const region = registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
+      const region = rowRegion(row, loaded.parsed.regionColumn);
       const origin = rowOrigin(row, loaded.originColumn);
-      if (!selectedRegions.has(region) || !selectedBases.has(base) || !selectedOrigins.has(origin) || !matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms)) continue;
+      if (!selectedRegions.has(region) || !selectedBases.has(base) || !selectedOrigins.has(origin) || !matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms)) continue;
       const current = groups.get(region) ?? { orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
       addFirstScanMetrics(current, firstScanMetricsForRow(row, loaded.statuses));
       groups.set(region, current);
@@ -3595,8 +3641,7 @@ export function DashboardApp() {
 
     const regions = new Map<string, WorkbookRow[]>();
     for (const row of filteredRows) {
-      const base = rowBase(row, loaded.parsed.baseColumn as string);
-      const region = registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
+      const region = rowRegion(row, loaded.parsed.regionColumn);
       const rows = regions.get(region) ?? [];
       rows.push(row);
       regions.set(region, rows);
@@ -3642,7 +3687,7 @@ export function DashboardApp() {
 
     for (const row of filteredRows) {
       const base = rowBase(row, baseColumn);
-      const region = registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, regionColumn));
+      const region = rowRegion(row, regionColumn);
       const origin = rowOrigin(row, loaded.originColumn);
       const key = `${region}::${base}::${origin}`;
       const current =
@@ -3682,11 +3727,8 @@ export function DashboardApp() {
 
   const monitoringRegionOptions = useMemo(() => {
     if (!loaded?.parsed.baseColumn) return [];
-    return [...new Set(loaded.parsed.rows.map((row) => {
-      const base = rowBase(row, loaded.parsed.baseColumn as string);
-      return registeredRegionForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
-    }))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
-  }, [loaded, responsibilityLoaded]);
+    return [...new Set(loaded.parsed.rows.map((row) => rowRegion(row, loaded.parsed.regionColumn)))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+  }, [loaded]);
   const taxaRegionOptions = useMemo(() => {
     if (!taxaLoaded) return [];
     return [...new Set(taxaLoaded.records.map((record) =>
@@ -3984,10 +4026,18 @@ export function DashboardApp() {
     };
   }, [loaded, movementLoaded, responsibilityLoaded, sellerPerformanceLoaded, taxaLoaded]);
 
+  const monitoringResponsibilityFilterOptions = useMemo(() => {
+    if (!loaded) return { rms: [UNASSIGNED_RM], rgms: [UNASSIGNED_RGM] };
+    const options = monitoringResponsibilityOptionsForData(loaded, responsibilityLoaded);
+    return {
+      rms: [...new Set([...options.rms, UNASSIGNED_RM])].sort((a, b) => a.localeCompare(b, "pt-BR")),
+      rgms: [...new Set([...options.rgms, UNASSIGNED_RGM])].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    };
+  }, [loaded, responsibilityLoaded]);
+
   const baseOptions = useMemo(() => {
     if (!loaded) return [];
-    return basesForRegions(loaded, selectedRegions, responsibilityLoaded).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms));
+    return monitoringBasesForSelection(loaded, selectedRegions, responsibilityLoaded, selectedRms, selectedRgms);
   }, [loaded, responsibilityLoaded, selectedRegions, selectedRgms, selectedRms]);
 
   const taxaBaseOptions = useMemo(() => {
@@ -4756,8 +4806,7 @@ export function DashboardApp() {
     else setSelectedRgms(value);
 
     if (loaded) {
-      setSelectedBases(new Set(basesForRegions(loaded, selectedRegions, responsibilityLoaded).filter((base) =>
-        matchesResponsibility(responsibilityLoaded, base, nextRms, nextRgms))));
+      setSelectedBases(new Set(monitoringBasesForSelection(loaded, selectedRegions, responsibilityLoaded, nextRms, nextRgms)));
       setPage(1);
     }
     if (taxaLoaded) {
@@ -4992,8 +5041,8 @@ export function DashboardApp() {
     return [
       period(dateStart, dateEnd),
       line("Regional", selectedRegions, monitoringRegionOptions, "Todas as regionais"),
-      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
-      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("RM", selectedRms, monitoringResponsibilityFilterOptions.rms, "Todos os RM"),
+      line("Região do RM", selectedRgms, monitoringResponsibilityFilterOptions.rgms, "Todas as regiões do RM"),
       line("Base", selectedBases, baseOptions, "Todas as bases"),
       ...(loaded ? [
         line("Origem do pedido", selectedOrigins, loaded.origins, "Todas as origens"),
@@ -5075,8 +5124,8 @@ export function DashboardApp() {
         row.region,
         row.base,
         row.origin,
-        responsibilityForBase(responsibilityLoaded, row.base).rm,
-        responsibilityForBase(responsibilityLoaded, row.base).rgm,
+        monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm,
+        monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm,
         ...displayedMetrics.map((metric) => monitoringMetricValueFromMap(row.values, loaded?.statuses ?? [], metric)),
         row.total,
       ]);
@@ -5364,13 +5413,16 @@ export function DashboardApp() {
   const responsibilityFiltersAreDefault =
     selectedRms.size === responsibilityFilterOptions.rms.length &&
     selectedRgms.size === responsibilityFilterOptions.rgms.length;
+  const monitoringResponsibilityFiltersAreDefault =
+    selectedRms.size === monitoringResponsibilityFilterOptions.rms.length &&
+    selectedRgms.size === monitoringResponsibilityFilterOptions.rgms.length;
   const filtersAreDefault = Boolean(
     loaded &&
       selectedBases.size === baseOptions.length &&
       selectedRegions.size === monitoringRegionOptions.length &&
       selectedOrigins.size === loaded.origins.length &&
       selectedMonitoringMetrics.size === MONITORING_METRIC_OPTIONS.length &&
-      responsibilityFiltersAreDefault &&
+      monitoringResponsibilityFiltersAreDefault &&
       dateStart === loaded.initialStart &&
       dateEnd === loaded.initialEnd,
   );
@@ -6342,8 +6394,8 @@ export function DashboardApp() {
                                   )}
                                 </td>
                               ))}
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rm}</td>
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rgm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -6362,8 +6414,8 @@ export function DashboardApp() {
                                   )}
                                 </td>
                               ))}
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rm}</td>
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rgm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -7807,8 +7859,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   selected={selectedRegions}
                   onChange={(value) => {
                     setSelectedRegions(value);
-                    if (loaded) setSelectedBases(new Set(basesForRegions(loaded, value, responsibilityLoaded).filter((base) =>
-                      matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms))));
+                    if (loaded) setSelectedBases(new Set(monitoringBasesForSelection(loaded, value, responsibilityLoaded, selectedRms, selectedRgms)));
                     setPage(1);
                   }}
                   allLabel={t("Todas as regionais")}
@@ -7819,7 +7870,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 />
                 <MultiSelect
                   label="RM"
-                  options={responsibilityFilterOptions.rms}
+                  options={monitoringResponsibilityFilterOptions.rms}
                   selected={selectedRms}
                   onChange={(value) => applyResponsibilityFilter("rm", value)}
                   allLabel={t("Todos os RM")}
@@ -7933,10 +7984,90 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
 
             <section className="charts-grid taxa-charts-grid movement-summary-grid monitoring-summary-grid first-scan-summary-grid">
               <article className="chart-card movement-summary-card">
-                <div className="card-heading"><div><span className="card-eyebrow">PRIMEIRA DIGITALIZAÇÃO</span><h2>{t("Retenção por regional")}</h2><p>{t("Dia anterior: retenção na base, despacho da base e chegada ao centro de triagem.")}</p></div><button className="table-download-button" type="button" onClick={() => void downloadRowsAsExcel(firstScanRegionalSummary, [{ header: t("Regional"), value: (row) => row.region }, { header: "RGM", value: (row) => row.rgm }, { header: t("Volume previsto"), value: (row) => row.orderVolume }, { header: t("Retenção total"), value: (row) => firstScanTotalRetained(row) }, { header: t("Taxa de retenção"), value: (row) => safeRate(firstScanTotalRetained(row), row.orderVolume), numberFormat: "0.00%" }, { header: t("Retido na base"), value: (row) => row.baseRetained }, { header: t("Despachado pela base"), value: (row) => row.baseDispatched }, { header: t("Chegado ao centro"), value: (row) => row.hubArrived }], t("Primeira digitalização por regional"), "primeira_digitalizacao_regional.xlsx")}><FileSpreadsheet size={16}/>{t("Baixar Excel")}</button></div>
-                <div className="dashboard-table-wrap movement-summary-table-wrap"><table className="dashboard-data-table movement-summary-table monitoring-summary-table first-scan-table"><thead><tr><th rowSpan={2}><PtZhHeader pt="Regional" zh="始发区域" /></th><th rowSpan={2}>RGM</th><th rowSpan={2}><PtZhHeader pt="Volume previsto" zh="应揽量" /></th><th colSpan={3}><PtZhHeader pt="Retenção total" zh="整体滞留率" /></th><th colSpan={3}><PtZhHeader pt="Retido na base" zh="网点滞留" /></th><th colSpan={3}><PtZhHeader pt="Despachado pela base" zh="网点已发件" /></th><th colSpan={3}><PtZhHeader pt="Chegado ao centro" zh="集散已到件" /></th></tr><tr><th><PtZhHeader pt="Taxa atual" zh="当日滞留率" /></th><th><PtZhHeader pt="Dia anterior" zh="前日滞留率" /></th><th><PtZhHeader pt="Variação" zh="环比" /></th><th><PtZhHeader pt="Quantidade" zh="滞留量" /></th><th><PtZhHeader pt="Taxa" zh="滞留率" /></th><th><PtZhHeader pt="% do total" zh="滞留占比" /></th><th><PtZhHeader pt="Quantidade" zh="滞留量" /></th><th><PtZhHeader pt="Taxa" zh="滞留率" /></th><th><PtZhHeader pt="% do total" zh="滞留占比" /></th><th><PtZhHeader pt="Quantidade" zh="滞留量" /></th><th><PtZhHeader pt="Taxa" zh="滞留率" /></th><th><PtZhHeader pt="% do total" zh="滞留占比" /></th></tr></thead><tbody>{firstScanRegionalSummary.map((row) => { const previous = firstScanPreviousRegional.get(row.region); const rate = safeRate(firstScanTotalRetained(row), row.orderVolume); const previousRate = previous ? safeRate(firstScanTotalRetained(previous), previous.orderVolume) : null; const delta = previousRate === null ? null : rate - previousRate; const total = firstScanTotalRetained(row); const baseRate = safeRate(row.baseRetained, row.orderVolume); const dispatchedRate = safeRate(row.baseDispatched, row.orderVolume); const hubRate = safeRate(row.hubArrived, row.orderVolume); const baseShare = safeRate(row.baseRetained, total); const dispatchedShare = safeRate(row.baseDispatched, total); const hubShare = safeRate(row.hubArrived, total); return <tr key={row.region}><td><span className="regional-chip">{row.region}</span></td><td>{row.rgm}</td><td className="number-cell">{formatNumber(row.orderVolume)}</td><td className={`number-cell severity-cell ${firstScanRateTone(rate)}`}>{formatRate(rate)}</td><td className={`number-cell severity-cell ${previousRate === null ? "" : firstScanRateTone(previousRate)}`}>{previousRate === null ? "—" : formatRate(previousRate)}</td><td className={`number-cell severity-cell ${delta !== null && delta > 0 ? firstScanRateTone(delta) : "is-good"}`}>{delta === null ? "—" : `${delta >= 0 ? "↑" : "↓"} ${formatRate(Math.abs(delta))}`}</td><td className="number-cell">{formatNumber(row.baseRetained)}</td><td className={`number-cell severity-cell ${firstScanRateTone(baseRate)}`}>{formatRate(baseRate)}</td><td className={`number-cell severity-cell ${firstScanShareTone(baseShare)}`}>{formatRate(baseShare)}</td><td className="number-cell">{formatNumber(row.baseDispatched)}</td><td className={`number-cell severity-cell ${firstScanRateTone(dispatchedRate)}`}>{formatRate(dispatchedRate)}</td><td className={`number-cell severity-cell ${firstScanShareTone(dispatchedShare)}`}>{formatRate(dispatchedShare)}</td><td className="number-cell">{formatNumber(row.hubArrived)}</td><td className={`number-cell severity-cell ${firstScanRateTone(hubRate)}`}>{formatRate(hubRate)}</td><td className={`number-cell severity-cell ${firstScanShareTone(hubShare)}`}>{formatRate(hubShare)}</td></tr>; })}</tbody><tfoot><tr><th>{t("Total geral")}</th><td>—</td><td className="number-cell">{formatNumber(firstScanTotal.orderVolume)}</td><td className="number-cell">{formatRate(safeRate(firstScanTotalRetained(firstScanTotal), firstScanTotal.orderVolume))}</td><td className="number-cell">{firstScanPreviousTotal.orderVolume ? formatRate(safeRate(firstScanTotalRetained(firstScanPreviousTotal), firstScanPreviousTotal.orderVolume)) : "—"}</td><td className="number-cell">—</td><td className="number-cell">{formatNumber(firstScanTotal.baseRetained)}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.baseRetained, firstScanTotal.orderVolume))}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.baseRetained, firstScanTotalRetained(firstScanTotal)))}</td><td className="number-cell">{formatNumber(firstScanTotal.baseDispatched)}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.baseDispatched, firstScanTotal.orderVolume))}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.baseDispatched, firstScanTotalRetained(firstScanTotal)))}</td><td className="number-cell">{formatNumber(firstScanTotal.hubArrived)}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.hubArrived, firstScanTotal.orderVolume))}</td><td className="number-cell">{formatRate(safeRate(firstScanTotal.hubArrived, firstScanTotalRetained(firstScanTotal)))}</td></tr></tfoot></table></div>
-              </article>
-              <article className="chart-card movement-summary-card">
+                <div className="card-heading">
+                  <div>
+                    <span className="card-eyebrow">PRIMEIRA DIGITALIZAÇÃO</span>
+                    <h2>{t("Retenção por regional")}</h2>
+                    <p>{t("Última data do filtro; D-1 e variação aparecem quando há histórico anterior disponível.")}</p>
+                  </div>
+                  <button className="table-download-button" type="button" onClick={() => {
+                    const measureHeaders = ["Retenção total", "Retido na base", "Despachado pela base", "Chegado ao centro"];
+                    const columns: ExcelExportColumn<(typeof firstScanRegionalSummary)[number]>[] = [
+                      { header: t("Regional"), value: (row) => row.region },
+                      { header: "RGM", value: (row) => row.rgm },
+                      { header: t("Volume previsto"), value: (row) => row.orderVolume },
+                      ...measureHeaders.flatMap((label, index) => [
+                        { header: `${t(label)} — D-1`, value: (row: (typeof firstScanRegionalSummary)[number]) => {
+                          const previous = firstScanPreviousRegional.get(row.region);
+                          return previous ? firstScanDisplayMeasures(previous)[index] : "—";
+                        } },
+                        { header: `${t(label)} — ${t("Atual")}`, value: (row: (typeof firstScanRegionalSummary)[number]) => firstScanDisplayMeasures(row)[index] },
+                        { header: `${t(label)} — ${t("Variação")}`, value: (row: (typeof firstScanRegionalSummary)[number]) => {
+                          const previous = firstScanPreviousRegional.get(row.region);
+                          return previous ? firstScanDisplayMeasures(row)[index] - firstScanDisplayMeasures(previous)[index] : "—";
+                        } },
+                      ]),
+                    ];
+                    void downloadRowsAsExcel(firstScanRegionalSummary, columns, t("Primeira digitalização por regional"), "primeira_digitalizacao_regional.xlsx");
+                  }}><FileSpreadsheet size={16}/>{t("Baixar Excel")}</button>
+                </div>
+                <div className="dashboard-table-wrap movement-summary-table-wrap">
+                  <table className="dashboard-data-table movement-summary-table monitoring-summary-table first-scan-table">
+                    <thead>
+                      <tr>
+                        <th rowSpan={2}><PtZhHeader pt="Regional" zh="始发区域" /></th>
+                        <th rowSpan={2}>RGM</th>
+                        <th rowSpan={2}><PtZhHeader pt="Volume previsto" zh="应揽量" /></th>
+                        <th colSpan={3}><PtZhHeader pt="Retenção total" zh="整体滞留量" /></th>
+                        <th colSpan={3}><PtZhHeader pt="Retido na base" zh="网点滞留量" /></th>
+                        <th colSpan={3}><PtZhHeader pt="Despachado pela base" zh="网点已发件" /></th>
+                        <th colSpan={3}><PtZhHeader pt="Chegado ao centro" zh="集散已到件" /></th>
+                      </tr>
+                      <tr>
+                        {[0, 1, 2, 3].flatMap((group) => [
+                          <th key={`${group}-previous`}><PtZhHeader pt="D-1" zh="前一日" /></th>,
+                          <th key={`${group}-current`}><PtZhHeader pt="Atual" zh="当前" /></th>,
+                          <th key={`${group}-change`}><PtZhHeader pt="Variação" zh="变化" /></th>,
+                        ])}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {firstScanRegionalSummary.map((row) => {
+                        const previous = firstScanPreviousRegional.get(row.region);
+                        const values = firstScanDisplayMeasures(row);
+                        const previousValues = previous ? firstScanDisplayMeasures(previous) : null;
+                        return (
+                          <tr key={row.region}>
+                            <td><span className="regional-chip">{row.region}</span></td>
+                            <td>{t(row.rgm)}</td>
+                            <td className="number-cell">{formatNumber(row.orderVolume)}</td>
+                            {values.flatMap((value, index) => [
+                              <td className="number-cell" key={`${index}-previous`}>{previousValues ? formatNumber(previousValues[index] ?? 0) : "—"}</td>,
+                              <td className="number-cell" key={`${index}-current`}>{formatNumber(value)}</td>,
+                              <td className="number-cell" key={`${index}-change`}>{previousValues ? formatNumber(value - (previousValues[index] ?? 0)) : "—"}</td>,
+                            ])}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <th>{t("Total geral")}</th>
+                        <td>—</td>
+                        <td className="number-cell">{formatNumber(firstScanTotal.orderVolume)}</td>
+                        {firstScanDisplayMeasures(firstScanTotal).flatMap((value, index) => {
+                          const previousValues = firstScanPreviousTotal.orderVolume > 0 ? firstScanDisplayMeasures(firstScanPreviousTotal) : null;
+                          return [
+                            <td className="number-cell" key={`${index}-previous`}>{previousValues ? formatNumber(previousValues[index] ?? 0) : "—"}</td>,
+                            <td className="number-cell" key={`${index}-current`}>{formatNumber(value)}</td>,
+                            <td className="number-cell" key={`${index}-change`}>{previousValues ? formatNumber(value - (previousValues[index] ?? 0)) : "—"}</td>,
+                          ];
+                        })}
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </article>              <article className="chart-card movement-summary-card">
                 <div className="card-heading"><div><span className="card-eyebrow">RM</span><h2>{t("Retenção por RM")}</h2><p>{t("Responsáveis do RM e RGM para cobrança operacional.")}</p></div><button className="table-download-button" type="button" onClick={() => void downloadRowsAsExcel(firstScanRmSummary, [{ header: t("Região do RM"), value: (row) => row.rmArea }, { header: "RM", value: (row) => row.rm }, { header: "RGM", value: (row) => row.rgm }, { header: t("Volume previsto"), value: (row) => row.orderVolume }, { header: t("Retenção total"), value: (row) => firstScanTotalRetained(row) }, { header: t("Taxa de retenção"), value: (row) => safeRate(firstScanTotalRetained(row), row.orderVolume), numberFormat: "0.00%" }, { header: t("Retido na base"), value: (row) => row.baseRetained }, { header: t("Despachado pela base"), value: (row) => row.baseDispatched }, { header: t("Chegado ao centro"), value: (row) => row.hubArrived }], t("Primeira digitalização por RM"), "primeira_digitalizacao_rm.xlsx")}><FileSpreadsheet size={16}/>{t("Baixar Excel")}</button></div>
                 <div className="dashboard-table-wrap movement-summary-table-wrap"><table className="dashboard-data-table movement-summary-table movement-rm-summary-table monitoring-summary-table first-scan-table"><thead><tr><th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Volume previsto")}</th><th>{t("Retenção total")}</th><th>{t("Taxa de retenção")}</th><th>{t("Retido na base")}</th><th>{t("Taxa")}</th><th>{t("Despachado pela base")}</th><th>{t("Taxa")}</th><th>{t("Chegado ao centro")}</th><th>{t("Taxa")}</th></tr></thead><tbody>{firstScanRmSummary.map((row) => <tr key={`${row.rmArea}-${row.rm}-${row.rgm}`}><td>{row.rmArea}</td><td>{row.rm}</td><td>{row.rgm}</td><td className="number-cell">{formatNumber(row.orderVolume)}</td><td className="number-cell warning-cell">{formatNumber(firstScanTotalRetained(row))}</td><td className="number-cell warning-cell">{formatRate(safeRate(firstScanTotalRetained(row), row.orderVolume))}</td><td className="number-cell">{formatNumber(row.baseRetained)}</td><td className="number-cell">{formatRate(safeRate(row.baseRetained, row.orderVolume))}</td><td className="number-cell">{formatNumber(row.baseDispatched)}</td><td className="number-cell">{formatRate(safeRate(row.baseDispatched, row.orderVolume))}</td><td className="number-cell">{formatNumber(row.hubArrived)}</td><td className="number-cell">{formatRate(safeRate(row.hubArrived, row.orderVolume))}</td></tr>)}</tbody></table></div>
               </article>
@@ -8167,8 +8298,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                               <td><span className="regional-chip">{row.region}</span></td>
                               <td className="base-cell">{row.base}</td>
                               <td>{t(row.origin)}</td>
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rm}</td>
-                              <td>{responsibilityForBase(responsibilityLoaded, row.base).rgm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
+                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
                               {selectedStatusList.map((metric) => (
                                 <td className="number-cell" key={metric}>{formatNumber(monitoringMetricValueFromMap(row.values, loaded.statuses, metric))}</td>
                               ))}
@@ -8184,8 +8315,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                             <td><span className="regional-chip">{row.region}</span></td>
                             <td className="base-cell">{row.base}</td>
                             <td>{t(row.origin)}</td>
-                            <td>{responsibilityForBase(responsibilityLoaded, row.base).rm}</td>
-                            <td>{responsibilityForBase(responsibilityLoaded, row.base).rgm}</td>
+                            <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
+                            <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
                             {selectedStatusList.map((metric) => (
                               <td className="number-cell" key={metric}>{formatNumber(monitoringMetricValueFromMap(row.values, loaded.statuses, metric))}</td>
                             ))}

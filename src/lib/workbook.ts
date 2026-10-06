@@ -109,6 +109,31 @@ export function compactMonitoringWorkbook(parsed: ParsedWorkbook): ParsedWorkboo
   };
 }
 
+/** Restricts the manual monitoring source to its latest published snapshot.
+ * This functional test intentionally does not retain prior dates as history. */
+export function latestMonitoringSnapshot(parsed: ParsedWorkbook): ParsedWorkbook {
+  const dateColumn = parsed.dateColumn;
+  if (!dateColumn) return parsed;
+
+  const latestDate = parsed.rows
+    .map((row) => String(row[dateColumn] ?? ""))
+    .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value))
+    .sort()
+    .at(-1);
+  if (!latestDate) return parsed;
+
+  const rows = parsed.rows.filter((row) => String(row[dateColumn] ?? "") === latestDate);
+  return {
+    ...parsed,
+    rows,
+    metadata: {
+      ...parsed.metadata,
+      rowCount: rows.length,
+      dateRange: { min: latestDate, max: latestDate },
+    },
+  };
+}
+
 export interface ColumnDetection {
   dateColumn?: string;
   baseColumn?: string;
