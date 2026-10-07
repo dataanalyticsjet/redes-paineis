@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -370,6 +371,96 @@ def test_email_fallback_is_allowed_only_for_configured_corporate_domain(
             },
             get_settings(),
         )
+
+
+@pytest.mark.parametrize("configured_region", ["MATRIZ", " matriz "])
+def test_matrix_region_resolves_to_unscoped_matrix_role(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_region: str,
+) -> None:
+    monkeypatch.setenv(
+        "FEISHU_VIEWER_ACCOUNTS_JSON",
+        json.dumps([{
+            "email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "role": "regional",
+            "region": configured_region,
+        }]),
+    )
+    get_settings.cache_clear()
+
+    identity = feishu_auth.resolve_authorized_viewer(
+        {
+            "enterprise_email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "open_id": "matrix-open-id",
+            "name": "Matrix Viewer",
+        },
+        get_settings(),
+    )
+
+    assert identity is not None
+    assert identity["role"] == "matrix"
+    assert identity["region"] is None
+    assert identity["base"] is None
+
+
+@pytest.mark.parametrize("configured_region", ["SPE", "SPS"])
+def test_regular_region_keeps_regional_role_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_region: str,
+) -> None:
+    monkeypatch.setenv(
+        "FEISHU_VIEWER_ACCOUNTS_JSON",
+        json.dumps([{
+            "email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "role": "regional",
+            "region": configured_region,
+        }]),
+    )
+    get_settings.cache_clear()
+
+    identity = feishu_auth.resolve_authorized_viewer(
+        {
+            "enterprise_email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "open_id": "regional-open-id",
+        },
+        get_settings(),
+    )
+
+    assert identity is not None
+    assert identity["role"] == "regional"
+    assert identity["region"] == configured_region
+    assert identity["base"] is None
+
+
+def test_base_viewer_keeps_existing_base_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "FEISHU_VIEWER_ACCOUNTS_JSON",
+        json.dumps([{
+            "email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "role": "regional",
+            "base": "Base 1",
+        }]),
+    )
+    get_settings.cache_clear()
+
+    identity = feishu_auth.resolve_authorized_viewer(
+        {
+            "enterprise_email": "allowed@example.test",
+            "tenant_key": "tenant-test",
+            "open_id": "base-open-id",
+        },
+        get_settings(),
+    )
+
+    assert identity is not None
+    assert identity["role"] == "regional"
+    assert identity["region"] is None
+    assert identity["base"] == "BASE 1"
 
 
 def test_feishu_owner_subject_uses_tenant_and_open_id_not_display_name() -> None:

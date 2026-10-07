@@ -377,11 +377,24 @@ def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[
         ),
         settings.feishu_session_secret or "",
     )
+    resolved_role = viewer.role
+    resolved_region = viewer.region
+    resolved_base = viewer.base
+    if (
+        resolved_role == "regional"
+        and resolved_base is None
+        and resolved_region is not None
+        and resolved_region.strip().casefold() == "matriz"
+    ):
+        resolved_role = "matrix"
+        resolved_region = None
+        resolved_base = None
+
     return {
         "username": display_name or email,
-        "role": viewer.role,
-        "region": viewer.region,
-        "base": viewer.base,
+        "role": resolved_role,
+        "region": resolved_region,
+        "base": resolved_base,
         # Keep the Feishu identity private to the backend session. This keyed
         # digest is stable across logins and does not expose provider claims.
         "_owner_subject": owner_subject,

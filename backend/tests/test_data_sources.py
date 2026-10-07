@@ -166,6 +166,66 @@ def test_data_sources_can_be_enabled_in_production_with_a_feishu_session(
     assert response.json()["canImport"] is True
 
 
+def test_matrix_user_data_source_preview_is_not_region_filtered(
+    authenticated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FEISHU_VIEWER_ACCOUNTS_JSON", json.dumps([{
+        "email": "matrix@example.test",
+        "tenant_key": "tenant-test",
+        "role": "regional",
+        "region": " matriz ",
+    }]))
+    monkeypatch.setenv("ALLOWED_CORPORATE_DOMAINS", "example.test")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    identity = feishu_auth.resolve_authorized_viewer(
+        {
+            "enterprise_email": "matrix@example.test",
+            "tenant_key": "tenant-test",
+            "open_id": "matrix-open-id",
+            "name": "Matrix Viewer",
+        },
+        settings,
+    )
+    assert identity is not None
+    assert identity["role"] == "matrix"
+    assert identity["region"] is None
+    assert identity["base"] is None
+
+    matrix_token = feishu_auth.create_local_session(identity, settings)
+    authenticated_client.cookies.set(feishu_auth.SESSION_COOKIE, matrix_token)
+    me = authenticated_client.get("/api/auth/me")
+    response = preview(authenticated_client)
+
+    assert me.status_code == 200
+    assert me.json()["role"] == "matrix"
+    assert me.json()["region"] is None
+    assert me.json()["base"] is None
+    assert response.status_code == 200
+    assert response.json()["rowCount"] == 2
+
+
+def test_regional_user_data_source_preview_keeps_only_its_region(
+    authenticated_client: TestClient,
+) -> None:
+    response = preview(authenticated_client)
+
+    assert response.status_code == 200
+    assert response.json()["rowCount"] == 1
+
+    imported = authenticated_client.post(
+        "/api/data-sources/monitoring/import",
+        json={"previewId": response.json()["previewId"]},
+    )
+
+    assert imported.status_code == 200
+    rows = imported.json()["parsed"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["Regional Origem"] == "SPS"
+
+
 def test_preview_import_get_and_remove_are_local_and_scoped(authenticated_client: TestClient) -> None:
     preview_response = preview(authenticated_client)
     assert preview_response.status_code == 200
