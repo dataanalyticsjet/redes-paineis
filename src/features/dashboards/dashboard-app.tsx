@@ -5161,10 +5161,7 @@ export function DashboardApp() {
       onPrint={handlePrintReport}
       onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
       onShare={openPanelFeishuShare}
-      onDataSource={SOURCE_ID_BY_VIEW[view] ? () => {
-        if (view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE) document.getElementById("taxa-upload")?.click();
-        else setDataSourceDialogId(SOURCE_ID_BY_VIEW[view] ?? null);
-      } : undefined}
+      onDataSource={SOURCE_ID_BY_VIEW[view] ? () => setDataSourceDialogId(SOURCE_ID_BY_VIEW[view] ?? null) : undefined}
       sourceLabel={view === "taxa" && taxaLoaded?.sourceType === "MANUAL_UPLOAD" ? taxaLoaded.fileName : undefined}
       t={t}
     />
@@ -7307,10 +7304,10 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <h2>{taxaLoading ? t("Buscando última atualização...") : t("Publique o Excel de taxa")}</h2>
                   <p>{t("Na primeira carga, selecione até duas planilhas. Depois, envie o arquivo diário: o histórico permanece salvo e somente datas repetidas são atualizadas.")}</p>
                 </div>
-                <label className="primary-upload-button" htmlFor="taxa-upload">
+                <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("taxa")} disabled={taxaLoading}>
                   <Upload size={18} />
                   {taxaLoading ? t("Processando…") : t("Selecionar planilha(s)")}
-                </label>
+                </button>
               </div>
             </>
           ) : (

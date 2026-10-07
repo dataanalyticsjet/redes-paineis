@@ -90,6 +90,10 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(route, /async def write_workbook/);
   assert.match(route, /Depends\(get_current_viewer\)/);
   assert.match(route, /Depends\(require_admin\)/);
+  assert.match(source, /onDataSource=\{SOURCE_ID_BY_VIEW\[view\] \? \(\) => setDataSourceDialogId\(SOURCE_ID_BY_VIEW\[view\] \?\? null\) : undefined\}/);
+  assert.match(source, /className="primary-upload-button" type="button" onClick=\{\(\) => setDataSourceDialogId\("taxa"\)\}/);
+  assert.doesNotMatch(source, /view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE/);
+  assert.match(source, /canManage=\{viewerIdentity\.platform_role === "ADMIN"\}/);
   assert.match(route, /save_workbook/);
   assert.match(route, /get_workbook/);
   assert.match(localWorkbooks, /HISTORY_KINDS/);
