@@ -4,6 +4,18 @@ export type OptionSelection =
 
 export type RmSelection = OptionSelection;
 
+export function allOptionsAreSelected(options: readonly string[], selected: ReadonlySet<string>): boolean {
+  return options.length === selected.size && options.every((option) => selected.has(option));
+}
+
+export function distinctFilterOptions<T>(rows: readonly T[], getValue: (row: T) => string): string[] {
+  return [...new Set(rows.map(getValue))].sort((left, right) => left.localeCompare(right, "pt-BR", { numeric: true }));
+}
+
+export function filterRowsByOption<T>(rows: readonly T[], selected: ReadonlySet<string>, getValue: (row: T) => string): T[] {
+  return rows.filter((row) => selected.has(getValue(row)));
+}
+
 export function selectedOptions(options: readonly string[], selection: OptionSelection): Set<string> {
   const available = new Set(options);
   if (selection.mode === "all") return available;

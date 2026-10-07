@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { optionSelectionFromValues, rmGroupReactKey, rmSelectionFromValues, selectedOptions, selectedRmOptions } from "../src/lib/rm-selection.ts";
+import { allOptionsAreSelected, distinctFilterOptions, filterRowsByOption, optionSelectionFromValues, rmGroupReactKey, rmSelectionFromValues, selectedOptions, selectedRmOptions } from "../src/lib/rm-selection.ts";
 
 test("initial all-RM selection includes every enriched dataset group including Sem RM", () => {
   const options = ["RM A", "RM B", "RM C", "Sem RM", "Sem RM"];
@@ -48,6 +48,38 @@ test("all RM-area selection includes areas added by a source update and supports
   const manuallySelected = selectedOptions(updatedSourceOptions, manualSelection);
   assert.deepEqual([...manuallySelected], ["MG-JDF"]);
   assert.deepEqual(records.filter((record) => manuallySelected.has(record.rmArea)).map((record) => record.rmArea), ["MG-JDF"]);
+});
+
+test("RM-area options stay based on pre-area rows when a single area is selected and return to ALL", () => {
+  const preAreaRows = [
+    { base: "A", rmArea: "Região 1" },
+    { base: "B", rmArea: "Região 2" },
+    { base: "C", rmArea: "Sem região do RM" },
+  ];
+  const options = distinctFilterOptions(preAreaRows, (row) => row.rmArea);
+  const allSelection = { mode: "all" } as const;
+  const initiallySelected = selectedOptions(options, allSelection);
+
+  assert.deepEqual(options, ["Região 1", "Região 2", "Sem região do RM"]);
+  assert.deepEqual([...initiallySelected].sort(), [...options].sort());
+  assert.equal(allOptionsAreSelected(options, initiallySelected), true);
+
+  const oneAreaSelection = optionSelectionFromValues(options, new Set(["Região 1"]));
+  const finalRows = filterRowsByOption(preAreaRows, selectedOptions(options, oneAreaSelection), (row) => row.rmArea);
+  assert.deepEqual(finalRows.map((row) => row.base), ["A"]);
+  assert.deepEqual(distinctFilterOptions(preAreaRows, (row) => row.rmArea), options);
+
+  const returnedToAll = optionSelectionFromValues(options, new Set(options));
+  assert.equal(returnedToAll.mode, "all");
+  assert.deepEqual(filterRowsByOption(preAreaRows, selectedOptions(options, returnedToAll), (row) => row.rmArea), preAreaRows);
+});
+
+test("an ALL selection with one available RM area displays as ALL, not the area's name", () => {
+  const options = ["Sem região do RM"];
+  const selected = selectedOptions(options, { mode: "all" });
+
+  assert.equal(allOptionsAreSelected(options, selected), true);
+  assert.equal(allOptionsAreSelected(options, selected) ? "Todas as regiões do RM" : [...selected][0], "Todas as regiões do RM");
 });
 
 test("RM table keys distinguish groups with the same area and RM but different RGM", () => {

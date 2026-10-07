@@ -121,7 +121,11 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /useState<OptionSelection>\(\{ mode: "all" \}\)/);
   assert.match(source, /selectedOptions\(taxaRmAreaOptions, taxaRmAreaSelection\)/);
   assert.match(source, /optionSelectionFromValues\(taxaRmAreaOptions, value\)/);
-  assert.match(source, /taxaSelectedRmAreas\.has\(rmAreaForBase\(responsibilityLoaded, record\.base\)\)/);
+  assert.match(source, /const selectedLabel = allSelected\s*\? allLabel/);
+  assert.match(source, /const taxaRowsBeforeRmAreaFilter = useMemo/);
+  assert.match(source, /distinctFilterOptions\(taxaRowsBeforeRmAreaFilter/);
+  assert.match(source, /filterRowsByOption\(/);
+  assert.match(source, /resetSearchOnOpen/);
   assert.match(source, /<th>\{t\("Região do RM"\)\}<\/th>/);
   assert.match(source, /<th>\{t\("Responsável do RM"\)\}<\/th>/);
   assert.ok((source.match(/<th>RGM<\/th>/g) ?? []).length >= 2);

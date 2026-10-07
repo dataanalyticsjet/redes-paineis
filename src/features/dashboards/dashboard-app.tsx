@@ -119,6 +119,9 @@ import {
   type ResponsibilityData,
 } from "../../lib/responsibility";
 import {
+  allOptionsAreSelected,
+  distinctFilterOptions,
+  filterRowsByOption,
   optionSelectionFromValues,
   rmGroupReactKey,
   rmSelectionFromValues,
@@ -1922,6 +1925,7 @@ interface MultiSelectProps {
   singular: string;
   plural: string;
   searchable?: boolean;
+  resetSearchOnOpen?: boolean;
   colorOptions?: string[];
   getOptionLabel?: (option: string) => string;
   t: DashboardTranslator;
@@ -1936,14 +1940,16 @@ function MultiSelect({
   singular,
   plural,
   searchable = false,
+  resetSearchOnOpen = false,
   colorOptions,
   getOptionLabel = (option) => option,
   t,
 }: MultiSelectProps) {
   const [query, setQuery] = useState("");
-  const allSelected = selected.size === options.length && options.length > 0;
-  const selectedLabel =
-    selected.size === 1
+  const allSelected = allOptionsAreSelected(options, selected);
+  const selectedLabel = allSelected
+    ? allLabel
+    : selected.size === 1
       ? getOptionLabel([...selected][0])
       : labelForSelection(selected, options, singular, plural, t);
   const filteredOptions = useMemo(() => {
@@ -1962,7 +1968,12 @@ function MultiSelect({
   return (
     <div className="filter-field">
       <span className="filter-label">{label}</span>
-      <details className="multi-select">
+      <details
+        className="multi-select"
+        onToggle={resetSearchOnOpen ? (event) => {
+          if (event.currentTarget.open) setQuery("");
+        } : undefined}
+      >
         <summary>
           <span>{selectedLabel}</span>
           <ChevronDown size={16} aria-hidden="true" />
@@ -4112,12 +4123,22 @@ export function DashboardApp() {
     return monitoringBasesForSelection(loaded, selectedRegions, responsibilityLoaded, selectedRms, selectedRgms);
   }, [loaded, responsibilityLoaded, selectedRegions, selectedRgms, selectedRms]);
 
-  const taxaRmAreaOptions = useMemo(() => {
-    if (!taxaLoaded) return [];
-    const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms));
-    return responsibilityOptions(responsibilityLoaded, bases).rmAreas;
-  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms]);
+  // Build this stage before applying the RM-area selection. Selected bases are
+  // intentionally excluded because changing an RM area also updates that state.
+  const taxaRowsBeforeRmAreaFilter = useMemo(() => {
+    if (!taxaLoaded || !taxaDateStart || !taxaDateEnd || taxaDateStart > taxaDateEnd) return [];
+    return taxaLoaded.records.filter((record) =>
+      record.date >= taxaDateStart &&
+      record.date <= taxaDateEnd &&
+      taxaSelectedRegions.has(record.region) &&
+      taxaSelectedOrigins.has(record.origin) &&
+      matchesResponsibility(responsibilityLoaded, record.base, taxaSelectedRms, selectedRgms));
+  }, [responsibilityLoaded, selectedRgms, taxaDateEnd, taxaDateStart, taxaLoaded, taxaSelectedOrigins, taxaSelectedRegions, taxaSelectedRms]);
+
+  const taxaRmAreaOptions = useMemo(
+    () => distinctFilterOptions(taxaRowsBeforeRmAreaFilter, (record) => rmAreaForBase(responsibilityLoaded, record.base)),
+    [responsibilityLoaded, taxaRowsBeforeRmAreaFilter],
+  );
 
   const taxaSelectedRmAreas = useMemo(
     () => selectedOptions(taxaRmAreaOptions, taxaRmAreaSelection),
@@ -4131,19 +4152,14 @@ export function DashboardApp() {
       taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, base)));
   }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
 
-  const taxaFilteredRecords = useMemo(() => {
-    if (!taxaLoaded || !taxaDateStart || !taxaDateEnd || taxaDateStart > taxaDateEnd) return [];
-    return taxaLoaded.records.filter(
-      (record) =>
-        record.date >= taxaDateStart &&
-        record.date <= taxaDateEnd &&
-        taxaSelectedRegions.has(record.region) &&
-        taxaSelectedBases.has(record.base) &&
-        taxaSelectedOrigins.has(record.origin) &&
-        taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, record.base)) &&
-        matchesResponsibility(responsibilityLoaded, record.base, taxaSelectedRms, selectedRgms),
-    );
-  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaDateStart, taxaDateEnd, taxaSelectedBases, taxaSelectedOrigins, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
+  const taxaFilteredRecords = useMemo(
+    () => filterRowsByOption(
+      taxaRowsBeforeRmAreaFilter.filter((record) => taxaSelectedBases.has(record.base)),
+      taxaSelectedRmAreas,
+      (record) => rmAreaForBase(responsibilityLoaded, record.base),
+    ),
+    [responsibilityLoaded, taxaRowsBeforeRmAreaFilter, taxaSelectedBases, taxaSelectedRmAreas],
+  );
 
   const taxaAttemptTarget = useMemo(
     () => attemptRateTargetForOrigins(taxaSelectedOrigins),
@@ -7418,6 +7434,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     plural={t("regiões do RM")}
                     getOptionLabel={(option) => t(option)}
                     searchable
+                    resetSearchOnOpen
                     t={t}
                   />
                   <MultiSelect
