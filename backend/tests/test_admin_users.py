@@ -45,7 +45,7 @@ def test_admin_lists_users_and_controlled_region_catalog(admin_client: TestClien
     assert users.json()["total"] == 1
     assert users.json()["users"][0]["platformRole"] == "ADMIN"
     assert regions.status_code == 200
-    assert {item["code"] for item in regions.json()["regions"]} == {"SPE", "SPS", "MG", "RJ"}
+    assert {item["code"] for item in regions.json()["regions"]} == {"SPE", "SPS", "MG", "RJ", "SR"}
 
 
 def test_user_administration_requires_an_authenticated_feishu_session() -> None:

@@ -13,6 +13,62 @@ import {
   summarizeSellerOutcomes,
   type SellerMetricRecord,
 } from "../src/lib/seller-monitoring.ts";
+import { SELLER_MONITORING_FIELDS, normalizeSellerMonitoringWorkbook, summarizeSellerMonitoring } from "../src/lib/data-sources/seller-monitoring.ts";
+import { DASHBOARD_DATA_SOURCES } from "../src/lib/data-sources/catalog.ts";
+import type { ParsedWorkbook } from "../src/lib/workbook.ts";
+
+function workbook(): ParsedWorkbook {
+  const row = Object.fromEntries(SELLER_MONITORING_FIELDS.map((header) => [header, 0]));
+  row["Data"] = "2026-10-06";
+  row["Regional Origem"] = "PR";
+  row["PDD de saida"] = "BNU -SC";
+  row["Status atual – Aguardando coleta"] = 12;
+  row["Status atual – Recebido no Drop-off"] = 1;
+  row["Status atual – Coletado"] = 2;
+  row["Status atual – Recebido"] = 3;
+  row["Status atual – Recebido na base"] = 4;
+  row["当前状态-网点发件流程中"] = 5;
+  row["Status atual – Chegou ao SC"] = 6;
+  return {
+    sheetName: "sheet1",
+    headers: [...SELLER_MONITORING_FIELDS],
+    rows: [row],
+    dateColumn: "Data",
+    baseColumn: "PDD de saida",
+    regionColumn: "Regional Origem",
+    originColumn: "Origem do Pedido",
+    statusColumns: [...SELLER_MONITORING_FIELDS.slice(8)],
+    metadata: { sheetNames: ["sheet1"], headerRow: 1, rowCount: 1, columnCount: SELLER_MONITORING_FIELDS.length, columns: [], date1904: false },
+    warnings: [],
+  };
+}
+
+test("J&T source catalog uses the shared manual data-source flow", () => {
+  const source = DASHBOARD_DATA_SOURCES.sellerPerformance;
+  assert.equal(source.configured, true);
+  assert.deepEqual(source.acceptedFormats, [".xlsx", ".xls"]);
+  assert.equal(typeof source.preview, "function");
+  assert.equal(typeof source.import, "function");
+  assert.equal(typeof source.remove, "function");
+});
+
+test("J&T monitoring normalizes the official XLSX contract and retains the existing KPI formula", () => {
+  const parsed = normalizeSellerMonitoringWorkbook(workbook());
+  assert.equal(parsed.dateColumn, "Data");
+  assert.equal(parsed.metadata.dateRange?.max, "2026-10-06");
+  assert.deepEqual(summarizeSellerMonitoring(parsed), {
+    awaiting: 12,
+    processed: 21,
+    total: 33,
+    rate: 21 / 33,
+  });
+});
+
+test("J&T source rejects a missing required status field instead of guessing", () => {
+  const parsed = workbook();
+  parsed.headers = parsed.headers.filter((header) => header !== "Status atual – Chegou ao SC");
+  assert.throws(() => normalizeSellerMonitoringWorkbook(parsed), /data_source_seller_required_columns_missing/);
+});
 
 const records: SellerMetricRecord[] = [
   {

@@ -17,12 +17,17 @@ from app.schemas.data_sources import ParsedWorkbookPayload, PreviewSourceRequest
 from app.services.local_workbooks import (
     LocalWorkbookError,
     data_root,
+    get_workbook,
     get_dashboard_source as read_saved_dashboard_source,
     remove_dashboard_source as remove_saved_dashboard_source,
     save_dashboard_source,
 )
-from app.services.row_scope import scope_parsed_rows
+from app.services.row_scope import canonicalize_parsed_regions, scope_parsed_rows
 from app.services.taxa_history import TaxaHistoryError, merge_taxa_history
+from app.services.seller_monitoring_history import (
+    SellerMonitoringHistoryError,
+    merge_seller_monitoring_history,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,25 @@ TAXA_REQUIRED_HEADERS = (
     "应上门商家量",
     "未上门商家量",
 )
+
+SELLER_MONITORING_REQUIRED_HEADERS = (
+    "Data",
+    "Regional Origem",
+    "PDD de saida",
+    "Cliente",
+    "Loja",
+    "Id Seller/remetente",
+    "Motorista Designado",
+    "Origem do Pedido",
+    "Status atual – Aguardando coleta",
+    "Status atual – Recebido no Drop-off",
+    "Status atual – Coletado",
+    "Status atual – Recebido",
+    "Status atual – Recebido na base",
+    "当前状态-网点发件流程中",
+    "Status atual – Chegou ao SC",
+)
+SELLER_MONITORING_METRIC_HEADERS = SELLER_MONITORING_REQUIRED_HEADERS[8:]
 
 
 def reset_temporary_data_sources() -> None:
@@ -214,10 +238,23 @@ def _scope_parsed(parsed: dict[str, Any], identity: dict[str, str | None]) -> di
         parsed["regionColumn"] = region_column
     if base_column:
         parsed["baseColumn"] = base_column
+    root = data_root(get_settings().data_directory)
+    responsibility_entry = get_workbook(root, "responsibilityList")
+    responsibility = responsibility_entry[1] if responsibility_entry else None
     try:
-        return scope_parsed_rows(parsed, identity)
+        return scope_parsed_rows(parsed, identity, responsibility)
     except PermissionError:
         raise DataSourceError("data_source_scope_unavailable", 403) from None
+
+
+def scope_dashboard_parsed(parsed: dict[str, Any], identity: dict[str, str | None]) -> dict[str, Any]:
+    """Canonicalize from the shared official base map, then apply viewer scope."""
+    return _scope_parsed(parsed, identity)
+
+
+def _official_responsibility(root: Any) -> dict[str, Any] | None:
+    entry = get_workbook(root, "responsibilityList")
+    return entry[1] if entry else None
 
 
 def _source_period(parsed: dict[str, Any]) -> dict[str, str] | None:
@@ -296,9 +333,58 @@ def _taxa_adapter(parsed: dict[str, Any], identity: dict[str, str | None]) -> tu
     return scoped, fields, missing, period, not missing and bool(valid_dates)
 
 
+def _seller_monitoring_adapter(parsed: dict[str, Any], identity: dict[str, str | None]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, str] | None, bool]:
+    header_by_normalized = {_normalized_header(header): header for header in parsed["headers"]}
+    fields = [
+        {
+            "name": expected,
+            "classification": "required",
+            "present": _normalized_header(expected) in header_by_normalized,
+        }
+        for expected in SELLER_MONITORING_REQUIRED_HEADERS
+    ]
+    missing = [field["name"] for field in fields if not field["present"]]
+    date_column = header_by_normalized.get(_normalized_header("Data"))
+    base_column = header_by_normalized.get(_normalized_header("PDD de saida"))
+    region_column = header_by_normalized.get(_normalized_header("Regional Origem"))
+    origin_column = header_by_normalized.get(_normalized_header("Origem do Pedido"))
+    metric_columns = [header_by_normalized.get(_normalized_header(header)) for header in SELLER_MONITORING_METRIC_HEADERS]
+    metric_columns = [column for column in metric_columns if column]
+    parsed.update({
+        "dateColumn": date_column,
+        "baseColumn": base_column,
+        "regionColumn": region_column,
+        "originColumn": origin_column,
+        "statusColumns": metric_columns,
+    })
+    if not parsed["rows"]:
+        missing.append("Dados da planilha")
+    valid_dates = _valid_dates(parsed)
+    if not valid_dates:
+        missing.append("Data válida")
+    numeric_metrics = any(
+        isinstance(row.get(column), (int, float)) and not isinstance(row.get(column), bool)
+        for row in parsed["rows"]
+        for column in metric_columns
+    )
+    if not numeric_metrics:
+        missing.append("Métricas numéricas")
+    recognized = {column for column in [date_column, base_column, region_column, origin_column, *metric_columns] if column}
+    fields.extend(
+        {"name": header, "classification": "unrecognized", "present": True}
+        for header in parsed["headers"]
+        if header not in recognized
+    )
+    scoped = _scope_parsed(parsed, identity)
+    scoped_dates = _valid_dates(scoped)
+    period = {"start": scoped_dates[0], "end": scoped_dates[-1]} if scoped_dates else None
+    return scoped, fields, sorted(set(missing)), period, not missing
+
+
 _DATA_SOURCE_ADAPTERS = {
     "monitoring": _monitoring_adapter,
     "taxa": _taxa_adapter,
+    "sellerPerformance": _seller_monitoring_adapter,
 }
 
 
@@ -321,6 +407,9 @@ def create_dashboard_preview(
     if source_bytes is not None and len(source_bytes) != request.file_size_bytes:
         raise DataSourceError("data_source_file_size_mismatch")
     file_name, content_type, parsed = _validate_upload(request)
+    root = data_root(get_settings().data_directory)
+    responsibility = _official_responsibility(root)
+    parsed = canonicalize_parsed_regions(parsed, responsibility)
     adapter = _DATA_SOURCE_ADAPTERS[dashboard_id]
     scoped, fields, missing, period, can_import = adapter(parsed, identity)
     history_preview: dict[str, Any] | None = None
@@ -329,11 +418,16 @@ def create_dashboard_preview(
             current_source = read_saved_dashboard_source(
                 data_root(get_settings().data_directory), dashboard_id, owner_key
             )
+            current_parsed = current_source.get("parsed") if current_source else None
+            if current_parsed is not None:
+                current_parsed = canonicalize_parsed_regions(current_parsed, responsibility)
             history_merge = merge_taxa_history(
-                current_source.get("parsed") if current_source else None,
+                current_parsed,
                 parsed,
             )
         except TaxaHistoryError as error:
+            raise DataSourceError(error.code, 422) from error
+        except SellerMonitoringHistoryError as error:
             raise DataSourceError(error.code, 422) from error
         except LocalWorkbookError as error:
             raise DataSourceError(str(error), 500) from error
@@ -350,6 +444,33 @@ def create_dashboard_preview(
             "replacedDates": history_merge.replaced_dates,
             "fileRowCount": len(scoped_incoming["rows"]),
             "blankBaseRows": scoped_blank_base_rows,
+            "resultingRows": len(scoped_history["rows"]),
+        }
+    elif dashboard_id == "sellerPerformance" and can_import:
+        try:
+            current_source = read_saved_dashboard_source(root, dashboard_id, owner_key)
+            current_parsed = current_source.get("parsed") if current_source else None
+            if current_parsed is not None:
+                current_parsed = canonicalize_parsed_regions(current_parsed, responsibility)
+            history_merge = merge_seller_monitoring_history(
+                current_parsed,
+                parsed,
+            )
+        except SellerMonitoringHistoryError as error:
+            raise DataSourceError(error.code, 422) from error
+        except LocalWorkbookError as error:
+            raise DataSourceError(str(error), 500) from error
+        period = history_merge.file_period
+        scoped_incoming = _scope_parsed(parsed, identity)
+        scoped_history = _scope_parsed(history_merge.parsed, identity)
+        history_preview = {
+            "newDates": history_merge.new_dates,
+            "replacedDates": history_merge.replaced_dates,
+            "fileRowCount": len(scoped_incoming["rows"]),
+            "blankBaseRows": sum(
+                1 for row in scoped_incoming["rows"]
+                if not str(row.get(scoped_incoming.get("baseColumn"), "") or "").strip()
+            ),
             "resultingRows": len(scoped_history["rows"]),
         }
 
@@ -420,13 +541,32 @@ def import_dashboard_preview(
         period_to_save = entry.period
         rows_to_save = entry.row_count
         try:
+            responsibility = _official_responsibility(data_root(get_settings().data_directory))
+            parsed_to_save = canonicalize_parsed_regions(parsed_to_save, responsibility)
+            if dashboard_id == "sellerPerformance":
+                current_source = read_saved_dashboard_source(
+                    data_root(get_settings().data_directory), dashboard_id, owner_key
+                )
+                current_parsed = current_source.get("parsed") if current_source else None
+                if current_parsed is not None:
+                    current_parsed = canonicalize_parsed_regions(current_parsed, responsibility)
+                history_merge = merge_seller_monitoring_history(
+                    current_parsed,
+                    parsed_to_save,
+                )
+                parsed_to_save = history_merge.parsed
+                period_to_save = history_merge.merged_period
+                rows_to_save = history_merge.resulting_rows
             if dashboard_id == "taxa":
                 current_source = read_saved_dashboard_source(
                     data_root(get_settings().data_directory), dashboard_id, owner_key
                 )
+                current_parsed = current_source.get("parsed") if current_source else None
+                if current_parsed is not None:
+                    current_parsed = canonicalize_parsed_regions(current_parsed, responsibility)
                 history_merge = merge_taxa_history(
-                    current_source.get("parsed") if current_source else None,
-                    entry.parsed,
+                    current_parsed,
+                    parsed_to_save,
                 )
                 parsed_to_save = history_merge.parsed
                 period_to_save = history_merge.merged_period
@@ -445,6 +585,8 @@ def import_dashboard_preview(
                 row_count=rows_to_save,
             )
         except TaxaHistoryError as error:
+            raise DataSourceError(error.code, 422) from error
+        except SellerMonitoringHistoryError as error:
             raise DataSourceError(error.code, 422) from error
         except LocalWorkbookError as error:
             raise DataSourceError(str(error), 500) from error

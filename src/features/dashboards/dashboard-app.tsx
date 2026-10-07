@@ -6,6 +6,7 @@ import { DashboardActionBand } from "./dashboard-action-band";
 import { UserControl } from "../users/user-control";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
 import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-source-dialog";
+import { ResponsibilitySourceDialog } from "../data-sources/responsibility-source-dialog";
 import { PresentationLogin } from "../auth/presentation-login";
 import { apiFetch, apiUrl } from "../../lib/api-url.ts";
 import {
@@ -104,6 +105,9 @@ import {
   scopeDemoSellerReference,
   scopeDemoWorkbook,
 } from "../../lib/demo-fixtures";
+import { aggregateTaxaRmPoc } from "../../lib/taxa-rm-poc";
+import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loader";
+import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
 import {
   buildResponsibilityData,
   matchesResponsibility,
@@ -291,7 +295,7 @@ const FEISHU_AUTH_ERROR_MESSAGES: Record<string, string> = {
 };
 type BipagemProblemType = "collection" | "receipt";
 type SellerTier = SellerCategory;
-type UploadKind = "monitoring" | "taxa" | "epop" | "movement" | "sellerList" | "sellerSpecialList" | "sellerPerformance" | "bipagem" | "damage";
+type UploadKind = "monitoring" | "taxa" | "epop" | "movement" | "sellerList" | "sellerSpecialList" | "bipagem" | "damage";
 
 interface PendingUpload {
   kind: UploadKind;
@@ -1082,64 +1086,6 @@ function findOptionalHeader(headers: string[], candidates: string[]): string {
       const normalized = normalizeHeaderText(header);
       return normalizedCandidates.some((candidate) => normalized.includes(candidate) || candidate.includes(normalized));
     }) ?? "";
-}
-
-/** Seller reports contain many display-only columns. Keep only the fields the
- * dashboard uses before posting them, so a normal 20 MB XLSX stays safe for
- * the Worker after JSON serialization. */
-function compactSellerPerformanceWorkbook(
-  parsed: ParsedWorkbook,
-  officialSellerCodes: ReadonlySet<string>,
-): ParsedWorkbook {
-  const required = [
-    parsed.dateColumn ?? findRequiredHeader(parsed.headers, "Data", ["Data"]),
-    findRequiredHeader(parsed.headers, "Regional", ["Regional Origem", "Regional"]),
-    findRequiredHeader(parsed.headers, "Base", ["PDD de saida", "PDD de saída", "Base"]),
-    findRequiredHeader(parsed.headers, "Cliente", ["Cliente"]),
-    findRequiredHeader(parsed.headers, "Loja", ["Loja", "Seller"]),
-    findRequiredHeader(parsed.headers, "Id Seller/remetente", ["Id Seller/remetente", "Id Seller", "global_seller_id"]),
-    findRequiredHeader(parsed.headers, "Origem do Pedido", ["Origem do Pedido"]),
-    findRequiredHeader(parsed.headers, "Aguardando coleta", ["Status atual – Aguardando coleta", "Aguardando coleta"]),
-    findRequiredHeader(parsed.headers, "Recebido no Drop-off", ["Status atual – Recebido no Drop-off", "Recebido no Drop-off"]),
-    findRequiredHeader(parsed.headers, "Coletado", ["Status atual – Coletado", "Coletado"]),
-    findRequiredHeader(parsed.headers, "Recebido", ["Status atual – Recebido"]),
-    findRequiredHeader(parsed.headers, "Recebido na base", ["Status atual – Recebido na base", "Recebido na base"]),
-    findRequiredHeader(parsed.headers, "Em trânsito a partir da base", ["Status atual – Em trânsito a partir da base", "Em trânsito a partir da base", "Em transito a partir da base", "当前状态-网点发件流程中", "当前状态-网点发件在途"]),
-    findRequiredHeader(parsed.headers, "Chegou ao SC", ["Status atual – Chegou ao SC", "Chegou ao SC"]),
-  ];
-  const headers = [...new Set(required)];
-  // The dashboard filters sellers by date, regional, base and seller code.
-  // Client, display name and origin are descriptive fields, not dimensions;
-  // keeping them in the grouping key explodes a 20 MB daily report into a
-  // payload too large for the Worker.
-  const dimensionHeaders = [required[0], required[1], required[2], required[5]];
-  const descriptiveHeaders = [required[3], required[4], required[6]];
-  const metricHeaders = required.slice(7);
-  const sellerCodeHeader = required[5];
-  const grouped = new Map<string, WorkbookRow>();
-  for (const source of parsed.rows) {
-    // The JMS export contains a large history for sellers outside the official
-    // list. Those rows never appear in this dashboard, so excluding them here
-    // prevents the browser from serializing and publishing unused data.
-    if (!officialSellerCodes.has(normalizeSellerCode(source[sellerCodeHeader]))) continue;
-    const dimensions = dimensionHeaders.map((header) => source[header] ?? "");
-    const key = JSON.stringify(dimensions);
-    const row = grouped.get(key) ?? Object.fromEntries([
-      ...dimensionHeaders.map((header, index) => [header, dimensions[index]]),
-      ...descriptiveHeaders.map((header) => [header, source[header] ?? ""]),
-      ...metricHeaders.map((header) => [header, 0]),
-    ]);
-    for (const header of metricHeaders) row[header] = parseNumeric(row[header]) + parseNumeric(source[header]);
-    grouped.set(key, row);
-  }
-  const rows = [...grouped.values()];
-  return {
-    ...parsed,
-    headers,
-    rows,
-    metadata: { ...parsed.metadata, rowCount: rows.length, columnCount: headers.length, columns: parsed.metadata.columns.filter((column) => headers.includes(column.key)) },
-    warnings: [...parsed.warnings, `Resumo de sellers consolidado: ${parsed.rows.length.toLocaleString("pt-BR")} linhas em ${rows.length.toLocaleString("pt-BR")} grupos.`],
-  };
 }
 
 function movementValue(row: WorkbookRow, column: string): number {
@@ -2330,6 +2276,7 @@ export function DashboardApp() {
   const [viewerAuthLoading, setViewerAuthLoading] = useState(false);
   const [view, setView] = useState<DashboardView>("home");
   const [showUserControl, setShowUserControl] = useState(false);
+  const [responsibilitySourceDialogOpen, setResponsibilitySourceDialogOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisCopied, setAnalysisCopied] = useState(false);
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
@@ -2377,6 +2324,8 @@ export function DashboardApp() {
   const [sellerReferenceLoaded, setSellerReferenceLoaded] = useState<SellerReferenceData | null>(null);
   const [specialSellerLoaded, setSpecialSellerLoaded] = useState<SpecialSellerData | null>(null);
   const [sellerPerformanceLoaded, setSellerPerformanceLoaded] = useState<SellerPerformanceData | null>(null);
+  const [sellerManualSource, setSellerManualSource] = useState<ManualDataSource | null>(null);
+  const [sellerDependencyMessage, setSellerDependencyMessage] = useState<string | null>(null);
   const [responsibilityLoaded, setResponsibilityLoaded] = useState<ResponsibilityData | null>(null);
   const [selectedRms, setSelectedRms] = useState<Set<string>>(new Set([UNASSIGNED_RM]));
   const [selectedRgms, setSelectedRgms] = useState<Set<string>>(new Set([UNASSIGNED_RGM]));
@@ -2878,19 +2827,31 @@ export function DashboardApp() {
         }
         if (!payload) throw new Error("Não foi possível carregar a última atualização. Tente novamente em instantes.");
         if (!active) return;
-        const responsibilityResponse = await fetchOptionalWorkbook("responsibilityList");
-        let responsibility: ResponsibilityData | null = null;
-        {
-          const responsibilityWorkbook = await readOptionalWorkbook(responsibilityResponse);
-          if (responsibilityWorkbook) {
-            responsibility = buildResponsibilityData(
-              responsibilityWorkbook.parsed,
-              responsibilityWorkbook.fileName,
-              responsibilityWorkbook.updatedAt,
-            );
-            setResponsibilityLoaded(responsibility);
-            setSelectedRms(new Set([...responsibility.rms, UNASSIGNED_RM]));
-            setSelectedRgms(new Set([...responsibility.rgms, UNASSIGNED_RGM]));
+        let responsibilityResponse: Response | null = null;
+        try {
+          responsibilityResponse = await apiFetch("/api/workbook?kind=responsibilityList", {
+            cache: "no-store",
+            headers: authorizationHeaders,
+          });
+        } catch (cause) {
+          const failureType = cause instanceof Error ? cause.name : "unknown";
+          console.error(`[Redes Painéis] Requisição de responsibilityList falhou (${failureType}); Monitoramento e Taxa seguirão sem associações oficiais até a fonte estar disponível.`);
+        }
+        const responsibilityLoad = await readResponsibilityWorkbookResponse(responsibilityResponse);
+        const responsibility: ResponsibilityData | null = responsibilityLoad.status === "loaded" ? responsibilityLoad.data : null;
+        if (responsibility) {
+          setResponsibilityLoaded(responsibility);
+          setSelectedRms(new Set([...responsibility.rms, UNASSIGNED_RM]));
+          setSelectedRgms(new Set([...responsibility.rgms, UNASSIGNED_RGM]));
+        } else {
+          setResponsibilityLoaded(null);
+          setSelectedRms(new Set([UNASSIGNED_RM]));
+          setSelectedRgms(new Set([UNASSIGNED_RGM]));
+          if (responsibilityLoad.status === "missing") {
+            console.warn("[Redes Painéis] De-para oficial responsibilityList não publicado; regiões sem associação oficial permanecerão como Sem região do RM.");
+          } else {
+            const status = responsibilityLoad.status === "http-error" ? `HTTP ${responsibilityLoad.httpStatus}` : responsibilityLoad.status;
+            console.error(`[Redes Painéis] Falha ao carregar ou validar responsibilityList (${status}); KPIs continuam disponíveis e regiões sem associação não serão inferidas.`);
           }
         }
         const monitoringWorkbook = payload.workbook ?? await readTaxaHistory(await fetchOptionalWorkbook("monitoring"), "monitoring");
@@ -2968,16 +2929,21 @@ export function DashboardApp() {
             setSellerReferenceLoaded(sellerReference);
           }
         }
-        const sellerPerformanceResponse = await fetchOptionalWorkbook("sellerPerformance");
+        let sellerManualSourceResponse: ManualDataSource | null = null;
+        try {
+          sellerManualSourceResponse = (await getSellerMonitoringSource()).source;
+          if (active) setSellerManualSource(sellerManualSourceResponse);
+        } catch (cause) {
+          console.error("[Redes Painéis] Falha ao carregar a fonte compartilhada do Monitoramento J&T.", cause);
+        }
         if (sellerReference) {
-          const sellerPerformanceWorkbook = await readOptionalWorkbook(sellerPerformanceResponse);
           if (!active) return;
-          if (sellerPerformanceWorkbook) {
+          if (sellerManualSourceResponse) {
             const sellerData = buildSellerPerformanceData(
-                sellerPerformanceWorkbook.parsed,
+                sellerManualSourceResponse.parsed,
                 sellerReference,
-                sellerPerformanceWorkbook.fileName,
-                sellerPerformanceWorkbook.updatedAt,
+                sellerManualSourceResponse.fileName,
+                sellerManualSourceResponse.importedAt,
               );
             const isMatrixViewer = viewerIdentity?.organizational_scope === "matrix" || viewerIdentity?.role === "matrix";
             const assignedRegions = viewerIdentity?.effective_regions?.length
@@ -2996,6 +2962,8 @@ export function DashboardApp() {
             } : sellerData;
             applySellerPerformanceLoadedData(scopedSellerData, responsibility);
           }
+        } else if (sellerManualSourceResponse && active) {
+          setSellerDependencyMessage("A fonte J&T está publicada. Categorias e recortes por seller aguardam a lista oficial de sellers.");
         }
         const bipagemResponse = await fetchOptionalWorkbook("bipagem");
         {
@@ -3334,56 +3302,6 @@ export function DashboardApp() {
     }
   }, [applySellerPerformanceLoadedData, responsibilityLoaded, sellerPerformanceLoaded, sellerReferenceLoaded]);
 
-  const loadSellerPerformanceFile = useCallback(async (file: File) => {
-    setError(null);
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    if (extension !== "xlsx" && extension !== "xls") {
-      setError("Selecione um arquivo Excel no formato .xlsx ou .xls.");
-      return;
-    }
-    if (file.size > 20 * 1024 * 1024) {
-      setError("O resumo JMS de sellers aceita arquivos de até 20 MB.");
-      return;
-    }
-    if (!sellerReferenceLoaded) {
-      setError("Carregue primeiro a lista oficial de sellers para cruzar com o resumo JMS.");
-      return;
-    }
-
-    setSellerLoading(true);
-    try {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 30));
-      const [{ parseWorkbook }] = await Promise.all([import("../../lib/workbook")]);
-      const officialSellerCodes = new Set(sellerReferenceLoaded.records.map((record) => normalizeSellerCode(record.sellerCode)));
-      const parsed = compactSellerPerformanceWorkbook(parseWorkbook(await file.arrayBuffer()), officialSellerCodes);
-      const requestPayload = JSON.stringify({ kind: "sellerPerformance", fileName: file.name, parsed });
-      if (requestPayload.length > 25 * 1024 * 1024) {
-        throw new Error("A planilha processada ficou muito grande para publicar. Divida o arquivo em partes menores e envie novamente.");
-      }
-      const response = await postWorkbook(
-        { kind: "sellerPerformance", fileName: file.name, parsed },
-        [file],
-        uploadAuthorizationRef.current,
-      );
-      const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
-      if (!response.ok || !payload.workbook) {
-        throw new Error(payload.error ?? "Não foi possível publicar o resumo JMS de sellers.");
-      }
-
-      applySellerPerformanceLoadedData(
-        buildSellerPerformanceData(payload.workbook.parsed, sellerReferenceLoaded, payload.workbook.fileName, payload.workbook.updatedAt),
-        responsibilityLoaded,
-      );
-      setView("sellers");
-    } catch (cause) {
-      if (recoverFromStaleModuleImport(cause)) return;
-      const message = cause instanceof Error ? cause.message : "Não foi possível ler esta planilha.";
-      setError(message.replace(/^Não foi possível ler o arquivo Excel\s*/i, "Não foi possível ler a planilha "));
-    } finally {
-      setSellerLoading(false);
-    }
-  }, [applySellerPerformanceLoadedData, responsibilityLoaded, sellerReferenceLoaded]);
-
   const loadBipagemFile = useCallback(async (file: File) => {
     setError(null);
     const extension = file.name.split(".").pop()?.toLowerCase();
@@ -3465,8 +3383,8 @@ export function DashboardApp() {
     if (upload.kind === "sellerSpecialList") return loadSpecialSellerFile(file);
     if (upload.kind === "bipagem") return loadBipagemFile(file);
     if (upload.kind === "damage") return loadDamageFile(file);
-    return loadSellerPerformanceFile(file);
-  }, [loadBipagemFile, loadDamageFile, loadEpopFile, loadFile, loadMovementFile, loadSellerListFile, loadSellerPerformanceFile, loadSpecialSellerFile, loadTaxaFiles]);
+    return Promise.resolve();
+  }, [loadBipagemFile, loadDamageFile, loadEpopFile, loadFile, loadMovementFile, loadSellerListFile, loadSpecialSellerFile, loadTaxaFiles]);
 
   const queueUpload = useCallback((upload: PendingUpload) => {
     if (viewerIdentity?.platform_role !== "ADMIN") return;
@@ -3549,12 +3467,6 @@ export function DashboardApp() {
   const handleSpecialSellerFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) queueUpload({ kind: "sellerSpecialList", files: [file] });
-    event.target.value = "";
-  };
-
-  const handleSellerPerformanceFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) queueUpload({ kind: "sellerPerformance", files: [file] });
     event.target.value = "";
   };
 
@@ -4355,44 +4267,7 @@ export function DashboardApp() {
 
   const taxaRmPoc = useMemo(() => {
     const dates = taxaRegionalPoc.dates;
-    const dateSet = new Set(dates);
-    const rmGroups = new Map<string, { rmArea: string; rm: string; rgm: string; byDate: Map<string, { orders: number; toCollect: number; withAttempts: number }> }>();
-    for (const record of taxaFilteredRecords) {
-      if (!dateSet.has(record.date)) continue;
-      const responsibility = responsibilityForBase(responsibilityLoaded, record.base);
-      const rm = responsibility.rm;
-      const rgm = officialRgmForRegion(record.region) ?? responsibility.rgm;
-      const rmArea = rmAreaForBase(responsibilityLoaded, record.base);
-      const groupKey = `${rmArea}\u0000${rm}\u0000${rgm}`;
-      const group = rmGroups.get(groupKey) ?? { rmArea, rm, rgm, byDate: new Map<string, { orders: number; toCollect: number; withAttempts: number }>() };
-      const byDate = group.byDate;
-      const current = byDate.get(record.date) ?? { orders: 0, toCollect: 0, withAttempts: 0 };
-      current.orders += record.orders;
-      current.toCollect += record.toCollect;
-      current.withAttempts += record.collectedWithAttempts;
-      byDate.set(record.date, current);
-      rmGroups.set(groupKey, group);
-    }
-    const rows = [...rmGroups.values()]
-      .map(({ rmArea, rm, rgm, byDate }) => {
-        const values = dates.map((date) => {
-          const value = byDate.get(date) ?? { orders: 0, toCollect: 0, withAttempts: 0 };
-          return { ...value, rate: taxaRate(value.withAttempts, value.toCollect) };
-        });
-        return { rmArea, rm, rgm, values, totalOrders: values.reduce((sum, value) => sum + value.orders, 0) };
-      })
-      .filter((row) => row.totalOrders > 0 || row.values.some((value) => value.toCollect > 0))
-      .sort((a, b) => {
-        const aLatest = a.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
-        const bLatest = b.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
-        return (
-          Number(bLatest.toCollect > 0) - Number(aLatest.toCollect > 0) ||
-          (bLatest.rate ?? -1) - (aLatest.rate ?? -1) ||
-          bLatest.toCollect - aLatest.toCollect ||
-          a.rmArea.localeCompare(b.rmArea, dashboardLocale(language), { numeric: true }) ||
-          a.rm.localeCompare(b.rm, dashboardLocale(language), { numeric: true })
-        );
-      });
+    const rows = aggregateTaxaRmPoc(taxaFilteredRecords, dates, responsibilityLoaded, dashboardLocale(language));
     return { dates, rows, total: taxaRegionalPoc.total, totalOrders: taxaRegionalPoc.totalOrders };
   }, [language, responsibilityLoaded, taxaFilteredRecords, taxaRegionalPoc]);
 
@@ -5201,7 +5076,15 @@ export function DashboardApp() {
             : view === "bipagem" ? bipagemLoaded
               : view === "damage" ? damageLoaded
                 : null;
-  const dataSourceSummary: DataSourceSummary | null = dataSourceDataset ? {
+  const dataSourceSummary: DataSourceSummary | null = view === "sellers" && sellerManualSource ? {
+    sourceType: "MANUAL_UPLOAD",
+    fileName: sellerManualSource.fileName,
+    fileSizeBytes: sellerManualSource.fileSizeBytes,
+    contentType: sellerManualSource.contentType,
+    updatedAt: sellerManualSource.importedAt,
+    rowCount: sellerManualSource.rowCount,
+    period: sellerManualSource.period ?? undefined,
+  } : dataSourceDataset ? {
     sourceType: "sourceType" in dataSourceDataset
       ? dataSourceDataset.sourceType
       : dataSourceDataset.fileName === DEMO_WORKBOOK_NAME ? "DEMONSTRATION" : "MANUAL_UPLOAD",
@@ -5722,14 +5605,6 @@ export function DashboardApp() {
       />
       <input id="epop-upload" className="sr-only" type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={handleEpopFileInput} disabled={epopLoading} />
       <input
-        id="seller-performance-upload"
-        className="sr-only"
-        type="file"
-        accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-        onChange={handleSellerPerformanceFileInput}
-        disabled={sellerLoading || !sellerReferenceLoaded}
-      />
-      <input
         id="bipagem-upload"
         className="sr-only"
         type="file"
@@ -5750,7 +5625,10 @@ export function DashboardApp() {
         <div className="presentation-home-header-inner">
           <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
           <div className="presentation-header-actions">
-            {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button> : null}
+            {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <>
+              <button className="presentation-user-control-button" type="button" onClick={() => setResponsibilitySourceDialogOpen(true)}><FileSpreadsheet size={18} /> {t("De-para oficial")}</button>
+              <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button>
+            </> : null}
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
             <button className="presentation-logout-button" type="button" onClick={endViewerSession}>
               <LogOut size={18} /> {t("Sair")}
@@ -5835,6 +5713,11 @@ export function DashboardApp() {
       ) : null}
 
       <FeishuShareDialog preview={feishuSharePreview} onClose={() => setFeishuSharePreview(null)} t={t} />
+      {responsibilitySourceDialogOpen ? <ResponsibilitySourceDialog
+        onClose={() => setResponsibilitySourceDialogOpen(false)}
+        onPublished={() => window.location.reload()}
+        t={t}
+      /> : null}
       {dataSourceDialogId ? <DataSourceDialog
         config={DASHBOARD_DATA_SOURCES[dataSourceDialogId]}
         currentSource={dataSourceSummary}
@@ -5852,8 +5735,21 @@ export function DashboardApp() {
                 buildTaxaLoadedData(source.parsed, source.fileName, source.importedAt, "MANUAL_UPLOAD", source.fileSizeBytes, source.contentType),
               );
               setView("taxa");
+            } else if (dataSourceDialogId === "sellerPerformance") {
+              setSellerManualSource(source);
+              if (sellerReferenceLoaded) {
+                applySellerPerformanceLoadedData(
+                  buildSellerPerformanceData(source.parsed, sellerReferenceLoaded, source.fileName, source.importedAt),
+                  responsibilityLoaded,
+                );
+              } else {
+                setSellerPerformanceLoaded(null);
+                setSellerDependencyMessage("A fonte J&T foi salva. Categorias e recortes por seller aguardam a lista oficial de sellers.");
+              }
+              setView("sellers");
+              if (sellerReferenceLoaded) setSellerDependencyMessage(null);
             }
-            setError(null);
+            if (dataSourceDialogId !== "sellerPerformance" || sellerReferenceLoaded) setError(null);
           } catch {
             setError("data_source_import_invalid");
           }
@@ -5871,6 +5767,9 @@ export function DashboardApp() {
                 buildTaxaLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", "DEMONSTRATION"),
               );
             } else setTaxaLoaded(null);
+          } else if (dataSourceDialogId === "sellerPerformance") {
+            setSellerManualSource(null);
+            setSellerPerformanceLoaded(null);
           }
         }}
         formatDateTime={formatDateTime}
@@ -6558,9 +6457,9 @@ export function DashboardApp() {
             <>
               <section className="dashboard-intro">
                 <div>
-                  <div className="eyebrow"><ShieldCheck size={15} /> {t("Sellers prioritários")}</div>
-                  <h1>{t("Monitoramento J&T 重点保障")}</h1>
-                  <p>{t("Carregue a lista oficial de sellers J&T 重点保障 e 单商多服 e depois o resumo JMS diário para acompanhar processamento por seller, regional e base.")}</p>
+                  <div className="eyebrow"><ShieldCheck size={15} /> {t("Monitoramento J&T")}</div>
+                  <h1>{t("Monitoramento J&T")}</h1>
+                  <p>{t("Acompanhe o processamento de coleta por seller, regional e base usando o resumo JMS publicado.")}</p>
                 </div>
                 <div className="dataset-meta" aria-label={t("Resumo aguardando sellers")}>
                   <span><ShieldCheck size={16} /> {t("Lista oficial de sellers")}</span>
@@ -6569,6 +6468,7 @@ export function DashboardApp() {
                   <span><PackageCheck size={16} /> {t("Seller")}</span>
                 </div>
               </section>
+              {dashboardActionBand}
               {error ? (
                 <div className="inline-alert error" role="alert">
                   <CircleAlert size={18} />
@@ -6576,24 +6476,21 @@ export function DashboardApp() {
                   <button type="button" onClick={() => setError(null)} aria-label={t("Fechar aviso")}><X size={16} /></button>
                 </div>
               ) : null}
+              {sellerDependencyMessage ? <div className="inline-alert" role="status"><CircleAlert size={18} /><span>{t(sellerDependencyMessage)}</span></div> : null}
               <div className={`filters-card upload-ready-card sellers-upload-card${sellerLoading ? " loading" : ""}`}>
                 <div className="upload-ready-icon" aria-hidden="true">
                   <ShieldCheck size={26} />
                 </div>
                 <div>
                   <span className="card-eyebrow">{t("LISTA DE SELLERS IMPORTANTES")}</span>
-                  <h2>{t(sellerReferenceLoaded ? "Lista oficial de sellers publicada" : "Publique a lista oficial de sellers")}</h2>
-                  <p>{t("Use a planilha contendo global_seller_id e 重点保障商家类型, com as categorias J&T 重点保障 e 单商多服.")}</p>
+                  <h2>{t(sellerReferenceLoaded ? "Lista oficial de sellers publicada" : "Lista oficial de sellers indisponível")}</h2>
+                  <p>{t(sellerReferenceLoaded ? "As categorias exibidas vêm da lista oficial publicada." : "A lista oficial de sellers não está publicada neste ambiente. As categorias não serão inferidas do XLSX J&T.")}</p>
                   {sellerReferenceLoaded ? (
                     <small>
                       {t("{count} sellers na lista", { count: formatNumber(sellerReferenceLoaded.records.length) })} · {sellerReferenceLoaded.fileName}
                     </small>
                   ) : null}
                 </div>
-                <label className="primary-upload-button" htmlFor="seller-list-upload">
-                  <Upload size={18} />
-                  {t(sellerReferenceLoaded ? "Atualizar lista oficial" : "Carregar lista oficial")}
-                </label>
               </div>
               <div className={`filters-card upload-ready-card sellers-upload-card${sellerLoading ? " loading" : ""}`}>
                 <div className="upload-ready-icon" aria-hidden="true">
@@ -6601,13 +6498,12 @@ export function DashboardApp() {
                 </div>
                 <div>
                   <span className="card-eyebrow">{t("RESUMO JMS DIÁRIO")}</span>
-                  <h2>{t(sellerPerformanceLoaded ? "Resumo JMS publicado" : "Publique o resumo JMS")}</h2>
+                  <h2>{t(sellerManualSource ? "Fonte J&T publicada" : "Fonte J&T não publicada")}</h2>
                   <p>{t("Este é o arquivo abastecido diariamente para calcular aguardando coleta, processados e percentual de processamento.")}</p>
                 </div>
-                <label className={`primary-upload-button${!sellerReferenceLoaded ? " disabled" : ""}`} htmlFor={sellerReferenceLoaded ? "seller-performance-upload" : undefined}>
-                  <Upload size={18} />
-                  {t(sellerLoading ? "Processando…" : "Carregar resumo JMS")}
-                </label>
+                <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("sellerPerformance")} disabled={sellerLoading}>
+                  <Database size={18} /> {t(sellerManualSource ? "Gerenciar fonte J&T" : "Adicionar fonte J&T")}
+                </button>
               </div>
             </>
           ) : (

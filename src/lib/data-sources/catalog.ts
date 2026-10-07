@@ -14,6 +14,13 @@ import {
   previewTaxaSource,
   removeTaxaSource,
 } from "./taxa.ts";
+import {
+  importSellerMonitoringSource,
+  normalizeSellerMonitoringWorkbook,
+  parseSellerMonitoringWorkbookFile,
+  previewSellerMonitoringSource,
+  removeSellerMonitoringSource,
+} from "./seller-monitoring.ts";
 
 export type DataSourceMode = "MANUAL" | "AUTOMATIC";
 export type DashboardDataSourceStatus = "SOURCE_CONFIGURED" | "SOURCE_NOT_CONFIGURED";
@@ -121,7 +128,22 @@ export const DASHBOARD_DATA_SOURCES: Record<DashboardSourceId, DashboardDataSour
   },
   epop: pendingSource("epop", "Cobertura EPOP"),
   movement: pendingSource("movement", "Sem movimentação"),
-  sellerPerformance: pendingSource("sellerPerformance", "Monitoramento de sellers prioritários J&T"),
+  sellerPerformance: {
+    id: "sellerPerformance",
+    title: "Monitoramento J&T",
+    description: "Fonte compartilhada do Monitoramento J&T.",
+    status: "SOURCE_CONFIGURED",
+    configured: true,
+    sourceModes: ["MANUAL"],
+    acceptedFormats: [".xlsx", ".xls"],
+    requiredFields: ["Data", "Regional Origem", "PDD de saida", "Id Seller/remetente", "Status numérico"],
+    optionalFields: ["Cliente", "Loja", "Motorista Designado", "Origem do Pedido"],
+    parse: parseSellerMonitoringWorkbookFile,
+    normalize: normalizeSellerMonitoringWorkbook,
+    preview: previewSellerMonitoringSource,
+    import: importSellerMonitoringSource,
+    remove: removeSellerMonitoringSource,
+  },
   bipagem: pendingSource("bipagem", "Falha na coleta PDD"),
   damage: pendingSource("damage", "Extravio"),
   tt5cd: pendingSource("tt5cd", "TT5CD"),

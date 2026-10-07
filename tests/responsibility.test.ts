@@ -102,6 +102,7 @@ test("uses the official RGM responsible for every configured regional", () => {
   assert.equal(officialRgmForRegion("GP"), "@王存超 CUNCHAO WANG（Wagner）");
   assert.equal(officialRgmForRegion("CE"), "@彭龙颂 LONGSONG PENG（Lucas）");
   assert.equal(officialRgmForRegion("BA"), "@董妍 (YAN SANTOS)");
+  assert.equal(officialRgmForRegion(" sr "), "董文彤 WENTONG DONG (Winta)");
   assert.equal(officialRgmForRegion("Sem regional"), undefined);
 });
 

@@ -22,13 +22,16 @@ from app.services.data_sources import (
     get_dashboard_source,
     import_dashboard_preview,
     remove_dashboard_source,
+    scope_dashboard_parsed,
 )
 from app.services.feishu_auth import SESSION_COOKIE
-from app.services.row_scope import scope_parsed_rows
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/data-sources", tags=["data sources"])
-MAX_PREVIEW_REQUEST_BYTES = 64 * 1024 * 1024
+# The real J&T monitoring export serializes to roughly 85 MB of row JSON plus
+# the original workbook. Keep a bounded cap large enough for that supported
+# contract without making preview requests unbounded.
+MAX_PREVIEW_REQUEST_BYTES = 160 * 1024 * 1024
 
 
 def _data_source_viewer(
@@ -79,7 +82,7 @@ def _scope_source(source: dict[str, object] | None, viewer: AuthenticatedViewer)
     if not isinstance(parsed_value, dict):
         return source
     try:
-        parsed = scope_parsed_rows(parsed_value, viewer.identity)
+        parsed = scope_dashboard_parsed(parsed_value, viewer.identity)
     except PermissionError:
         raise HTTPException(status_code=403, detail="viewer_scope_unavailable") from None
     scoped = {**source, "parsed": parsed, "rowCount": len(parsed.get("rows") or [])}

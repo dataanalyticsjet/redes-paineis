@@ -46,7 +46,7 @@ def safe_workbook_name(value: str) -> str:
 def _directory(root: Path, category: str, key: str) -> Path:
     if category == "workbooks" and key not in WORKBOOK_KINDS:
         raise LocalWorkbookError("workbook_kind_invalid")
-    if category == "sources" and not re.fullmatch(r"[a-z0-9-]{1,64}", key):
+    if category == "sources" and not re.fullmatch(r"[A-Za-z0-9-]{1,64}", key):
         raise LocalWorkbookError("data_source_dashboard_invalid")
     return root / category / key
 
@@ -175,7 +175,7 @@ def save_dashboard_source(
     period: dict[str, str] | None,
     row_count: int,
 ) -> dict[str, Any]:
-    if not re.fullmatch(r"[a-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
         raise LocalWorkbookError("data_source_owner_invalid")
     parent = root / "sources" / dashboard_id / owner_key
     source_files = [(file_name, source_bytes)] if source_bytes is not None else []
@@ -196,7 +196,7 @@ def save_dashboard_source(
 
 
 def get_dashboard_source(root: Path, dashboard_id: str, owner_key: str) -> dict[str, Any] | None:
-    if not re.fullmatch(r"[a-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
         raise LocalWorkbookError("data_source_owner_invalid")
     parent = root / "sources" / dashboard_id / owner_key
     metadata = read_metadata(parent / "current.json")
@@ -210,7 +210,7 @@ def get_dashboard_source(root: Path, dashboard_id: str, owner_key: str) -> dict[
 
 
 def remove_dashboard_source(root: Path, dashboard_id: str, owner_key: str) -> None:
-    if not re.fullmatch(r"[a-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", dashboard_id) or not re.fullmatch(r"[a-f0-9]{64}", owner_key):
         raise LocalWorkbookError("data_source_owner_invalid")
     parent = root / "sources" / dashboard_id / owner_key
     (parent / "current.json").unlink(missing_ok=True)

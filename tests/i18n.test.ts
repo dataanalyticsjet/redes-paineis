@@ -26,6 +26,9 @@ test("translates labels and interpolates operational values", () => {
   assert.equal(translateDashboardText("zh", "Parcial"), "部分完成");
   assert.equal(translateDashboardText("zh", "Status atual – Coletado"), "当前状态 – 已揽收");
   assert.equal(translateDashboardText("en", "Problemáticos Não Registrados"), "Unregistered exceptions");
+  assert.equal(translateDashboardText("pt", "Regional Sul"), "Regional Sul");
+  assert.equal(translateDashboardText("en", "Regional Sul"), "Southern Region");
+  assert.equal(translateDashboardText("zh", "Regional Sul"), "南部区域");
 });
 
 test("preserves workbook data labels that are not in the translation catalog", () => {

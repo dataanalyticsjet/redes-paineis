@@ -71,9 +71,13 @@ test("Node server-renders the protected Feishu presentation login", async () => 
 
 test("persists the latest workbook and exposes all requested filters", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const taxaRmPoc = await readFile(new URL("../src/lib/taxa-rm-poc.ts", import.meta.url), "utf8");
+  const responsibilityLoader = await readFile(new URL("../src/lib/responsibility-loader.ts", import.meta.url), "utf8");
   const taxaMetrics = await readFile(new URL("../src/lib/taxa-summary.ts", import.meta.url), "utf8");
   const route = await readFile(new URL("../backend/app/api/workbooks.py", import.meta.url), "utf8");
+  const rowScope = await readFile(new URL("../backend/app/services/row_scope.py", import.meta.url), "utf8");
   const parser = await readFile(new URL("../src/lib/workbook.ts", import.meta.url), "utf8");
+  const sellerSource = await readFile(new URL("../src/lib/data-sources/seller-monitoring.ts", import.meta.url), "utf8");
   const layout = await readFile(new URL("../src/routes/__root.tsx", import.meta.url), "utf8");
   const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
   const apiMain = await readFile(new URL("../backend/app/main.py", import.meta.url), "utf8");
@@ -84,6 +88,13 @@ test("persists the latest workbook and exposes all requested filters", async () 
 
   assert.match(source, /import\("\.\.\/\.\.\/lib\/workbook"\)/);
   assert.match(source, /apiFetch\("\/api\/workbook"/);
+  assert.match(source, /apiFetch\("\/api\/workbook\?kind=responsibilityList"/);
+  assert.match(source, /Requisição de responsibilityList falhou/);
+  assert.match(source, /Falha ao carregar ou validar responsibilityList/);
+  assert.match(source, /readResponsibilityWorkbookResponse\(responsibilityResponse\)/);
+  assert.match(responsibilityLoader, /status: "request-failed"/);
+  assert.match(responsibilityLoader, /status: "http-error"/);
+  assert.match(responsibilityLoader, /status: "invalid"/);
   assert.match(source, /Última atualização/);
   assert.match(source, /formatDateTime/);
   assert.match(route, /async def read_workbook/);
@@ -114,7 +125,10 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /Taxa de coleta com tentativa por regional — período selecionado/);
   assert.match(source, /className="dashboard-data-table taxa-poc-table taxa-poc-regional-rgm-table"/);
   assert.match(source, /Taxa com tentativa por RM — período selecionado/);
-  assert.match(source, /const responsibility = responsibilityForBase\(responsibilityLoaded, record\.base\)/);
+  assert.match(source, /aggregateTaxaRmPoc\(taxaFilteredRecords, dates, responsibilityLoaded, dashboardLocale\(language\)\)/);
+  assert.match(taxaRmPoc, /const rmArea = rmAreaForBase\(responsibility, record\.base\)/);
+  assert.match(taxaRmPoc, /const groupKey = `\$\{rmArea\}\\u0000\$\{rm\}\\u0000\$\{rgm\}`/);
+  assert.match(taxaRmPoc, /return \{ rmArea, rm, rgm, values, totalOrders:/);
   assert.doesNotMatch(source, /showTaxaRmPoc/);
   assert.match(source, /className="dashboard-data-table taxa-poc-table taxa-poc-rm-table"/);
   assert.match(source, /label=\{t\("Região do RM"\)\}/);
@@ -155,20 +169,20 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(styles, /\.dashboard-data-table tfoot th/);
   assert.match(styles, /@media print[\s\S]*?\.dashboard-data-table thead th/);
   assert.match(source, /percentual do último dia determina o ranking do maior para o menor/);
-  assert.match(source, /const aLatest = a\.values\.at\(-1\)/);
-  assert.match(source, /const bLatest = b\.values\.at\(-1\)/);
-  assert.match(source, /Number\(bLatest\.toCollect > 0\) - Number\(aLatest\.toCollect > 0\)/);
-  assert.match(source, /\(bLatest\.rate \?\? -1\) - \(aLatest\.rate \?\? -1\)/);
+  assert.match(taxaRmPoc, /const aLatest = a\.values\.at\(-1\)/);
+  assert.match(taxaRmPoc, /const bLatest = b\.values\.at\(-1\)/);
+  assert.match(taxaRmPoc, /Number\(bLatest\.toCollect > 0\) - Number\(aLatest\.toCollect > 0\)/);
+  assert.match(taxaRmPoc, /\(bLatest\.rate \?\? -1\) - \(aLatest\.rate \?\? -1\)/);
   assert.match(source, /latestPerformanceDate = taxaRegionalPoc\.dates\.at\(-1\)/);
   assert.match(source, /Number\(b\.latestToCollect > 0\) - Number\(a\.latestToCollect > 0\)/);
   assert.match(source, /\(b\.latestAttemptRate \?\? -1\) - \(a\.latestAttemptRate \?\? -1\)/);
-  assert.match(source, /totalOrders: values\.reduce\(\(sum, value\) => sum \+ value\.orders, 0\)/);
+  assert.match(taxaRmPoc, /totalOrders: values\.reduce\(\(sum, value\) => sum \+ value\.orders, 0\)/);
   assert.ok((source.match(/<th>\{t\("Total de pedidos"\)\}<\/th>/g) ?? []).length >= 2);
   assert.match(source, /taxaRegionalPoc\.totalOrders/);
   assert.match(source, /downloadTaxaRegionalPocExcel/);
   assert.match(source, /taxa_de_coleta_gerencial_/);
   assert.match(source, /taxaRmPoc\.totalOrders/);
-  assert.match(source, /row\.totalOrders > 0 \|\| row\.values\.some\(\(value\) => value\.toCollect > 0\)/);
+  assert.match(taxaRmPoc, /row\.totalOrders > 0 \|\| row\.values\.some\(\(value\) => value\.toCollect > 0\)/);
   assert.match(source, /total: taxaRegionalPoc\.total, totalOrders: taxaRegionalPoc\.totalOrders/);
   assert.match(source, /Total de pedidos\\n总订单量/);
   assert.match(styles, /\.taxa-poc-orders-column\s*\{[\s\S]*?width: 92px/);
@@ -323,7 +337,12 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /kind: "sellerSpecialList"/);
   assert.doesNotMatch(source, /id="seller-special-filter"/);
   assert.match(route, /kind == "sellerSpecialList"/);
-  assert.match(source, /kind: "sellerPerformance"/);
+  assert.doesNotMatch(source, /kind: "sellerPerformance"/);
+  assert.match(source, /getSellerMonitoringSource/);
+  assert.match(source, /setDataSourceDialogId\("sellerPerformance"\)/);
+  assert.match(sellerSource, /previewDashboardDataSource\("sellerPerformance", file, parsed\)/);
+  assert.match(sellerSource, /importDashboardDataSource\("sellerPerformance", previewId\)/);
+  assert.doesNotMatch(source, /id="seller-performance-upload"/);
   assert.match(source, /buildSellerReferenceData/);
   assert.match(source, /buildSellerPerformanceData/);
   assert.match(source, /preferredSheetName: "SELLERS"/);
@@ -438,6 +457,8 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.doesNotMatch(source, /sessionStorage/);
   assert.match(source, /FEISHU_COOKIE_SESSION/);
   assert.doesNotMatch(source, /\/api\/view-auth/);
-  assert.match(route, /def _filter_rows\(/);
   assert.match(route, /def _scope_kind\(/);
+  assert.match(route, /scope_parsed_rows\(parsed, identity, responsibility\)/);
+  assert.match(rowScope, /canonicalize_parsed_regions\(parsed, responsibility\)/);
+  assert.match(rowScope, /official_regions\.get\(_normalized_base_name\(row\.get\(base_column\)\)\)/);
 });

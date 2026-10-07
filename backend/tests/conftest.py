@@ -35,6 +35,7 @@ def user_test_session_factory() -> Iterator[sessionmaker[Session]]:
             Region(region_code="SPS", display_name="São Paulo Sul", is_active=True),
             Region(region_code="MG", display_name="Minas Gerais", is_active=True),
             Region(region_code="RJ", display_name="Rio de Janeiro", is_active=True),
+            Region(region_code="SR", display_name="Regional Sul", is_active=True),
         ])
         db.commit()
     try:

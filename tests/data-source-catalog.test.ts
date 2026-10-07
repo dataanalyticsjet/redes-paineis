@@ -32,12 +32,12 @@ test("source catalog lists every dashboard ID and configures only known contract
   ]);
   assert.deepEqual(
     Object.values(DASHBOARD_DATA_SOURCES).filter((source) => source.configured).map((source) => source.id).sort(),
-    ["monitoring", "taxa"],
+    ["monitoring", "sellerPerformance", "taxa"],
   );
 });
 
 test("configured adapters declare parsing, normalization, preview, import and removal", () => {
-  for (const id of ["monitoring", "taxa"] as const) {
+  for (const id of ["monitoring", "taxa", "sellerPerformance"] as const) {
     const source = DASHBOARD_DATA_SOURCES[id];
     assert.deepEqual(source.acceptedFormats, [".xlsx", ".xls"]);
     assert.equal(source.sourceModes.includes("MANUAL"), true);
@@ -49,11 +49,12 @@ test("configured adapters declare parsing, normalization, preview, import and re
     assert.equal(source.status, "SOURCE_CONFIGURED");
   }
   assert.equal(DASHBOARD_DATA_SOURCES.taxa.requiredFields.length, 22);
+  assert.equal(DASHBOARD_DATA_SOURCES.sellerPerformance.title, "Monitoramento J&T");
 });
 
 test("unconfigured dashboards declare pending status and no accepted formats or file parser", () => {
   for (const id of [
-    "epop", "movement", "sellerPerformance", "bipagem", "damage",
+    "epop", "movement", "bipagem", "damage",
     "tt5cd", "loss", "last-mile-damage", "volumetry", "no-movement-10-days", "no-movement-3-14-days",
     "retained-10-days", "return", "last-mile-sla", "t0", "rollover", "pod-approval-rate", "pnr-rate",
     "pnr-packages-target", "dispatch-delivery-window", "shipping-time", "driver-attendance", "bagging-consolidated-report",

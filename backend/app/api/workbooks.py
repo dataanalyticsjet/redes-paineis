@@ -3,13 +3,15 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+import hashlib
 import json
 import logging
 import re
 import unicodedata
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import UploadFile
@@ -25,6 +27,13 @@ from app.services.local_workbooks import (
     get_workbook,
     save_workbook,
 )
+from app.services.responsibility_workbooks import (
+    ResponsibilityWorkbookError,
+    create_preview as create_responsibility_preview,
+    publish_preview as publish_responsibility_preview,
+    validate_responsibility_workbook,
+)
+from app.services.feishu_auth import SESSION_COOKIE
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["workbooks"])
@@ -45,6 +54,10 @@ class WorkbookPayload(BaseModel):
     merge_history: bool = Field(default=False, alias="mergeHistory")
 
 
+class ResponsibilityPublishPayload(BaseModel):
+    preview_id: str = Field(alias="previewId", pattern=r"^[0-9a-f-]{36}$")
+
+
 def _error(code: str, status: int) -> JSONResponse:
     return JSONResponse({"error": code}, status_code=status, headers={"Cache-Control": "no-store"})
 
@@ -60,14 +73,28 @@ def _column(headers: list[str], candidates: tuple[str, ...]) -> str | None:
     return next((normalized[_normalized(candidate)] for candidate in candidates if _normalized(candidate) in normalized), None)
 
 
-def _filter_rows(parsed: dict[str, Any], identity: dict[str, str | None]) -> dict[str, Any]:
-    return scope_parsed_rows(parsed, identity)
+def _responsibility_data(root: Path, kind: str) -> dict[str, Any] | None:
+    if kind == "responsibilityList":
+        return None
+    entry = get_workbook(root, "responsibilityList")
+    return entry[1] if entry else None
 
 
-def _seller_ids(performance: dict[str, Any] | None, identity: dict[str, str | None]) -> set[str]:
+def _responsibility_owner_key(request: Request) -> str:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail="authentication_required")
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _seller_ids(
+    performance: dict[str, Any] | None,
+    identity: dict[str, str | None],
+    responsibility: dict[str, Any] | None = None,
+) -> set[str]:
     if not performance:
         return set()
-    scoped = _filter_rows(performance, identity)
+    scoped = scope_parsed_rows(performance, identity, responsibility)
     seller_column = _column(scoped.get("headers", []), SELLER_ID_HEADERS)
     return {
         str(row.get(seller_column, "")).strip()
@@ -77,13 +104,15 @@ def _seller_ids(performance: dict[str, Any] | None, identity: dict[str, str | No
 
 
 def _scope_kind(parsed: dict[str, Any], kind: str, identity: dict[str, str | None]) -> dict[str, Any]:
+    root = data_root(get_settings().data_directory)
+    responsibility = _responsibility_data(root, kind)
     if (identity.get("role") or "").lower() == "matrix":
-        return parsed
+        return scope_parsed_rows(parsed, identity, responsibility)
     if kind not in {"sellerList", "sellerSpecialList"}:
-        return _filter_rows(parsed, identity)
-    performance_entry = get_workbook(data_root(get_settings().data_directory), "sellerPerformance")
+        return scope_parsed_rows(parsed, identity, responsibility)
+    performance_entry = get_workbook(root, "sellerPerformance")
     performance = performance_entry[1] if performance_entry else None
-    allowed = _seller_ids(performance, identity)
+    allowed = _seller_ids(performance, identity, responsibility)
     special = kind == "sellerSpecialList"
     rows: list[dict[str, Any]] = []
     if special:
@@ -183,6 +212,79 @@ async def verify_upload_auth(
     if error:
         return error
     return JSONResponse({"authenticated": True}, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/workbook/responsibility-list")
+async def responsibility_workbook_metadata(
+    _viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> Response:
+    root = data_root(get_settings().data_directory)
+    try:
+        stored = get_workbook(root, "responsibilityList")
+        if not stored:
+            return JSONResponse({"source": None}, headers={"Cache-Control": "no-store"})
+        metadata, parsed = stored
+        stats = validate_responsibility_workbook(parsed)
+        return JSONResponse({
+            "source": {
+                "fileName": metadata.get("fileName"),
+                "updatedAt": metadata.get("updatedAt"),
+                **stats,
+            }
+        }, headers={"Cache-Control": "no-store"})
+    except ResponsibilityWorkbookError as error:
+        return _error(error.code, error.status_code)
+    except LocalWorkbookError as error:
+        return _error(str(error), 500)
+
+
+@router.post("/workbook/responsibility-list/preview")
+async def preview_responsibility_workbook(
+    request: Request,
+    _admin: AuthenticatedViewer = Depends(require_admin),
+) -> Response:
+    try:
+        payload, source_files = await _parse_post(request)
+        if payload.kind != "responsibilityList":
+            return _error("responsibility_list_kind_invalid", 400)
+        if len(source_files) != 1 or len(source_files[0][1]) > 20 * 1024 * 1024:
+            return _error("responsibility_list_file_invalid", 413)
+        preview_id, stats = create_responsibility_preview(
+            _responsibility_owner_key(request),
+            payload.file_name,
+            payload.parsed,
+            source_files,
+        )
+        return JSONResponse({
+            "previewId": preview_id,
+            "fileName": payload.file_name,
+            "sheetName": payload.parsed.get("sheetName", ""),
+            **stats,
+        }, headers={"Cache-Control": "no-store"})
+    except ResponsibilityWorkbookError as error:
+        return _error(error.code, error.status_code)
+    except ValueError as error:
+        code = str(error)
+        return _error(code if re.fullmatch(r"[a-z0-9_]+", code) else "workbook_request_invalid", 400)
+
+
+@router.post("/workbook/responsibility-list/publish")
+async def publish_responsibility_workbook(
+    request: Request,
+    payload: ResponsibilityPublishPayload,
+    _admin: AuthenticatedViewer = Depends(require_admin),
+) -> Response:
+    try:
+        published = publish_responsibility_preview(
+            payload.preview_id,
+            _responsibility_owner_key(request),
+            data_root(get_settings().data_directory),
+        )
+        return JSONResponse({"source": published}, headers={"Cache-Control": "no-store"})
+    except ResponsibilityWorkbookError as error:
+        return _error(error.code, error.status_code)
+    except LocalWorkbookError as error:
+        return _error(str(error), 500)
 
 
 @router.get("/workbook")

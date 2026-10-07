@@ -15,6 +15,7 @@ export const OFFICIAL_RGM_BY_REGION: Readonly<Record<string, string>> = Object.f
   GP: "@王存超 CUNCHAO WANG（Wagner）",
   CE: "@彭龙颂 LONGSONG PENG（Lucas）",
   BA: "@董妍 (YAN SANTOS)",
+  SR: "董文彤 WENTONG DONG (Winta)",
 });
 
 export interface ResponsibilityRecord {

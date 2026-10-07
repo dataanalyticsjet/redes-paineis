@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.core.config import get_settings
 from app.main import app
 from app.services import data_sources, feishu_auth
+from app.services.local_workbooks import data_root, save_dashboard_source, save_workbook
 from app.services.data_sources import TAXA_REQUIRED_HEADERS
 
 
@@ -95,6 +96,178 @@ def parsed_taxa_workbook() -> dict[str, object]:
         "metadata": {"sheetNames": ["sheet0"], "headerRow": 1, "rowCount": 2, "columnCount": len(headers), "columns": [], "date1904": False},
         "warnings": [],
     }
+
+
+def parsed_responsibility_workbook() -> dict[str, object]:
+    headers = ["Regional", "UF", "Região RM", "Responsável Rm", "Código da base", "Nome da base", "Descrição"]
+    rows = [
+        {"Regional": "SR", "UF": "SC", "Região RM": "SR-SC", "Responsável Rm": "Sean Fan", "Código da base": "SC1", "Nome da base": "BNU -SC", "Descrição": "Ativa"},
+        {"Regional": "SR", "UF": "RS", "Região RM": "SR-RS", "Responsável Rm": "Victor", "Código da base": "RS1", "Nome da base": "CQA -RS", "Descrição": "Ativa"},
+        {"Regional": "PR", "UF": "PR", "Região RM": "PR-CWB", "Responsável Rm": "Diego", "Código da base": "PR1", "Nome da base": "CWB-PR", "Descrição": "Ativa"},
+    ]
+    return {"sheetName": "Ativas", "headers": headers, "rows": rows, "metadata": {"rowCount": len(rows)}, "warnings": []}
+
+
+def parsed_seller_monitoring_workbook() -> dict[str, object]:
+    headers = [
+        "Data", "Regional Origem", "PDD de saida", "Cliente", "Loja", "Id Seller/remetente",
+        "Motorista Designado", "Origem do Pedido", "Status atual – Aguardando coleta",
+        "Status atual – Recebido no Drop-off", "Status atual – Coletado", "Status atual – Recebido",
+        "Status atual – Recebido na base", "当前状态-网点发件流程中", "Status atual – Chegou ao SC",
+    ]
+    rows = []
+    for region, base, code in [("PR", "BNU -SC", "S"), ("PR", "CQA -RS", "R"), ("PR", "CWB-PR", "P")]:
+        row = {header: 0 for header in headers}
+        row.update({
+            "Data": "2026-10-06", "Regional Origem": region, "PDD de saida": base,
+            "Cliente": "Client", "Loja": "Store", "Id Seller/remetente": code,
+            "Motorista Designado": "Driver", "Origem do Pedido": "TikTok",
+            "Status atual – Aguardando coleta": 5,
+            "Status atual – Recebido no Drop-off": 1,
+            "Status atual – Coletado": 2,
+            "Status atual – Recebido": 0,
+            "Status atual – Recebido na base": 3,
+            "当前状态-网点发件流程中": 4,
+            "Status atual – Chegou ao SC": 6,
+        })
+        rows.append(row)
+    return {
+        "sheetName": "sheet1", "headers": headers, "rows": rows,
+        "dateColumn": "Data", "baseColumn": "PDD de saida", "regionColumn": "Regional Origem",
+        "originColumn": "Origem do Pedido", "statusColumns": headers[8:],
+        "metadata": {"rowCount": len(rows)}, "warnings": [],
+    }
+
+
+def test_seller_monitoring_source_keeps_canonical_national_history_before_regional_scope(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
+    """A regional admin's preview/read must not truncate the published J&T source."""
+    responsibility = parsed_responsibility_workbook()
+    save_workbook(data_root(get_settings().data_directory), "responsibilityList", "De_para DoomsDay.xlsx", responsibility)
+
+    pr_token, _pr_user = create_user_session(
+        name="PR Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="PR",
+        identity_suffix="seller-source-pr-admin",
+    )
+    pr_client = _session_client(pr_token)
+    incoming = parsed_seller_monitoring_workbook()
+    payload = {
+        "fileName": "monitoramento-jt.xlsx",
+        "fileSizeBytes": 4,
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "parsed": incoming,
+    }
+    preview_response = pr_client.post(
+        "/api/data-sources/sellerPerformance/preview",
+        data={"payload": json.dumps(payload, ensure_ascii=False)},
+        files={"file": ("monitoramento-jt.xlsx", b"PK\x03\x04", payload["contentType"])},
+    )
+    assert preview_response.status_code == 200
+    preview_body = preview_response.json()
+    assert preview_body["rowCount"] == 1
+    assert preview_body["history"]["fileRowCount"] == 1
+    assert preview_body["history"]["resultingRows"] == 1
+
+    published = pr_client.post(
+        "/api/data-sources/sellerPerformance/import",
+        json={"previewId": preview_body["previewId"]},
+    )
+    assert published.status_code == 200
+    assert published.json()["rowCount"] == 1
+
+    owner_key = data_sources.create_published_source_key("sellerPerformance", get_settings().feishu_session_secret)
+    canonical = data_sources.get_dashboard_source("sellerPerformance", owner_key)
+    assert canonical is not None
+    assert canonical["rowCount"] == 3
+    assert [row["Regional Origem"] for row in canonical["parsed"]["rows"]] == ["SR", "SR", "PR"]
+
+    pr_read = pr_client.get("/api/data-sources/sellerPerformance").json()["source"]
+    assert [row["PDD de saida"] for row in pr_read["parsed"]["rows"]] == ["CWB-PR"]
+
+    sr_token, _sr_user = create_user_session(
+        name="SR Viewer",
+        organizational_scope="regional",
+        home_region="SR",
+        identity_suffix="seller-source-sr-viewer",
+    )
+    sr_source = _session_client(sr_token).get("/api/data-sources/sellerPerformance").json()["source"]
+    assert {row["Regional Origem"] for row in sr_source["parsed"]["rows"]} == {"SR"}
+    assert {row["PDD de saida"] for row in sr_source["parsed"]["rows"]} == {"BNU -SC", "CQA -RS"}
+
+    matrix_token, _matrix_user = create_user_session(
+        name="Matrix Viewer",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="seller-source-matrix-viewer",
+    )
+    matrix_source = _session_client(matrix_token).get("/api/data-sources/sellerPerformance").json()["source"]
+    assert matrix_source["rowCount"] == 3
+    assert {row["Regional Origem"] for row in matrix_source["parsed"]["rows"]} == {"PR", "SR"}
+
+
+def test_seller_monitoring_merge_recanonicalizes_existing_dates_before_import(
+    authenticated_client: TestClient,
+) -> None:
+    responsibility = parsed_responsibility_workbook()
+    save_workbook(data_root(get_settings().data_directory), "responsibilityList", "De_para DoomsDay.xlsx", responsibility)
+
+    owner_key = data_sources.create_published_source_key("sellerPerformance", get_settings().feishu_session_secret)
+    previous = parsed_seller_monitoring_workbook()
+    for row in previous["rows"]:
+        row["Data"] = "2026-10-05"
+    save_dashboard_source(
+        data_root(get_settings().data_directory),
+        "sellerPerformance",
+        owner_key,
+        "legacy-jt.xlsx",
+        previous,
+        b"PK\x03\x04",
+        imported_at="2026-10-05T00:00:00+00:00",
+        file_size_bytes=4,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        period={"start": "2026-10-05", "end": "2026-10-05"},
+        row_count=3,
+    )
+
+    incoming = parsed_seller_monitoring_workbook()
+    payload = {
+        "fileName": "monitoramento-jt-06.xlsx",
+        "fileSizeBytes": 4,
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "parsed": incoming,
+    }
+    preview_response = authenticated_client.post(
+        "/api/data-sources/sellerPerformance/preview",
+        data={"payload": json.dumps(payload, ensure_ascii=False)},
+        files={"file": ("monitoramento-jt-06.xlsx", b"PK\x03\x04", payload["contentType"])},
+    )
+    assert preview_response.status_code == 200
+    imported = authenticated_client.post(
+        "/api/data-sources/sellerPerformance/import",
+        json={"previewId": preview_response.json()["previewId"]},
+    )
+    assert imported.status_code == 200
+
+    canonical = data_sources.get_dashboard_source("sellerPerformance", owner_key)
+    assert canonical is not None
+    assert canonical["rowCount"] == 6
+    old_rows = [row for row in canonical["parsed"]["rows"] if row["Data"] == "2026-10-05"]
+    assert [(row["PDD de saida"], row["Regional Origem"]) for row in old_rows] == [
+        ("BNU -SC", "SR"),
+        ("CQA -RS", "SR"),
+        ("CWB-PR", "PR"),
+    ]
+
+
+def _session_client(token: str) -> TestClient:
+    client = TestClient(app, base_url="http://localhost:3000")
+    client.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    return client
 
 
 def preview(client: TestClient, parsed: dict[str, object] | None = None, file_name: str = "monitoramento.xlsx"):

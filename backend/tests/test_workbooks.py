@@ -69,6 +69,25 @@ def _upload(client: TestClient, kind: str, name: str = "dados.xlsx", display_nam
     )
 
 
+def _responsibility_parsed() -> dict[str, object]:
+    headers = ["Regional", "UF", "Região RM", "Responsável Rm", "Código da base", "Nome da base", "Descrição"]
+    rows = [
+        {"Regional": "SR", "UF": "SC", "Região RM": "SR-SC", "Responsável Rm": "Sean Fan", "Código da base": "001", "Nome da base": "BNU -SC", "Descrição": "Ativa"},
+        {"Regional": "SR", "UF": "RS", "Região RM": "SR-RS", "Responsável Rm": "Victor", "Código da base": "002", "Nome da base": "CQA -RS", "Descrição": "Ativa"},
+        {"Regional": "PR", "UF": "PR", "Região RM": "PR-CWB", "Responsável Rm": "Diego", "Código da base": "003", "Nome da base": "CWB-PR", "Descrição": "Ativa"},
+    ]
+    return {"sheetName": "Ativas", "headers": headers, "rows": rows, "metadata": {"rowCount": len(rows)}, "warnings": []}
+
+
+def _responsibility_upload(client: TestClient, parsed: dict[str, object]):
+    payload = {"kind": "responsibilityList", "fileName": "De_para DoomsDay.xlsx", "parsed": parsed}
+    return client.post(
+        "/api/workbook/responsibility-list/preview",
+        data={"payload": json.dumps(payload, ensure_ascii=False)},
+        files=[("files", ("De_para DoomsDay.xlsx", b"PK\x03\x04official-map", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+    )
+
+
 def test_workbook_requires_session_and_upload_credentials() -> None:
     with TestClient(app, base_url="http://127.0.0.1:3000") as client:
         assert client.get("/api/workbook?kind=movement").status_code == 401
@@ -143,6 +162,53 @@ def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClie
     rows = response.json()["workbook"]["parsed"]["rows"]
     assert len(rows) == 1
     assert rows[0]["PDD de saída"] == "Base 1"
+
+
+def test_responsibility_list_preview_and_publish_use_admin_session_without_basic_auth(workbook_client: TestClient, tmp_path: Path) -> None:
+    preview_response = _responsibility_upload(workbook_client, _responsibility_parsed())
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["canPublish"] is True
+    assert preview["rowCount"] == 3
+    assert preview["baseCount"] == 3
+    assert preview["duplicateBaseCount"] == 0
+
+    published = workbook_client.post("/api/workbook/responsibility-list/publish", json={"previewId": preview["previewId"]})
+    assert published.status_code == 200
+    assert published.json()["source"]["rowCount"] == 3
+    assert published.json()["source"]["regionalCounts"] == {"PR": 1, "SR": 2}
+
+    metadata = workbook_client.get("/api/workbook/responsibility-list")
+    assert metadata.status_code == 200
+    assert metadata.json()["source"]["baseCount"] == 3
+    current = tmp_path / "local-data" / "workbooks" / "responsibilityList" / "current.json"
+    assert current.exists()
+    stored_bytes = list((current.parent / "versions").rglob("source-00-De_para DoomsDay.xlsx"))
+    assert len(stored_bytes) == 1
+
+
+def test_responsibility_list_duplicate_bases_block_publishing(workbook_client: TestClient) -> None:
+    parsed = _responsibility_parsed()
+    parsed["rows"] = [*parsed["rows"], {**parsed["rows"][0], "Nome da base": " BNU-SC "}]
+    response = _responsibility_upload(workbook_client, parsed)
+    assert response.status_code == 200
+    assert response.json()["duplicateBaseCount"] == 1
+    assert response.json()["canPublish"] is False
+    assert response.json()["previewId"] is None
+
+
+def test_regular_user_cannot_preview_responsibility_list(create_user_session) -> None:
+    token, _user = create_user_session(
+        name="Regional Viewer",
+        platform_role="USER",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="responsibility-user",
+    )
+    client = TestClient(app, base_url="http://127.0.0.1:3000")
+    client.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    response = _responsibility_upload(client, _responsibility_parsed())
+    assert response.status_code == 403
 
 
 def test_all_existing_workbook_kinds_use_local_storage(workbook_client: TestClient, create_user_session) -> None:

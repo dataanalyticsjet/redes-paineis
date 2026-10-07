@@ -95,7 +95,7 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
 
   const regionName = (code: string | null) => {
     if (!code) return t("Não definido");
-    return regions.find((region) => region.code === code)?.name ?? code;
+    return t(regions.find((region) => region.code === code)?.name ?? code);
   };
 
   return (
@@ -193,7 +193,7 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                   <label key={region.code} className={`demo-users-access-option${locked ? " is-locked" : ""}`}>
                     <input type="checkbox" checked={checked} disabled={locked} onChange={(event) => { const isChecked = event.currentTarget.checked; setDraftRegions((current) => isChecked ? [...current, region.code] : current.filter((code) => code !== region.code)); }} />
                     <span className="demo-users-access-check"><Check size={13} /></span>
-                    <span>{region.name} <small>{region.code}{region.code === editingUser.homeRegion ? ` · ${t("Região de origem")}` : ""}</small></span>
+                    <span>{t(region.name)} <small>{region.code}{region.code === editingUser.homeRegion ? ` · ${t("Região de origem")}` : ""}</small></span>
                   </label>
                 );
               })}
