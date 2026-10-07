@@ -118,7 +118,15 @@ import {
   UNASSIGNED_RM_AREA,
   type ResponsibilityData,
 } from "../../lib/responsibility";
-import { rmGroupReactKey, rmSelectionFromValues, selectedRmOptions, type RmSelection } from "../../lib/rm-selection";
+import {
+  optionSelectionFromValues,
+  rmGroupReactKey,
+  rmSelectionFromValues,
+  selectedOptions,
+  selectedRmOptions,
+  type OptionSelection,
+  type RmSelection,
+} from "../../lib/rm-selection";
 
 const STATUS_COLORS = [
   "#e60000",
@@ -2334,7 +2342,7 @@ export function DashboardApp() {
   const [taxaSelectedBases, setTaxaSelectedBases] = useState<Set<string>>(new Set());
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
-  const [taxaSelectedRmAreas, setTaxaSelectedRmAreas] = useState<Set<string>>(new Set([UNASSIGNED_RM_AREA]));
+  const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
   const [taxaRmSelection, setTaxaRmSelection] = useState<RmSelection>({ mode: "all" });
   const [taxaDateStart, setTaxaDateStart] = useState("");
   const [taxaDateEnd, setTaxaDateEnd] = useState("");
@@ -2562,7 +2570,7 @@ export function DashboardApp() {
     const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
     setTaxaSelectedRegions(regions);
     setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions)));
-    setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, data.bases).rmAreas));
+    setTaxaRmAreaSelection({ mode: "all" });
     setTaxaSelectedOrigins(new Set(data.origins));
     setTaxaDateStart(data.initialStart);
     setTaxaDateEnd(data.initialEnd);
@@ -2571,12 +2579,12 @@ export function DashboardApp() {
     resetResponsibilityFilters();
   }, [resetResponsibilityFilters, responsibilityLoaded, taxaLoaded, viewerIdentity]);
 
-  const applyTaxaLoadedData = useCallback((data: TaxaLoadedData, responsibility: ResponsibilityData | null = null) => {
+  const applyTaxaLoadedData = useCallback((data: TaxaLoadedData) => {
     setTaxaLoaded(data);
     const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
     setTaxaSelectedRegions(regions);
     setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions)));
-    setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibility, data.bases).rmAreas));
+    setTaxaRmAreaSelection({ mode: "all" });
     setTaxaSelectedOrigins(new Set(data.origins));
     setTaxaDateStart(data.initialStart);
     setTaxaDateEnd(data.initialEnd);
@@ -2788,7 +2796,7 @@ export function DashboardApp() {
           setSpecialSellerLoaded(specialSeller);
           setSellerReferenceLoaded(sellerReference);
           applyLoadedData(monitoring, responsibility);
-          applyTaxaLoadedData(taxa, responsibility);
+          applyTaxaLoadedData(taxa);
           setEpopLoaded(epop);
           setEpopSelectedRegions(initialRegionSelection(epop.regions, viewerIdentity));
           setEpopSelectedBases(new Set(epop.bases));
@@ -2890,13 +2898,11 @@ export function DashboardApp() {
           const taxaWorkbook = await readTaxaHistory(taxaResponse);
           if (!active) return;
           if (taxaWorkbook) {
-            applyTaxaLoadedData(
-              buildTaxaLoadedData(
-                taxaWorkbook.parsed,
-                taxaWorkbook.fileName,
-                taxaWorkbook.updatedAt,
-              ), responsibility,
-            );
+            applyTaxaLoadedData(buildTaxaLoadedData(
+              taxaWorkbook.parsed,
+              taxaWorkbook.fileName,
+              taxaWorkbook.updatedAt,
+            ));
           }
         }
         const movementResponse = await fetchOptionalWorkbook("movement");
@@ -3132,7 +3138,6 @@ export function DashboardApp() {
 
       applyTaxaLoadedData(
         buildTaxaLoadedData(savedWorkbook.parsed, savedWorkbook.fileName, savedWorkbook.updatedAt),
-        responsibilityLoaded,
       );
       if (payload.historyMerge) setTaxaHistoryNotice(payload.historyMerge);
       setView("taxa");
@@ -4107,19 +4112,24 @@ export function DashboardApp() {
     return monitoringBasesForSelection(loaded, selectedRegions, responsibilityLoaded, selectedRms, selectedRgms);
   }, [loaded, responsibilityLoaded, selectedRegions, selectedRgms, selectedRms]);
 
-  const taxaBaseOptions = useMemo(() => {
-    if (!taxaLoaded) return [];
-    return taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms) &&
-      taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, base)));
-  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
-
   const taxaRmAreaOptions = useMemo(() => {
     if (!taxaLoaded) return [];
     const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
       matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms));
     return responsibilityOptions(responsibilityLoaded, bases).rmAreas;
   }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms]);
+
+  const taxaSelectedRmAreas = useMemo(
+    () => selectedOptions(taxaRmAreaOptions, taxaRmAreaSelection),
+    [taxaRmAreaOptions, taxaRmAreaSelection],
+  );
+
+  const taxaBaseOptions = useMemo(() => {
+    if (!taxaLoaded) return [];
+    return taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
+      matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms) &&
+      taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, base)));
+  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
 
   const taxaFilteredRecords = useMemo(() => {
     if (!taxaLoaded || !taxaDateStart || !taxaDateEnd || taxaDateStart > taxaDateEnd) return [];
@@ -4898,7 +4908,7 @@ export function DashboardApp() {
     if (taxaLoaded) {
       const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
         matchesResponsibility(responsibilityLoaded, base, nextRms, nextRgms));
-      setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
+      setTaxaRmAreaSelection({ mode: "all" });
       setTaxaSelectedBases(new Set(bases));
       setTaxaPage(1);
     }
@@ -5517,7 +5527,7 @@ export function DashboardApp() {
       taxaSelectedBases.size === taxaBaseOptions.length &&
       taxaSelectedRegions.size === taxaRegionOptions.length &&
       taxaSelectedOrigins.size === taxaLoaded.origins.length &&
-      taxaSelectedRmAreas.size === taxaRmAreaOptions.length &&
+      taxaRmAreaSelection.mode === "all" &&
       taxaRmSelection.mode === "all" &&
       selectedRgms.size === responsibilityFilterOptions.rgms.length &&
       taxaDateStart === taxaLoaded.initialStart &&
@@ -5824,7 +5834,6 @@ export function DashboardApp() {
             } else if (dataSourceDialogId === "taxa") {
               applyTaxaLoadedData(
                 buildTaxaLoadedData(source.parsed, source.fileName, source.importedAt, "MANUAL_UPLOAD", source.fileSizeBytes, source.contentType),
-                responsibilityLoaded,
               );
               setView("taxa");
             }
@@ -5844,7 +5853,6 @@ export function DashboardApp() {
               const fixture = scopeDemoWorkbook(DASHBOARD_DEMO_FIXTURES.taxa, viewerIdentity);
               applyTaxaLoadedData(
                 buildTaxaLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", "DEMONSTRATION"),
-                responsibilityLoaded,
               );
             } else setTaxaLoaded(null);
           }
@@ -7372,7 +7380,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                       setTaxaSelectedRegions(value);
                       const bases = taxaBasesForRegions(taxaLoaded, value).filter((base) =>
                         matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms));
-                      setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
+                      setTaxaRmAreaSelection({ mode: "all" });
                       setTaxaSelectedBases(new Set(bases));
                       setTaxaPage(1);
                     }}
@@ -7399,7 +7407,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     options={taxaRmAreaOptions}
                     selected={taxaSelectedRmAreas}
                     onChange={(value) => {
-                      setTaxaSelectedRmAreas(value);
+                      setTaxaRmAreaSelection(optionSelectionFromValues(taxaRmAreaOptions, value));
                       setTaxaSelectedBases(new Set(taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
                         matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms) &&
                         value.has(rmAreaForBase(responsibilityLoaded, base)))));

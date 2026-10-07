@@ -11,6 +11,7 @@ import {
   rmAreaForBase,
   resolveResponsibilityForBase,
   responsibilityForBase,
+  responsibilityOptions,
 } from "../src/lib/responsibility.ts";
 import type { ParsedWorkbook } from "../src/lib/workbook.ts";
 
@@ -173,6 +174,35 @@ test("loads the official de-para without an RGM column and joins base names cons
   });
   assert.equal(rmAreaForBase(data, "A-B"), "MG-JDF");
   assert.deepEqual(responsibilityForBase(data, "A B"), { rm: "Sem RM", rgm: "Sem RGM" });
+});
+
+test("keeps official RM areas for matched bases and only marks missing assignments as unassigned", () => {
+  const headers = ["Regional", "UF", "Região RM", "Responsável Rm", "Código da base", "Nome da base", "Descrição"];
+  const rows = [
+    { Regional: "SPE", UF: "SP", "Região RM": "SPE-MGUE", "Responsável Rm": "RM A", "Código da base": "1", "Nome da base": "Base A", Descrição: "Base de teste A" },
+    { Regional: "MG", UF: "MG", "Região RM": "MG-JDF", "Responsável Rm": "RM B", "Código da base": "2", "Nome da base": "Base B", Descrição: "Base de teste B" },
+    { Regional: "SPS", UF: "SP", "Região RM": "", "Responsável Rm": "", "Código da base": "3", "Nome da base": "Base C", Descrição: "Base sem responsável" },
+  ];
+  const data = buildResponsibilityData({
+    sheetName: "Ativas",
+    headers,
+    rows,
+    statusColumns: [],
+    metadata: workbookMetadata(headers, rows),
+    warnings: [],
+  }, "de-para.xlsx");
+
+  assert.deepEqual(responsibilityForBase(data, "Base A"), { rm: "RM A", rgm: "@李鑫亮 XINLIANG LI（Oliver）" });
+  assert.equal(rmAreaForBase(data, "Base A"), "SPE-MGUE");
+  assert.deepEqual(responsibilityForBase(data, "Base B"), { rm: "RM B", rgm: "@王龙 LONG WANG（Matt）" });
+  assert.equal(rmAreaForBase(data, "Base B"), "MG-JDF");
+  assert.deepEqual(responsibilityForBase(data, "Base C"), { rm: "Sem RM", rgm: "@熊志远 XIONG ZHIYUAN（Amos）" });
+  assert.equal(rmAreaForBase(data, "Base C"), "Sem região do RM");
+  assert.deepEqual(new Set(responsibilityOptions(data, ["Base A", "Base B", "Base C"]).rmAreas), new Set([
+    "SPE-MGUE",
+    "MG-JDF",
+    "Sem região do RM",
+  ]));
 });
 
 test("uses de-para before legacy and applies the legacy key only as an exact fallback", () => {

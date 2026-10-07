@@ -118,6 +118,9 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.doesNotMatch(source, /showTaxaRmPoc/);
   assert.match(source, /className="dashboard-data-table taxa-poc-table taxa-poc-rm-table"/);
   assert.match(source, /label=\{t\("Região do RM"\)\}/);
+  assert.match(source, /useState<OptionSelection>\(\{ mode: "all" \}\)/);
+  assert.match(source, /selectedOptions\(taxaRmAreaOptions, taxaRmAreaSelection\)/);
+  assert.match(source, /optionSelectionFromValues\(taxaRmAreaOptions, value\)/);
   assert.match(source, /taxaSelectedRmAreas\.has\(rmAreaForBase\(responsibilityLoaded, record\.base\)\)/);
   assert.match(source, /<th>\{t\("Região do RM"\)\}<\/th>/);
   assert.match(source, /<th>\{t\("Responsável do RM"\)\}<\/th>/);
