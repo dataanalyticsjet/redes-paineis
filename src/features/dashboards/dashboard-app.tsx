@@ -85,7 +85,13 @@ import { DASHBOARD_DATA_SOURCES } from "../../lib/data-sources/catalog";
 import type { DashboardSourceId, ManualDataSource } from "../../lib/data-sources/api";
 import { buildDamageData, type DamageData } from "../../lib/damage";
 import { MOVEMENT_SUMMARY_METRICS, selectMovementSummaryMetric } from "../../lib/movement-summary";
-import { summarizeTaxaPeriod } from "../../lib/taxa-summary";
+import {
+  formatTaxaRate as formatNullableTaxaRate,
+  legacyTaxaAverageCollectionHours,
+  summarizeTaxaByMonth,
+  summarizeTaxaPeriod,
+  taxaRate,
+} from "../../lib/taxa-summary";
 import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
@@ -112,6 +118,7 @@ import {
   UNASSIGNED_RM_AREA,
   type ResponsibilityData,
 } from "../../lib/responsibility";
+import { rmGroupReactKey, rmSelectionFromValues, selectedRmOptions, type RmSelection } from "../../lib/rm-selection";
 
 const STATUS_COLORS = [
   "#e60000",
@@ -1350,9 +1357,8 @@ function formatRate(value: number): string {
   }).format(Number.isFinite(value) ? value : 0);
 }
 
-function weightedAverage(totalWeighted: number, denominator: number): number {
-  if (!denominator || denominator <= 0) return 0;
-  return totalWeighted / denominator;
+function formatTaxaRate(value: number | null): string {
+  return formatNullableTaxaRate(value, dashboardLocale(activeDashboardLanguage()));
 }
 
 function buildTaxaLoadedData(
@@ -1587,9 +1593,9 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
   };
 }
 
-function taxaBasesForRegions(data: TaxaLoadedData, regions: Set<string>, responsibility: ResponsibilityData | null = null): string[] {
+function taxaBasesForRegions(data: TaxaLoadedData, regions: Set<string>): string[] {
   return Array.from(
-    new Set(data.records.filter((record) => regions.has(registeredRegionForBase(responsibility, record.base, record.region))).map((record) => record.base)),
+    new Set(data.records.filter((record) => regions.has(record.region)).map((record) => record.base)),
   ).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
 }
 
@@ -2329,6 +2335,7 @@ export function DashboardApp() {
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
   const [taxaSelectedRmAreas, setTaxaSelectedRmAreas] = useState<Set<string>>(new Set([UNASSIGNED_RM_AREA]));
+  const [taxaRmSelection, setTaxaRmSelection] = useState<RmSelection>({ mode: "all" });
   const [taxaDateStart, setTaxaDateStart] = useState("");
   const [taxaDateEnd, setTaxaDateEnd] = useState("");
   const [taxaLoading, setTaxaLoading] = useState(true);
@@ -2503,12 +2510,14 @@ export function DashboardApp() {
 
   const resetResponsibilityFilters = useCallback((data = responsibilityLoaded) => {
     if (!data) return;
+    setTaxaRmSelection({ mode: "all" });
     setSelectedRms(new Set([...data.rms, UNASSIGNED_RM]));
     setSelectedRgms(new Set([...data.rgms, UNASSIGNED_RGM]));
   }, [responsibilityLoaded]);
 
   const resetFilters = useCallback((data = loaded) => {
     if (!data) return;
+    setTaxaRmSelection({ mode: "all" });
     const regions = initialRegionSelection(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)), viewerIdentity);
     setSelectedRegions(regions);
     const availableResponsibility = monitoringResponsibilityOptionsForData(data, responsibilityLoaded);
@@ -2549,9 +2558,10 @@ export function DashboardApp() {
 
   const resetTaxaFilters = useCallback((data = taxaLoaded) => {
     if (!data) return;
-    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)), viewerIdentity);
+    setTaxaRmSelection({ mode: "all" });
+    const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
     setTaxaSelectedRegions(regions);
-    setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions, responsibilityLoaded)));
+    setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions)));
     setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, data.bases).rmAreas));
     setTaxaSelectedOrigins(new Set(data.origins));
     setTaxaDateStart(data.initialStart);
@@ -2563,9 +2573,9 @@ export function DashboardApp() {
 
   const applyTaxaLoadedData = useCallback((data: TaxaLoadedData, responsibility: ResponsibilityData | null = null) => {
     setTaxaLoaded(data);
-    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
+    const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
     setTaxaSelectedRegions(regions);
-    setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions, responsibility)));
+    setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions)));
     setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibility, data.bases).rmAreas));
     setTaxaSelectedOrigins(new Set(data.origins));
     setTaxaDateStart(data.initialStart);
@@ -3778,9 +3788,8 @@ export function DashboardApp() {
   }, [loaded]);
   const taxaRegionOptions = useMemo(() => {
     if (!taxaLoaded) return [];
-    return [...new Set(taxaLoaded.records.map((record) =>
-      registeredRegionForBase(responsibilityLoaded, record.base, record.region)))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
-  }, [responsibilityLoaded, taxaLoaded]);
+    return [...new Set(taxaLoaded.records.map((record) => record.region))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+  }, [taxaLoaded]);
   const movementRegionOptions = useMemo(() => {
     if (!movementLoaded) return [];
     return [...new Set(movementLoaded.records.map((record) =>
@@ -4073,6 +4082,17 @@ export function DashboardApp() {
     };
   }, [loaded, movementLoaded, responsibilityLoaded, sellerPerformanceLoaded, taxaLoaded]);
 
+  // Taxa RM options come only from the already-scoped Taxa dataset after applying
+  // the official/legacy resolver. The ALL state follows source updates naturally.
+  const taxaResponsibilityFilterOptions = useMemo(
+    () => responsibilityOptions(responsibilityLoaded, taxaLoaded?.bases ?? []),
+    [responsibilityLoaded, taxaLoaded],
+  );
+  const taxaSelectedRms = useMemo(
+    () => selectedRmOptions(taxaResponsibilityFilterOptions.rms, taxaRmSelection),
+    [taxaResponsibilityFilterOptions.rms, taxaRmSelection],
+  );
+
   const monitoringResponsibilityFilterOptions = useMemo(() => {
     if (!loaded) return { rms: [UNASSIGNED_RM], rgms: [UNASSIGNED_RGM] };
     const options = monitoringResponsibilityOptionsForData(loaded, responsibilityLoaded);
@@ -4089,24 +4109,21 @@ export function DashboardApp() {
 
   const taxaBaseOptions = useMemo(() => {
     if (!taxaLoaded) return [];
-    return taxaBasesForRegions(taxaLoaded, taxaSelectedRegions, responsibilityLoaded).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms) &&
+    return taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
+      matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms) &&
       taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, base)));
-  }, [responsibilityLoaded, selectedRgms, selectedRms, taxaLoaded, taxaSelectedRegions, taxaSelectedRmAreas]);
+  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
 
   const taxaRmAreaOptions = useMemo(() => {
     if (!taxaLoaded) return [];
-    const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions, responsibilityLoaded).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms));
+    const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
+      matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms));
     return responsibilityOptions(responsibilityLoaded, bases).rmAreas;
-  }, [responsibilityLoaded, selectedRgms, selectedRms, taxaLoaded, taxaSelectedRegions]);
+  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaSelectedRegions, taxaSelectedRms]);
 
   const taxaFilteredRecords = useMemo(() => {
     if (!taxaLoaded || !taxaDateStart || !taxaDateEnd || taxaDateStart > taxaDateEnd) return [];
-    return taxaLoaded.records.map((record) => ({
-      ...record,
-      region: registeredRegionForBase(responsibilityLoaded, record.base, record.region),
-    })).filter(
+    return taxaLoaded.records.filter(
       (record) =>
         record.date >= taxaDateStart &&
         record.date <= taxaDateEnd &&
@@ -4114,9 +4131,9 @@ export function DashboardApp() {
         taxaSelectedBases.has(record.base) &&
         taxaSelectedOrigins.has(record.origin) &&
         taxaSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, record.base)) &&
-        matchesResponsibility(responsibilityLoaded, record.base, selectedRms, selectedRgms),
+        matchesResponsibility(responsibilityLoaded, record.base, taxaSelectedRms, selectedRgms),
     );
-  }, [responsibilityLoaded, selectedRgms, selectedRms, taxaLoaded, taxaDateStart, taxaDateEnd, taxaSelectedBases, taxaSelectedOrigins, taxaSelectedRegions, taxaSelectedRmAreas]);
+  }, [responsibilityLoaded, selectedRgms, taxaLoaded, taxaDateStart, taxaDateEnd, taxaSelectedBases, taxaSelectedOrigins, taxaSelectedRegions, taxaSelectedRms, taxaSelectedRmAreas]);
 
   const taxaAttemptTarget = useMemo(
     () => attemptRateTargetForOrigins(taxaSelectedOrigins),
@@ -4145,30 +4162,30 @@ export function DashboardApp() {
       }
       const regionals = [...byRegional.entries()].map(([regional, value]) => ({
         regional,
-        rate: safeRate(value.attempted, value.toCollect),
+        rate: taxaRate(value.attempted, value.toCollect),
         priorities: [...value.bases.values()].map((base) => {
-          const rate = safeRate(base.attempted, base.toCollect);
+          const rate = taxaRate(base.attempted, base.toCollect);
           return { ...base, rate, impact: Math.max(0, base.toCollect * 0.98 - base.attempted) };
         })
-          .filter((base) => base.orders > 500 && base.toCollect > 0 && base.rate < 0.98)
-          .sort((left, right) => right.impact - left.impact || right.orders - left.orders || left.rate - right.rate)
+          .filter((base) => base.orders > 500 && base.toCollect > 0 && base.rate !== null && base.rate < 0.98)
+          .sort((left, right) => right.impact - left.impact || right.orders - left.orders || (left.rate ?? 0) - (right.rate ?? 0))
           .slice(0, 2),
       })).filter((item) => item.priorities.length > 0)
-        .sort((left, right) => right.priorities.reduce((sum, base) => sum + base.impact, 0) - left.priorities.reduce((sum, base) => sum + base.impact, 0) || left.rate - right.rate || left.regional.localeCompare(right.regional, "pt-BR"));
+        .sort((left, right) => right.priorities.reduce((sum, base) => sum + base.impact, 0) - left.priorities.reduce((sum, base) => sum + base.impact, 0) || (left.rate ?? -1) - (right.rate ?? -1) || left.regional.localeCompare(right.regional, "pt-BR"));
       const selectedDate = taxaDateEnd || taxaDateStart;
       const [, month, day] = selectedDate.split("-");
       const messageDate = day && month ? `${day}/${month}` : selectedDate;
       return [
         "Bom dia, pessoal!", "大家早上好！", "",
         `📊 **Taxa de Coleta ${messageDate} | 揽收及时率**`,
-        `Geral: **${formatRate(taxaSummary.collectionWithAttemptsRate)}** | Meta: **98%**`,
-        `整体：**${formatRate(taxaSummary.collectionWithAttemptsRate)}** | 目标：**98%**`,
+        `Geral: **${formatTaxaRate(taxaSummary.collectionWithAttemptsRate)}** | Meta: **98%**`,
+        `整体：**${formatTaxaRate(taxaSummary.collectionWithAttemptsRate)}** | 目标：**98%**`,
         "", "⚠️ **Pontos críticos / 重点关注**", "",
         ...(regionals.length ? regionals.slice(0, 5).flatMap((regional) => [
-          `${regional.rate < 0.95 ? "🔴" : "🟠"} **${regional.regional} ${formatRate(regional.rate)}**`,
+          `${regional.rate !== null && regional.rate < 0.95 ? "🔴" : "🟠"} **${regional.regional} ${formatTaxaRate(regional.rate)}**`,
           ...regional.priorities.map((base) => {
             const rm = base.rm.trim() || "待定";
-            return `${base.base} **${formatRate(base.rate)}** | ${formatNumber(base.orders)} pacotes | ${rm.startsWith("@") ? rm : `@${rm}`}`;
+            return `${base.base} **${formatTaxaRate(base.rate)}** | ${formatNumber(base.orders)} pacotes | ${rm.startsWith("@") ? rm : `@${rm}`}`;
           }),
           "",
         ]) : ["Nenhuma base relevante abaixo da meta no recorte selecionado.", ""]),
@@ -4185,25 +4202,18 @@ export function DashboardApp() {
   }, [bipagemBaseSummary, bipagemDateEnd, bipagemDateStart, bipagemSummary, responsibilityLoaded, taxaDateEnd, taxaDateStart, taxaFilteredRecords, taxaSummary.collectionWithAttemptsRate, view]);
 
   const taxaGeneralMonthlyTrend = useMemo(() => {
-    const latestDate = [...taxaFilteredRecords]
-      .map((record) => record.date)
-      .sort()
-      .at(-1) ?? "";
-    const year = latestDate.slice(0, 4);
-    const groups = new Map<string, { monthKey: string; toCollect: number; onTime: number; withAttempts: number }>();
-    for (const record of taxaFilteredRecords) {
-      if (!year || !record.date.startsWith(`${year}-`)) continue;
-      const monthKey = record.date.slice(0, 7);
-      const current = groups.get(monthKey) ?? { monthKey, toCollect: 0, onTime: 0, withAttempts: 0 };
-      current.toCollect += record.toCollect;
-      current.onTime += record.onTime;
-      current.withAttempts += record.collectedWithAttempts;
-      groups.set(monthKey, current);
-    }
-    const months = [...groups.values()]
-      .filter((month) => month.toCollect > 0)
-      .sort((leftMonth, rightMonth) => leftMonth.monthKey.localeCompare(rightMonth.monthKey));
-    const monthFormatter = new Intl.DateTimeFormat(dashboardLocale(language), { month: "short", timeZone: "UTC" });
+    const months = summarizeTaxaByMonth(taxaFilteredRecords);
+    const years = [...new Set(months.map((month) => month.monthKey.slice(0, 4)))];
+    const periodLabel = years.length === 1
+      ? years[0]
+      : years.length > 1
+        ? `${years[0]}–${years.at(-1)}`
+        : "";
+    const monthFormatter = new Intl.DateTimeFormat(dashboardLocale(language), {
+      month: "short",
+      ...(years.length > 1 ? { year: "2-digit" as const } : {}),
+      timeZone: "UTC",
+    });
     const width = 620;
     const height = 250;
     const left = 48;
@@ -4216,7 +4226,8 @@ export function DashboardApp() {
     const chartHeight = height - top - bottom;
     const xForIndex = (index: number) =>
       left + (months.length <= 1 ? chartWidth / 2 : (index / (months.length - 1)) * chartWidth);
-    const yForRate = (rate: number) => {
+    const yForRate = (rate: number | null) => {
+      if (rate === null) return null;
       const clamped = Math.max(minRate, Math.min(maxRate, rate));
       return top + (1 - (clamped - minRate) / (maxRate - minRate)) * chartHeight;
     };
@@ -4226,13 +4237,26 @@ export function DashboardApp() {
       monthLabel: monthFormatter
         .format(new Date(`${month.monthKey}-01T12:00:00Z`))
         .replace(/\.$/, ""),
-      collectionRate: safeRate(month.onTime, month.toCollect),
-      attemptRate: safeRate(month.withAttempts, month.toCollect),
     })).map((point) => ({
       ...point,
-      collectionY: yForRate(point.collectionRate),
+      collectionY: yForRate(point.onTimeRate),
       attemptY: yForRate(point.attemptRate),
     }));
+    const lineSegments = (key: "collectionY" | "attemptY") => {
+      const segments: string[][] = [];
+      let current: string[] = [];
+      for (const point of points) {
+        const y = point[key];
+        if (y === null) {
+          if (current.length) segments.push(current);
+          current = [];
+          continue;
+        }
+        current.push(`${point.x},${y}`);
+      }
+      if (current.length) segments.push(current);
+      return segments.map((segment) => segment.join(" "));
+    };
 
     return {
       width,
@@ -4243,16 +4267,16 @@ export function DashboardApp() {
       bottom,
       minRate,
       maxRate,
-      year,
+      periodLabel,
       points,
-      collectionLine: points.map((point) => `${point.x},${point.collectionY}`).join(" "),
-      attemptLine: points.map((point) => `${point.x},${point.attemptY}`).join(" "),
+      collectionLines: lineSegments("collectionY"),
+      attemptLines: lineSegments("attemptY"),
       targetY: taxaAttemptTarget == null ? null : yForRate(taxaAttemptTarget),
     };
   }, [language, taxaAttemptTarget, taxaFilteredRecords]);
 
   const taxaRegionalPoc = useMemo(() => {
-    if (!taxaLoaded) return { dates: [] as string[], rows: [] as Array<{ region: string; rgm: string; values: Array<{ orders: number; toCollect: number; withAttempts: number; rate: number }>; totalOrders: number }>, total: [] as Array<{ orders: number; toCollect: number; withAttempts: number; rate: number }>, totalOrders: 0 };
+    if (!taxaLoaded) return { dates: [] as string[], rows: [] as Array<{ region: string; rgm: string; values: Array<{ orders: number; toCollect: number; withAttempts: number; rate: number | null }>; totalOrders: number }>, total: [] as Array<{ orders: number; toCollect: number; withAttempts: number; rate: number | null }>, totalOrders: 0 };
     const records = taxaFilteredRecords;
     const dates = taxaLoaded.dates
       .filter((date) => date >= taxaDateStart && date <= taxaDateEnd)
@@ -4260,7 +4284,7 @@ export function DashboardApp() {
     const dateSet = new Set(dates);
     const regionGroups = new Map<string, Map<string, { orders: number; toCollect: number; withAttempts: number }>>();
     for (const record of records) {
-      if (!dateSet.has(record.date) || !record.region || normalizeSearchText(record.region) === normalizeSearchText("Sem regional")) continue;
+      if (!dateSet.has(record.date)) continue;
       const byDate = regionGroups.get(record.region) ?? new Map<string, { orders: number; toCollect: number; withAttempts: number }>();
       const current = byDate.get(record.date) ?? { orders: 0, toCollect: 0, withAttempts: 0 };
       current.orders += record.orders;
@@ -4273,7 +4297,7 @@ export function DashboardApp() {
       .map(([region, byDate]) => {
         const values = dates.map((date) => {
           const value = byDate.get(date) ?? { orders: 0, toCollect: 0, withAttempts: 0 };
-          return { ...value, rate: safeRate(value.withAttempts, value.toCollect) };
+          return { ...value, rate: taxaRate(value.withAttempts, value.toCollect) };
         });
         return {
           region,
@@ -4283,11 +4307,11 @@ export function DashboardApp() {
         };
       })
       .sort((a, b) => {
-        const aLatest = a.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: 0 };
-        const bLatest = b.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: 0 };
+        const aLatest = a.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
+        const bLatest = b.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
         return (
           Number(bLatest.toCollect > 0) - Number(aLatest.toCollect > 0) ||
-          bLatest.rate - aLatest.rate ||
+          (bLatest.rate ?? -1) - (aLatest.rate ?? -1) ||
           bLatest.toCollect - aLatest.toCollect ||
           a.region.localeCompare(b.region, "pt-BR", { numeric: true })
         );
@@ -4298,7 +4322,7 @@ export function DashboardApp() {
         toCollect: sum.toCollect + row.values[index].toCollect,
         withAttempts: sum.withAttempts + row.values[index].withAttempts,
       }), { orders: 0, toCollect: 0, withAttempts: 0 });
-      return { ...value, rate: safeRate(value.withAttempts, value.toCollect) };
+      return { ...value, rate: taxaRate(value.withAttempts, value.toCollect) };
     });
     return { dates, rows, total, totalOrders: total.reduce((sum, value) => sum + value.orders, 0) };
   }, [taxaDateEnd, taxaDateStart, taxaFilteredRecords, taxaLoaded]);
@@ -4308,7 +4332,7 @@ export function DashboardApp() {
     const dateSet = new Set(dates);
     const rmGroups = new Map<string, { rmArea: string; rm: string; rgm: string; byDate: Map<string, { orders: number; toCollect: number; withAttempts: number }> }>();
     for (const record of taxaFilteredRecords) {
-      if (!dateSet.has(record.date) || !record.region || normalizeSearchText(record.region) === normalizeSearchText("Sem regional")) continue;
+      if (!dateSet.has(record.date)) continue;
       const responsibility = responsibilityForBase(responsibilityLoaded, record.base);
       const rm = responsibility.rm;
       const rgm = officialRgmForRegion(record.region) ?? responsibility.rgm;
@@ -4327,17 +4351,17 @@ export function DashboardApp() {
       .map(({ rmArea, rm, rgm, byDate }) => {
         const values = dates.map((date) => {
           const value = byDate.get(date) ?? { orders: 0, toCollect: 0, withAttempts: 0 };
-          return { ...value, rate: safeRate(value.withAttempts, value.toCollect) };
+          return { ...value, rate: taxaRate(value.withAttempts, value.toCollect) };
         });
         return { rmArea, rm, rgm, values, totalOrders: values.reduce((sum, value) => sum + value.orders, 0) };
       })
       .filter((row) => row.totalOrders > 0 || row.values.some((value) => value.toCollect > 0))
       .sort((a, b) => {
-        const aLatest = a.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: 0 };
-        const bLatest = b.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: 0 };
+        const aLatest = a.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
+        const bLatest = b.values.at(-1) ?? { toCollect: 0, withAttempts: 0, rate: null };
         return (
           Number(bLatest.toCollect > 0) - Number(aLatest.toCollect > 0) ||
-          bLatest.rate - aLatest.rate ||
+          (bLatest.rate ?? -1) - (aLatest.rate ?? -1) ||
           bLatest.toCollect - aLatest.toCollect ||
           a.rmArea.localeCompare(b.rmArea, dashboardLocale(language), { numeric: true }) ||
           a.rm.localeCompare(b.rm, dashboardLocale(language), { numeric: true })
@@ -4347,7 +4371,7 @@ export function DashboardApp() {
   }, [language, responsibilityLoaded, taxaFilteredRecords, taxaRegionalPoc]);
 
   const taxaDailyPeriod = useMemo(() => {
-    if (!taxaLoaded) return [] as Array<{ date: string; toCollect: number; withAttempts: number; rate: number }>;
+    if (!taxaLoaded) return [] as Array<{ date: string; toCollect: number; withAttempts: number; rate: number | null }>;
     const dates = taxaLoaded.dates.filter((date) => date >= taxaDateStart && date <= taxaDateEnd);
     const totals = new Map<string, { toCollect: number; withAttempts: number }>();
     for (const record of taxaFilteredRecords) {
@@ -4358,7 +4382,7 @@ export function DashboardApp() {
     }
     return dates.map((date) => {
       const value = totals.get(date) ?? { toCollect: 0, withAttempts: 0 };
-      return { date, ...value, rate: safeRate(value.withAttempts, value.toCollect) };
+      return { date, ...value, rate: taxaRate(value.withAttempts, value.toCollect) };
     });
   }, [taxaDateEnd, taxaDateStart, taxaFilteredRecords, taxaLoaded]);
 
@@ -4373,7 +4397,8 @@ export function DashboardApp() {
     const maxRate = 1;
     const chartWidth = width - left - right;
     const chartHeight = height - top - bottom;
-    const yForRate = (rate: number) => {
+    const yForRate = (rate: number | null) => {
+      if (rate === null) return null;
       const clamped = Math.max(minRate, Math.min(maxRate, rate));
       return top + (1 - (clamped - minRate) / (maxRate - minRate)) * chartHeight;
     };
@@ -4384,6 +4409,17 @@ export function DashboardApp() {
         y: yForRate(value.rate),
       };
     });
+    const segments: string[][] = [];
+    let currentSegment: string[] = [];
+    for (const point of points) {
+      if (point.y === null) {
+        if (currentSegment.length) segments.push(currentSegment);
+        currentSegment = [];
+      } else {
+        currentSegment.push(`${point.x},${point.y}`);
+      }
+    }
+    if (currentSegment.length) segments.push(currentSegment);
     return {
       width,
       height,
@@ -4392,7 +4428,7 @@ export function DashboardApp() {
       top,
       bottom,
       points,
-      line: points.map((point) => `${point.x},${point.y}`).join(" "),
+      lines: segments.map((segment) => segment.join(" ")),
       targetY: taxaAttemptTarget == null ? null : yForRate(taxaAttemptTarget),
     };
   }, [taxaAttemptTarget, taxaDailyPeriod]);
@@ -4427,8 +4463,8 @@ export function DashboardApp() {
     return [...groups.values()]
       .map((item) => ({
         ...item,
-        onTimeRate: safeRate(item.onTime, item.toCollect),
-        attemptRate: safeRate(item.withAttempts, item.toCollect),
+        onTimeRate: taxaRate(item.onTime, item.toCollect),
+        attemptRate: taxaRate(item.withAttempts, item.toCollect),
       }))
       .sort((a, b) => b.toCollect - a.toCollect || a.origin.localeCompare(b.origin, "pt-BR"));
   }, [taxaFilteredRecords]);
@@ -4452,8 +4488,7 @@ export function DashboardApp() {
         notCollected: number;
         withAttempts: number;
         onTime: number;
-        averageWeighted: number;
-        averageWeight: number;
+        averageMeasures: Array<{ toCollect: number; collected: number; averageCollectionHours: number }>;
         latestToCollect: number;
         latestWithAttempts: number;
       }
@@ -4476,8 +4511,7 @@ export function DashboardApp() {
           notCollected: 0,
           withAttempts: 0,
           onTime: 0,
-          averageWeighted: 0,
-          averageWeight: 0,
+          averageMeasures: [],
           latestToCollect: 0,
           latestWithAttempts: 0,
         };
@@ -4488,9 +4522,11 @@ export function DashboardApp() {
       current.notCollected += record.notCollected;
       current.withAttempts += record.collectedWithAttempts;
       current.onTime += record.onTime;
-      const weight = Math.max(record.toCollect, record.collected, 1);
-      current.averageWeighted += record.averageCollectionHours * weight;
-      current.averageWeight += weight;
+      current.averageMeasures.push({
+        toCollect: record.toCollect,
+        collected: record.collected,
+        averageCollectionHours: record.averageCollectionHours,
+      });
       if (record.date === latestPerformanceDate) {
         current.latestToCollect += record.toCollect;
         current.latestWithAttempts += record.collectedWithAttempts;
@@ -4502,10 +4538,11 @@ export function DashboardApp() {
       .map((row) => ({
         ...row,
         productType: [...row.productTypes].slice(0, 3).join(", "),
-        attemptRate: safeRate(row.withAttempts, row.toCollect),
-        onTimeRate: safeRate(row.onTime, row.toCollect),
-        latestAttemptRate: safeRate(row.latestWithAttempts, row.latestToCollect),
-        averageHours: weightedAverage(row.averageWeighted, row.averageWeight),
+        attemptRate: taxaRate(row.withAttempts, row.toCollect),
+        onTimeRate: taxaRate(row.onTime, row.toCollect),
+        awaitingRate: taxaRate(row.notCollected, row.toCollect),
+        latestAttemptRate: taxaRate(row.latestWithAttempts, row.latestToCollect),
+        averageHours: legacyTaxaAverageCollectionHours(row.averageMeasures),
       }))
       .filter((row) => {
         if (!normalizedQuery) return true;
@@ -4515,7 +4552,7 @@ export function DashboardApp() {
     return rows.sort((a, b) => {
       return (
         Number(b.latestToCollect > 0) - Number(a.latestToCollect > 0) ||
-        b.latestAttemptRate - a.latestAttemptRate ||
+        (b.latestAttemptRate ?? -1) - (a.latestAttemptRate ?? -1) ||
         b.latestToCollect - a.latestToCollect ||
         a.base.localeCompare(b.base, "pt-BR", { numeric: true })
       );
@@ -4537,7 +4574,6 @@ export function DashboardApp() {
       const regionalGroups = new Map<string, TaxaRecord[]>();
       const rmGroups = new Map<string, { rmArea: string; rm: string; rgm: string; records: TaxaRecord[] }>();
       for (const record of taxaFilteredRecords) {
-        if (!record.region || normalizeSearchText(record.region) === normalizeSearchText("Sem regional")) continue;
         const regionalRecords = regionalGroups.get(record.region) ?? [];
         regionalRecords.push(record);
         regionalGroups.set(record.region, regionalRecords);
@@ -4561,7 +4597,7 @@ export function DashboardApp() {
           summary: summarizeTaxaPeriod(records),
         }))
         .sort((a, b) =>
-          b.summary.collectionWithAttemptsRate - a.summary.collectionWithAttemptsRate ||
+          (b.summary.collectionWithAttemptsRate ?? -1) - (a.summary.collectionWithAttemptsRate ?? -1) ||
           b.summary.toCollect - a.summary.toCollect ||
           a.region.localeCompare(b.region, "pt-BR", { numeric: true }),
         )
@@ -4587,7 +4623,7 @@ export function DashboardApp() {
       const rmRows: ExcelExportValue[][] = [...rmGroups.values()]
         .map((row) => ({ ...row, summary: summarizeTaxaPeriod(row.records) }))
         .sort((a, b) =>
-          b.summary.collectionWithAttemptsRate - a.summary.collectionWithAttemptsRate ||
+          (b.summary.collectionWithAttemptsRate ?? -1) - (a.summary.collectionWithAttemptsRate ?? -1) ||
           b.summary.toCollect - a.summary.toCollect ||
           a.rmArea.localeCompare(b.rmArea, dashboardLocale(language), { numeric: true }) ||
           a.rm.localeCompare(b.rm, dashboardLocale(language), { numeric: true }),
@@ -4849,7 +4885,10 @@ export function DashboardApp() {
   const applyResponsibilityFilter = useCallback((kind: "rm" | "rgm", value: Set<string>) => {
     const nextRms = kind === "rm" ? value : selectedRms;
     const nextRgms = kind === "rgm" ? value : selectedRgms;
-    if (kind === "rm") setSelectedRms(value);
+    if (kind === "rm") {
+      setSelectedRms(value);
+      setTaxaRmSelection(rmSelectionFromValues(taxaResponsibilityFilterOptions.rms, value));
+    }
     else setSelectedRgms(value);
 
     if (loaded) {
@@ -4857,7 +4896,7 @@ export function DashboardApp() {
       setPage(1);
     }
     if (taxaLoaded) {
-      const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions, responsibilityLoaded).filter((base) =>
+      const bases = taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
         matchesResponsibility(responsibilityLoaded, base, nextRms, nextRgms));
       setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
       setTaxaSelectedBases(new Set(bases));
@@ -4895,6 +4934,7 @@ export function DashboardApp() {
     sellerSelectedRegions,
     sellerSelectedTiers,
     taxaLoaded,
+    taxaResponsibilityFilterOptions.rms,
     taxaSelectedRegions,
   ]);
 
@@ -5079,7 +5119,7 @@ export function DashboardApp() {
     if (view === "taxa") return [
       period(taxaDateStart, taxaDateEnd),
       line("Regional", taxaSelectedRegions, taxaRegionOptions, "Todas as regionais"),
-      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
+      line("RM", taxaSelectedRms, taxaResponsibilityFilterOptions.rms, "Todos os RM"),
       line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
       line("Base", taxaSelectedBases, taxaBaseOptions, "Todas as bases"),
       ...(taxaLoaded ? [line("Origem do pedido", taxaSelectedOrigins, taxaLoaded.origins, "Todas as origens")] : []),
@@ -5481,7 +5521,8 @@ export function DashboardApp() {
       taxaSelectedRegions.size === taxaRegionOptions.length &&
       taxaSelectedOrigins.size === taxaLoaded.origins.length &&
       taxaSelectedRmAreas.size === taxaRmAreaOptions.length &&
-      responsibilityFiltersAreDefault &&
+      taxaRmSelection.mode === "all" &&
+      selectedRgms.size === responsibilityFilterOptions.rgms.length &&
       taxaDateStart === taxaLoaded.initialStart &&
       taxaDateEnd === taxaLoaded.initialEnd,
   );
@@ -5530,7 +5571,7 @@ export function DashboardApp() {
           <span className="card-eyebrow">{t("RESULTADO GERAL")}</span>
           <h3>{t("Taxa de coleta x taxa com tentativa")}</h3>
         </div>
-        <span>{t("Ano {year}", { year: taxaGeneralMonthlyTrend.year })}</span>
+        <span>{t("Período {period}", { period: taxaGeneralMonthlyTrend.periodLabel })}</span>
       </div>
       {taxaGeneralMonthlyTrend.points.length > 0 ? (
         <>
@@ -5565,35 +5606,25 @@ export function DashboardApp() {
                   y2={taxaGeneralMonthlyTrend.targetY}
                 />
               ) : null}
-              <polyline className="general-rate-line collection" points={taxaGeneralMonthlyTrend.collectionLine} />
-              <polyline className="general-rate-line attempt" points={taxaGeneralMonthlyTrend.attemptLine} />
+              {taxaGeneralMonthlyTrend.collectionLines.map((points, index) => <polyline key={`collection-${index}`} className="general-rate-line collection" points={points} />)}
+              {taxaGeneralMonthlyTrend.attemptLines.map((points, index) => <polyline key={`attempt-${index}`} className="general-rate-line attempt" points={points} />)}
               {taxaGeneralMonthlyTrend.points.map((point) => (
                 <g key={point.monthKey}>
                   <text className="general-rate-x-label" x={point.x} y={taxaGeneralMonthlyTrend.height - 12}>
                     {point.monthLabel}
                   </text>
-                  <circle className="general-rate-point collection" cx={point.x} cy={point.collectionY} r="4.5">
-                    <title>{`${t("Taxa de coleta")}: ${formatRate(point.collectionRate)}`}</title>
-                  </circle>
-                  <circle className="general-rate-point attempt" cx={point.x} cy={point.attemptY} r="4.5">
-                    <title>{`${t("Taxa com tentativa")}: ${formatRate(point.attemptRate)}`}</title>
-                  </circle>
-                  <text
-                    className="general-rate-value-label collection"
-                    x={point.x}
-                    y={Math.max(12, point.collectionY - 10)}
-                    textAnchor="middle"
-                  >
-                    {formatRate(point.collectionRate)}
-                  </text>
-                  <text
-                    className="general-rate-value-label attempt"
-                    x={point.x}
-                    y={Math.min(taxaGeneralMonthlyTrend.height - taxaGeneralMonthlyTrend.bottom + 18, point.attemptY + 16)}
-                    textAnchor="middle"
-                  >
-                    {formatRate(point.attemptRate)}
-                  </text>
+                  {point.collectionY === null ? <text className="general-rate-value-label collection" x={point.x} y={taxaGeneralMonthlyTrend.height - taxaGeneralMonthlyTrend.bottom - 4} textAnchor="middle">—</text> : (
+                    <>
+                      <circle className="general-rate-point collection" cx={point.x} cy={point.collectionY} r="4.5"><title>{`${t("Taxa de coleta")}: ${formatTaxaRate(point.onTimeRate)}`}</title></circle>
+                      <text className="general-rate-value-label collection" x={point.x} y={Math.max(12, point.collectionY - 10)} textAnchor="middle">{formatTaxaRate(point.onTimeRate)}</text>
+                    </>
+                  )}
+                  {point.attemptY === null ? <text className="general-rate-value-label attempt" x={point.x} y={taxaGeneralMonthlyTrend.height - taxaGeneralMonthlyTrend.bottom + 12} textAnchor="middle">—</text> : (
+                    <>
+                      <circle className="general-rate-point attempt" cx={point.x} cy={point.attemptY} r="4.5"><title>{`${t("Taxa com tentativa")}: ${formatTaxaRate(point.attemptRate)}`}</title></circle>
+                      <text className="general-rate-value-label attempt" x={point.x} y={Math.min(taxaGeneralMonthlyTrend.height - taxaGeneralMonthlyTrend.bottom + 18, point.attemptY + 16)} textAnchor="middle">{formatTaxaRate(point.attemptRate)}</text>
+                    </>
+                  )}
                 </g>
               ))}
             </svg>
@@ -7192,7 +7223,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <div className="filters-card-top"><div><h2><Filter size={18} /> {t("Filtros operacionais")}</h2><p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p></div><button type="button" className="reset-button" onClick={() => { setEpopSelectedRegions(initialRegionSelection(epopLoaded.regions, viewerIdentity)); setEpopSelectedBases(new Set(epopLoaded.bases)); setEpopDateStart(epopLoaded.dates[0] ?? ""); setEpopDateEnd(epopLoaded.dates.at(-1) ?? ""); }}><RotateCcw size={15} /> {t("Limpar filtros")}</button></div>
                 <div className="filter-grid taxa-filter-grid">
                   <MultiSelect label={t("Regional")} options={epopLoaded.regions} selected={epopSelectedRegions} onChange={setEpopSelectedRegions} allLabel={t("Todas as regionais")} singular={t("regional")} plural={t("regionais")} searchable t={t}/>
-                  <MultiSelect label="RM" options={responsibilityFilterOptions.rms} selected={selectedRms} onChange={(value) => setSelectedRms(value)} allLabel={t("Todos os RM")} singular="RM" plural="RM" searchable t={t}/>
+                  <MultiSelect label="RM" options={responsibilityFilterOptions.rms} selected={selectedRms} onChange={(value) => { setSelectedRms(value); setTaxaRmSelection(rmSelectionFromValues(taxaResponsibilityFilterOptions.rms, value)); }} allLabel={t("Todos os RM")} singular="RM" plural="RM" searchable t={t}/>
                   <MultiSelect label={t("Região do RM")} options={responsibilityFilterOptions.rgms} selected={selectedRgms} onChange={(value) => setSelectedRgms(value)} allLabel={t("Todas as regiões do RM")} singular={t("região do RM")} plural={t("regiões do RM")} searchable t={t}/>
                   <MultiSelect label={t("Base")} options={epopLoaded.bases} selected={epopSelectedBases} onChange={setEpopSelectedBases} allLabel={t("Todas as bases")} singular={t("base")} plural={t("bases")} searchable t={t}/>
                   <div className="filter-field date-field"><label className="filter-label">{t("Data inicial")}</label><div className="date-input-wrap"><CalendarDays size={16}/><input type="date" value={epopDateStart} min={epopLoaded.dates[0]} max={epopLoaded.dates.at(-1)} onChange={(event) => setEpopDateStart(event.target.value)} /></div></div>
@@ -7342,8 +7373,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     selected={taxaSelectedRegions}
                     onChange={(value) => {
                       setTaxaSelectedRegions(value);
-                      const bases = taxaBasesForRegions(taxaLoaded, value, responsibilityLoaded).filter((base) =>
-                        matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms));
+                      const bases = taxaBasesForRegions(taxaLoaded, value).filter((base) =>
+                        matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms));
                       setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
                       setTaxaSelectedBases(new Set(bases));
                       setTaxaPage(1);
@@ -7356,8 +7387,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   />
                   <MultiSelect
                     label="RM"
-                    options={responsibilityFilterOptions.rms}
-                    selected={selectedRms}
+                    options={taxaResponsibilityFilterOptions.rms}
+                    selected={taxaSelectedRms}
                     onChange={(value) => applyResponsibilityFilter("rm", value)}
                     allLabel={t("Todos os RM")}
                     singular="RM"
@@ -7372,8 +7403,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     selected={taxaSelectedRmAreas}
                     onChange={(value) => {
                       setTaxaSelectedRmAreas(value);
-                      setTaxaSelectedBases(new Set(taxaBasesForRegions(taxaLoaded, taxaSelectedRegions, responsibilityLoaded).filter((base) =>
-                        matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms) &&
+                      setTaxaSelectedBases(new Set(taxaBasesForRegions(taxaLoaded, taxaSelectedRegions).filter((base) =>
+                        matchesResponsibility(responsibilityLoaded, base, taxaSelectedRms, selectedRgms) &&
                         value.has(rmAreaForBase(responsibilityLoaded, base)))));
                       setTaxaPage(1);
                     }}
@@ -7471,13 +7502,13 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <KpiCard
                   icon={<CalendarDays size={20} />}
                   label={t("Taxa de coleta")}
-                  value={formatRate(taxaSummary.onTimeRate)}
+                  value={formatTaxaRate(taxaSummary.onTimeRate)}
                   detail={t("{count} coletados no prazo", { count: formatNumber(taxaSummary.onTime) })}
                 />
                 <KpiCard
                   icon={<TrendingUp size={20} />}
                   label={t("Taxa com tentativa")}
-                  value={formatRate(taxaSummary.collectionWithAttemptsRate)}
+                  value={formatTaxaRate(taxaSummary.collectionWithAttemptsRate)}
                   detail={t("{count} com coleta/tentativa", { count: formatNumber(taxaSummary.collectedWithAttempts) })}
                   tone="orange"
                 />
@@ -7492,7 +7523,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   icon={<CircleAlert size={20} />}
                   label={t("Aguardando coleta")}
                   value={formatCompact(taxaSummary.notCollected)}
-                  detail={t("{rate} do previsto a coletar", { rate: formatRate(monitoringAwaitingRate({ orderVolume: taxaSummary.toCollect, awaiting: taxaSummary.notCollected })) })}
+                  detail={t("{rate} do previsto a coletar", { rate: formatTaxaRate(taxaSummary.awaitingRate) })}
                   tone="soft"
                 />
               </section>
@@ -7551,10 +7582,10 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                               {row.values.map((value, index) => (
                                 <td key={`${row.region}-${taxaRegionalPoc.dates[index]}`}>
                                   <strong
-                                    className={value.toCollect <= 0 ? "empty" : value.rate >= taxaPerformanceThreshold ? "ok" : value.rate >= 0.95 ? "watch" : "alert"}
+                                    className={value.rate === null ? "empty" : value.rate >= taxaPerformanceThreshold ? "ok" : value.rate >= 0.95 ? "watch" : "alert"}
                                     title={value.toCollect > 0 ? t("{count} com tentativa", { count: formatNumber(value.withAttempts) }) : t("Sem movimento")}
                                   >
-                                    {value.toCollect > 0 ? formatRate(value.rate) : "—"}
+                                    {formatTaxaRate(value.rate)}
                                   </strong>
                                 </td>
                               ))}
@@ -7568,7 +7599,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                             {taxaAttemptTarget == null ? null : <td className="target-cell"><strong>{formatRate(taxaAttemptTarget)}</strong></td>}
                             {taxaRegionalPoc.total.map((value, index) => (
                               <td key={`total-${taxaRegionalPoc.dates[index]}`}>
-                                <strong title={t("{count} com tentativa", { count: formatNumber(value.withAttempts) })}>{value.toCollect > 0 ? formatRate(value.rate) : "—"}</strong>
+                                <strong title={t("{count} com tentativa", { count: formatNumber(value.withAttempts) })}>{formatTaxaRate(value.rate)}</strong>
                               </td>
                             ))}
                             <td className="number-cell"><strong>{formatNumber(taxaRegionalPoc.totalOrders)}</strong></td>
@@ -7590,13 +7621,15 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                           <line className="chart-axis-line" x1={taxaPocTrend.left} y1={taxaPocTrend.top} x2={taxaPocTrend.left} y2={taxaPocTrend.height - taxaPocTrend.bottom} />
                           <line className="chart-axis-line" x1={taxaPocTrend.left} y1={taxaPocTrend.height - taxaPocTrend.bottom} x2={taxaPocTrend.width - taxaPocTrend.right} y2={taxaPocTrend.height - taxaPocTrend.bottom} />
                           {taxaPocTrend.targetY == null ? null : <line className="target-line" x1={taxaPocTrend.left} y1={taxaPocTrend.targetY} x2={taxaPocTrend.width - taxaPocTrend.right} y2={taxaPocTrend.targetY} />}
-                          <polyline className="attempt-line" points={taxaPocTrend.line} />
+                          {taxaPocTrend.lines.map((points, lineIndex) => <polyline key={`poc-line-${lineIndex}`} className="attempt-line" points={points} />)}
                           {taxaPocTrend.points.map((point, index) => (
                             <g key={`trend-${point.date}`}>
-                              <circle className={point.rate >= taxaPerformanceThreshold ? "attempt-point ok" : "attempt-point alert"} cx={point.x} cy={point.y} r="4" />
-                              <text className={`attempt-value-label ${point.rate >= taxaPerformanceThreshold ? "ok" : "alert"}`} x={point.x} y={Math.max(9, point.y - (index % 2 === 0 ? 7 : 14))} textAnchor="middle">
-                                {formatRate(point.rate)}
-                              </text>
+                              {point.y === null ? <text className="attempt-value-label" x={point.x} y={taxaPocTrend.height - taxaPocTrend.bottom - 4} textAnchor="middle">—</text> : (
+                                <>
+                                  <circle className={point.rate !== null && point.rate >= taxaPerformanceThreshold ? "attempt-point ok" : "attempt-point alert"} cx={point.x} cy={point.y} r="4" />
+                                  <text className={`attempt-value-label ${point.rate !== null && point.rate >= taxaPerformanceThreshold ? "ok" : "alert"}`} x={point.x} y={Math.max(9, point.y - (index % 2 === 0 ? 7 : 14))} textAnchor="middle">{formatTaxaRate(point.rate)}</text>
+                                </>
+                              )}
                               <text className="attempt-date-label" x={point.x} y={taxaPocTrend.height - 18} textAnchor="middle">{formatDate(point.date, true)}</text>
                               <text className={`attempt-weekday-label${isWeekendDate(point.date) ? " is-weekend" : ""}`} x={point.x} y={taxaPocTrend.height - 6} textAnchor="middle">{formatWeekday(point.date)}</text>
                             </g>
@@ -7623,12 +7656,12 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                           <div className="composition-row" key={item.origin}>
                             <div className="composition-label">
                               <span title={item.origin}><StatusDot color="#e60000" /> {item.origin}</span>
-                              <strong>{formatRate(item.attemptRate)}</strong>
+                              <strong>{formatTaxaRate(item.attemptRate)}</strong>
                             </div>
                             <div className="horizontal-track">
-                              <span style={{ width: `${Math.min(100, item.attemptRate * 100)}%`, backgroundColor: "#e60000" }} />
+                              <span style={{ width: `${Math.min(100, (item.attemptRate ?? 0) * 100)}%`, backgroundColor: "#e60000" }} />
                             </div>
-                            <small>{t("{count} com tentativa · {rate} no prazo", { count: formatNumber(item.withAttempts), rate: formatRate(item.onTimeRate) })}</small>
+                            <small>{t("{count} com tentativa · {rate} no prazo", { count: formatNumber(item.withAttempts), rate: formatTaxaRate(item.onTimeRate) })}</small>
                           </div>
                         ))}
                       </div>
@@ -7686,18 +7719,18 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                               </thead>
                               <tbody>
                                 {taxaRmPoc.rows.map((row) => (
-                                  <tr key={`${row.rmArea}-${row.rm}`}>
+                                  <tr key={rmGroupReactKey(row.rmArea, row.rm, row.rgm)}>
                                     <th scope="row"><span title={t(row.rmArea)}>{t(row.rmArea)}</span></th>
                                     <th scope="row"><span title={t(row.rm)}>{t(row.rm)}</span></th>
                                     <th scope="row"><span title={t(row.rgm)}>{t(row.rgm)}</span></th>
                                     {taxaAttemptTarget == null ? null : <td className="target-cell"><strong>{formatRate(taxaAttemptTarget)}</strong></td>}
                                     {row.values.map((value, index) => (
-                                      <td key={`${row.rmArea}-${row.rm}-${taxaRmPoc.dates[index]}`}>
+                                      <td key={`${rmGroupReactKey(row.rmArea, row.rm, row.rgm)}::${taxaRmPoc.dates[index]}`}>
                                         <strong
-                                          className={value.toCollect <= 0 ? "empty" : value.rate >= taxaPerformanceThreshold ? "ok" : value.rate >= 0.95 ? "watch" : "alert"}
+                                          className={value.rate === null ? "empty" : value.rate >= taxaPerformanceThreshold ? "ok" : value.rate >= 0.95 ? "watch" : "alert"}
                                           title={value.toCollect > 0 ? t("{count} com tentativa", { count: formatNumber(value.withAttempts) }) : t("Sem movimento")}
                                         >
-                                          {value.toCollect > 0 ? formatRate(value.rate) : "—"}
+                                          {formatTaxaRate(value.rate)}
                                         </strong>
                                       </td>
                                     ))}
@@ -7712,7 +7745,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                                   {taxaRmPoc.total.map((value, index) => (
                                     <td key={`rm-total-${taxaRmPoc.dates[index]}`}>
                                       <strong title={t("{count} com tentativa", { count: formatNumber(value.withAttempts) })}>
-                                        {value.toCollect > 0 ? formatRate(value.rate) : "—"}
+                                        {formatTaxaRate(value.rate)}
                                       </strong>
                                     </td>
                                   ))}
@@ -7797,9 +7830,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                               <td className="number-cell">{formatNumber(row.orders)}</td>
 	                              <td className="number-cell">{formatNumber(row.toCollect)}</td>
 	                              <td className="number-cell total-cell">{formatNumber(row.notCollected)}</td>
-	                              <td className="number-cell">{formatRate(row.onTimeRate)}</td>
-	                              <td className="number-cell total-cell">{formatRate(monitoringAwaitingRate({ orderVolume: row.toCollect, awaiting: row.notCollected }))}</td>
-	                              <td className="number-cell">{formatRate(row.attemptRate)}</td>
+	                              <td className="number-cell">{formatTaxaRate(row.onTimeRate)}</td>
+	                              <td className="number-cell total-cell">{formatTaxaRate(row.awaitingRate)}</td>
+	                              <td className="number-cell">{formatTaxaRate(row.attemptRate)}</td>
 	                              <td className="number-cell">{t("{hours}h", { hours: row.averageHours.toLocaleString(dashboardLocale(language), { maximumFractionDigits: 1 }) })}</td>
                             </tr>
                           ))}
@@ -7816,9 +7849,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                               <td className="number-cell">{formatNumber(row.orders)}</td>
 	                              <td className="number-cell">{formatNumber(row.toCollect)}</td>
 	                              <td className="number-cell total-cell">{formatNumber(row.notCollected)}</td>
-	                              <td className="number-cell">{formatRate(row.onTimeRate)}</td>
-	                              <td className="number-cell total-cell">{formatRate(monitoringAwaitingRate({ orderVolume: row.toCollect, awaiting: row.notCollected }))}</td>
-	                              <td className="number-cell">{formatRate(row.attemptRate)}</td>
+	                              <td className="number-cell">{formatTaxaRate(row.onTimeRate)}</td>
+	                              <td className="number-cell total-cell">{formatTaxaRate(row.awaitingRate)}</td>
+	                              <td className="number-cell">{formatTaxaRate(row.attemptRate)}</td>
 	                              <td className="number-cell">{t("{hours}h", { hours: row.averageHours.toLocaleString(dashboardLocale(language), { maximumFractionDigits: 1 }) })}</td>
                             </tr>
                           ))}

@@ -7335,6 +7335,8 @@ tbody tr:hover td {
 .monitoring-source-preview-meta dd { overflow: hidden; margin: 0; color: #343a43; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .monitoring-source-current dd.is-demo { color: #906d27; }
 .monitoring-source-current dd.is-loaded { color: #26734b; }
+.monitoring-source-history-preview { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #f0e4e4; }
+.monitoring-source-history-preview h4 { margin: 0; color: #4c525b; font-size: 12px; font-weight: 650; }
 .monitoring-source-empty { margin: 0; color: #727985; font-size: 13px; }
 .monitoring-source-automation { margin: 0; color: #878d96; font-size: 11px; }
 .monitoring-source-automation span { margin-right: 5px; color: #bf7373; font-size: 8px; }

@@ -71,6 +71,7 @@ test("Node server-renders the protected Feishu presentation login", async () => 
 
 test("persists the latest workbook and exposes all requested filters", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const taxaMetrics = await readFile(new URL("../src/lib/taxa-summary.ts", import.meta.url), "utf8");
   const route = await readFile(new URL("../backend/app/api/workbooks.py", import.meta.url), "utf8");
   const parser = await readFile(new URL("../src/lib/workbook.ts", import.meta.url), "utf8");
   const layout = await readFile(new URL("../src/routes/__root.tsx", import.meta.url), "utf8");
@@ -145,9 +146,11 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /percentual do último dia determina o ranking do maior para o menor/);
   assert.match(source, /const aLatest = a\.values\.at\(-1\)/);
   assert.match(source, /const bLatest = b\.values\.at\(-1\)/);
-  assert.match(source, /bLatest\.rate - aLatest\.rate/);
+  assert.match(source, /Number\(bLatest\.toCollect > 0\) - Number\(aLatest\.toCollect > 0\)/);
+  assert.match(source, /\(bLatest\.rate \?\? -1\) - \(aLatest\.rate \?\? -1\)/);
   assert.match(source, /latestPerformanceDate = taxaRegionalPoc\.dates\.at\(-1\)/);
-  assert.match(source, /b\.latestAttemptRate - a\.latestAttemptRate/);
+  assert.match(source, /Number\(b\.latestToCollect > 0\) - Number\(a\.latestToCollect > 0\)/);
+  assert.match(source, /\(b\.latestAttemptRate \?\? -1\) - \(a\.latestAttemptRate \?\? -1\)/);
   assert.match(source, /totalOrders: values\.reduce\(\(sum, value\) => sum \+ value\.orders, 0\)/);
   assert.ok((source.match(/<th>\{t\("Total de pedidos"\)\}<\/th>/g) ?? []).length >= 2);
   assert.match(source, /taxaRegionalPoc\.totalOrders/);
@@ -215,9 +218,9 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /taxaPocTrend\.points[\s\S]*?taxaGeneralTrendPanel[\s\S]*?<\/article>/);
   assert.match(styles, /\.taxa-poc-rm-replacement \.taxa-poc-rm-table-wrap\s*\{[\s\S]*?max-height: 720px/);
   assert.match(styles, /\.taxa-general-aligned-panel \.general-rate-line-chart svg\s*\{[\s\S]*?aspect-ratio: 700 \/ 180/);
-  assert.match(source, /formatRate\(point\.collectionRate\)/);
-  assert.match(source, /formatRate\(point\.attemptRate\)/);
-  assert.match(source, /formatRate\(point\.rate\)/);
+  assert.match(source, /formatTaxaRate\(point\.onTimeRate\)/);
+  assert.match(source, /formatTaxaRate\(point\.attemptRate\)/);
+  assert.match(source, /formatTaxaRate\(point\.rate\)/);
   assert.match(styles, /\.filter-grid\s*\{[\s\S]*?repeat\(6, minmax\(0, 1fr\)\)/);
   assert.match(styles, /\.movement-filter-grid\s*\{[\s\S]*?repeat\(auto-fit, minmax\(180px, 1fr\)\)/);
   assert.match(styles, /\.sellers-filter-grid\s*\{[\s\S]*?repeat\(8, minmax\(0, 1fr\)\)/);
@@ -378,13 +381,15 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /safeRate\(processed, total\)/);
   assert.match(source, /toCollect: rawToCollect/);
   assert.match(source, /summarizeTaxaPeriod\(taxaFilteredRecords\)/);
-  assert.match(source, /label=\{t\("Taxa de coleta"\)\}[\s\S]*?value=\{formatRate\(taxaSummary\.onTimeRate\)\}[\s\S]*?taxaSummary\.onTime/);
+  assert.match(source, /label=\{t\("Taxa de coleta"\)\}[\s\S]*?value=\{formatTaxaRate\(taxaSummary\.onTimeRate\)\}[\s\S]*?taxaSummary\.onTime/);
   assert.match(source, /label=\{t\("Previsto a coletar"\)\}[\s\S]*?taxaSummary\.toCollect/);
   assert.match(source, /label=\{t\("Aguardando coleta"\)\}[\s\S]*?taxaSummary\.notCollected/);
   assert.match(source, /Taxa de pedidos aguardando coleta/);
   assert.match(source, /current\.onTime \+= record\.onTime/);
-  assert.match(source, /collectionRate: safeRate\(month\.onTime, month\.toCollect\)/);
-  assert.match(source, /<th>\{t\("Taxa de coleta"\)\}<\/th>[\s\S]*?formatRate\(row\.onTimeRate\)/);
+  assert.match(source, /summarizeTaxaByMonth\(taxaFilteredRecords\)/);
+  assert.match(taxaMetrics, /onTimeRate: taxaRate\(month\.onTime, month\.toCollect\)/);
+  assert.match(taxaMetrics, /attemptRate: taxaRate\(month\.collectedWithAttempts, month\.toCollect\)/);
+  assert.match(source, /<th>\{t\("Taxa de coleta"\)\}<\/th>[\s\S]*?formatTaxaRate\(row\.onTimeRate\)/);
   assert.match(actionBand, /Gerar PDF/);
   assert.match(source, /onPrint=\{handlePrintReport\}/);
   assert.match(actionBand, /Relatório gerado em/);

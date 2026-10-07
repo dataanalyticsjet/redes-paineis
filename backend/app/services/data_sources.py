@@ -22,6 +22,7 @@ from app.services.local_workbooks import (
     save_dashboard_source,
 )
 from app.services.row_scope import scope_parsed_rows
+from app.services.taxa_history import TaxaHistoryError, merge_taxa_history
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +323,35 @@ def create_dashboard_preview(
     file_name, content_type, parsed = _validate_upload(request)
     adapter = _DATA_SOURCE_ADAPTERS[dashboard_id]
     scoped, fields, missing, period, can_import = adapter(parsed, identity)
+    history_preview: dict[str, Any] | None = None
+    if dashboard_id == "taxa" and can_import:
+        try:
+            current_source = read_saved_dashboard_source(
+                data_root(get_settings().data_directory), dashboard_id, owner_key
+            )
+            history_merge = merge_taxa_history(
+                current_source.get("parsed") if current_source else None,
+                parsed,
+            )
+        except TaxaHistoryError as error:
+            raise DataSourceError(error.code, 422) from error
+        except LocalWorkbookError as error:
+            raise DataSourceError(str(error), 500) from error
+        period = history_merge.file_period
+        scoped_incoming = _scope_parsed(parsed, identity)
+        scoped_history = _scope_parsed(history_merge.parsed, identity)
+        scoped_blank_base_rows = sum(
+            1
+            for row in scoped_incoming["rows"]
+            if not str(row.get(scoped_incoming["baseColumn"], "") or "").strip()
+        )
+        history_preview = {
+            "newDates": history_merge.new_dates,
+            "replacedDates": history_merge.replaced_dates,
+            "fileRowCount": len(scoped_incoming["rows"]),
+            "blankBaseRows": scoped_blank_base_rows,
+            "resultingRows": len(scoped_history["rows"]),
+        }
 
     preview_id = str(uuid.uuid4())
     now = time.time()
@@ -358,6 +388,7 @@ def create_dashboard_preview(
         "headers": scoped["headers"],
         "fields": fields,
         "missingFields": missing,
+        "history": history_preview,
         "canImport": can_import,
         "errors": [] if can_import else ["data_source_required_fields_missing"],
     }
@@ -385,25 +416,41 @@ def import_dashboard_preview(
             raise DataSourceError("data_source_preview_expired", 410)
 
         imported_at = datetime.now(timezone.utc).isoformat()
+        parsed_to_save = entry.parsed
+        period_to_save = entry.period
+        rows_to_save = entry.row_count
         try:
+            if dashboard_id == "taxa":
+                current_source = read_saved_dashboard_source(
+                    data_root(get_settings().data_directory), dashboard_id, owner_key
+                )
+                history_merge = merge_taxa_history(
+                    current_source.get("parsed") if current_source else None,
+                    entry.parsed,
+                )
+                parsed_to_save = history_merge.parsed
+                period_to_save = history_merge.merged_period
+                rows_to_save = history_merge.resulting_rows
             source = save_dashboard_source(
                 data_root(get_settings().data_directory),
                 dashboard_id,
                 owner_key,
                 entry.file_name,
-                entry.parsed,
+                parsed_to_save,
                 entry.source_bytes,
                 imported_at=imported_at,
                 file_size_bytes=entry.file_size_bytes,
                 content_type=entry.content_type,
-                period=entry.period,
-                row_count=entry.row_count,
+                period=period_to_save,
+                row_count=rows_to_save,
             )
+        except TaxaHistoryError as error:
+            raise DataSourceError(error.code, 422) from error
         except LocalWorkbookError as error:
             raise DataSourceError(str(error), 500) from error
         _previews.pop(preview_id, None)
 
-    logger.info("Local dashboard data source imported (dashboard_id=%s, rows=%s)", dashboard_id, entry.row_count)
+    logger.info("Local dashboard data source imported (dashboard_id=%s, rows=%s)", dashboard_id, rows_to_save)
     return serialize_source(source)
 
 

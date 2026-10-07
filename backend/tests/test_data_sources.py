@@ -121,6 +121,35 @@ def preview_taxa(client: TestClient, parsed: dict[str, object] | None = None):
     )
 
 
+def taxa_with_dates(first_date: str, second_date: str) -> dict[str, object]:
+    parsed = parsed_taxa_workbook()
+    parsed["rows"][0]["Horário de término do prazo de coleta"] = first_date
+    parsed["rows"][1]["Horário de término do prazo de coleta"] = second_date
+    return parsed
+
+
+def taxa_national_snapshot(
+    dated_regions: list[tuple[str, str]],
+    *,
+    base_prefix: str = "Base",
+) -> dict[str, object]:
+    parsed = parsed_taxa_workbook()
+    rows = []
+    for date, region in dated_regions:
+        row = {header: 1 for header in parsed["headers"]}
+        row.update({
+            "Horário de término do prazo de coleta": date,
+            "Nome da regional": region,
+            "Nome da base de coleta": f"{base_prefix} {region} {date}",
+            "Origem do Pedido": "TikTok",
+            "Tipo de produto": "Pacote",
+        })
+        rows.append(row)
+    parsed["rows"] = rows
+    parsed["metadata"]["rowCount"] = len(rows)
+    return parsed
+
+
 def test_data_source_api_requires_feishu_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
@@ -408,6 +437,169 @@ def test_invalid_taxa_contract_keeps_previous_local_source(authenticated_client:
     assert result.json()["canImport"] is False
     assert "Taxa de coleta no prazo" in result.json()["missingFields"]
     assert authenticated_client.get("/api/data-sources/taxa").json()["source"]["fileName"] == "taxa-coleta.xlsx"
+
+
+def test_taxa_history_preview_publish_and_reupload_follow_date_snapshot_rules(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
+    matrix_token, _matrix_user = create_user_session(
+        name="Matrix Admin",
+        platform_role="ADMIN",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="taxa-history-matrix-admin",
+    )
+    matrix_client = TestClient(app, base_url="http://localhost:3000")
+    matrix_client.cookies.set(feishu_auth.SESSION_COOKIE, matrix_token)
+
+    first_preview = preview_taxa(matrix_client, taxa_with_dates("2026-10-01", "2026-10-02")).json()
+    assert first_preview["history"]["newDates"] == ["2026-10-01", "2026-10-02"]
+    assert first_preview["history"]["replacedDates"] == []
+    assert first_preview["history"]["fileRowCount"] == 2
+    assert first_preview["history"]["resultingRows"] == 2
+    first_import = matrix_client.post("/api/data-sources/taxa/import", json={"previewId": first_preview["previewId"]})
+    assert first_import.status_code == 200
+    assert len(first_import.json()["parsed"]["rows"]) == 2
+
+    update = taxa_with_dates("2026-10-02", "2026-10-03")
+    second_preview = preview_taxa(matrix_client, update).json()
+    assert second_preview["history"]["newDates"] == ["2026-10-03"]
+    assert second_preview["history"]["replacedDates"] == ["2026-10-02"]
+    assert second_preview["history"]["resultingRows"] == 3
+    second_import = matrix_client.post("/api/data-sources/taxa/import", json={"previewId": second_preview["previewId"]})
+    assert second_import.status_code == 200
+    assert [row["Horário de término do prazo de coleta"] for row in second_import.json()["parsed"]["rows"]] == [
+        "2026-10-01", "2026-10-02", "2026-10-03",
+    ]
+
+    reupload_preview = preview_taxa(matrix_client, update).json()
+    assert reupload_preview["history"]["newDates"] == []
+    assert reupload_preview["history"]["replacedDates"] == ["2026-10-02", "2026-10-03"]
+    reupload = matrix_client.post("/api/data-sources/taxa/import", json={"previewId": reupload_preview["previewId"]})
+    assert reupload.status_code == 200
+    assert len(reupload.json()["parsed"]["rows"]) == 3
+
+    regional_token, _regional_user = create_user_session(
+        name="SPS Viewer",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="taxa-history-sps-viewer",
+    )
+    regional_client = TestClient(app, base_url="http://localhost:3000")
+    regional_client.cookies.set(feishu_auth.SESSION_COOKIE, regional_token)
+    regional_source = regional_client.get("/api/data-sources/taxa").json()["source"]
+    assert {row["Nome da regional"] for row in regional_source["parsed"]["rows"]} == {"SPS"}
+    assert len(regional_source["parsed"]["rows"]) == 2
+
+    additional_region_token, _additional_user = create_user_session(
+        name="SPS and RJ Viewer",
+        organizational_scope="regional",
+        home_region="SPS",
+        additional_regions=["RJ"],
+        identity_suffix="taxa-history-sps-rj-viewer",
+    )
+    additional_region_client = TestClient(app, base_url="http://localhost:3000")
+    additional_region_client.cookies.set(feishu_auth.SESSION_COOKIE, additional_region_token)
+    additional_source = additional_region_client.get("/api/data-sources/taxa").json()["source"]
+    assert {row["Nome da regional"] for row in additional_source["parsed"]["rows"]} == {"SPS", "RJ"}
+    assert len(additional_source["parsed"]["rows"]) == 3
+
+    user_token, _user = create_user_session(
+        name="Read-only Viewer",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="taxa-history-read-only-viewer",
+    )
+    user_client = TestClient(app, base_url="http://localhost:3000")
+    user_client.cookies.set(feishu_auth.SESSION_COOKIE, user_token)
+    assert user_client.get("/api/data-sources/taxa").status_code == 200
+    denied_preview = preview_taxa(user_client)
+    assert denied_preview.status_code == 403
+    assert denied_preview.json()["detail"] == "admin_required"
+
+
+def test_regional_admin_taxa_publication_and_history_keep_canonical_national_dataset(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
+    """Scoped preview/read responses must never truncate the shared published history."""
+    admin_token, _admin_user = create_user_session(
+        name="São Paulo Leste Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="SPE",
+        identity_suffix="taxa-history-regional-admin-spe",
+    )
+    authenticated_client.cookies.set(feishu_auth.SESSION_COOKIE, admin_token)
+
+    first_national_file = taxa_national_snapshot([
+        ("2026-10-01", "SPE"),
+        ("2026-10-01", "MG"),
+        ("2026-10-01", "RJ"),
+        ("2026-10-02", "SPE"),
+        ("2026-10-02", "MG"),
+        ("2026-10-02", "RJ"),
+    ])
+    first_preview = preview_taxa(authenticated_client, first_national_file).json()
+    assert first_preview["rowCount"] == 2
+    assert first_preview["history"]["fileRowCount"] == 2
+    assert first_preview["history"]["resultingRows"] == 2
+
+    first_import = authenticated_client.post(
+        "/api/data-sources/taxa/import",
+        json={"previewId": first_preview["previewId"]},
+    )
+    assert first_import.status_code == 200
+    assert {row["Nome da regional"] for row in first_import.json()["parsed"]["rows"]} == {"SPE"}
+
+    replacement_national_file = taxa_national_snapshot([
+        ("2026-10-02", "SPE"),
+        ("2026-10-02", "MG"),
+        ("2026-10-02", "RJ"),
+        ("2026-10-03", "SPE"),
+        ("2026-10-03", "MG"),
+        ("2026-10-03", "RJ"),
+    ], base_prefix="Replacement")
+    second_preview = preview_taxa(authenticated_client, replacement_national_file).json()
+    assert second_preview["rowCount"] == 2
+    assert second_preview["history"]["fileRowCount"] == 2
+    assert second_preview["history"]["replacedDates"] == ["2026-10-02"]
+    assert second_preview["history"]["newDates"] == ["2026-10-03"]
+    assert second_preview["history"]["resultingRows"] == 3
+
+    second_import = authenticated_client.post(
+        "/api/data-sources/taxa/import",
+        json={"previewId": second_preview["previewId"]},
+    )
+    assert second_import.status_code == 200
+    assert len(second_import.json()["parsed"]["rows"]) == 3
+    assert {row["Nome da regional"] for row in second_import.json()["parsed"]["rows"]} == {"SPE"}
+
+    owner_key = data_sources.create_published_source_key("taxa", get_settings().feishu_session_secret)
+    canonical_source = data_sources.get_dashboard_source("taxa", owner_key)
+    assert canonical_source is not None
+    canonical_rows = canonical_source["parsed"]["rows"]
+    assert len(canonical_rows) == 9
+    assert {row["Nome da regional"] for row in canonical_rows} == {"SPE", "MG", "RJ"}
+    assert {
+        date: sum(row["Horário de término do prazo de coleta"] == date for row in canonical_rows)
+        for date in ("2026-10-01", "2026-10-02", "2026-10-03")
+    } == {"2026-10-01": 3, "2026-10-02": 3, "2026-10-03": 3}
+    assert all(
+        row["Nome da base de coleta"].startswith("Replacement")
+        for row in canonical_rows
+        if row["Horário de término do prazo de coleta"] == "2026-10-02"
+    )
+    assert all(
+        row["Nome da base de coleta"].startswith("Base")
+        for row in canonical_rows
+        if row["Horário de término do prazo de coleta"] == "2026-10-01"
+    )
+
+    scoped_source = authenticated_client.get("/api/data-sources/taxa").json()["source"]
+    assert len(scoped_source["parsed"]["rows"]) == 3
+    assert {row["Nome da regional"] for row in scoped_source["parsed"]["rows"]} == {"SPE"}
 
 
 def test_invalid_preview_does_not_replace_previous_source(authenticated_client: TestClient) -> None:

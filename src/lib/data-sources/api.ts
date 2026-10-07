@@ -47,6 +47,13 @@ export interface DataSourcePreview {
   missingFields: string[];
   canImport: boolean;
   errors: string[];
+  history?: {
+    newDates: string[];
+    replacedDates: string[];
+    fileRowCount: number;
+    blankBaseRows: number;
+    resultingRows: number;
+  } | null;
 }
 
 export interface ManualDataSource {

@@ -103,8 +103,15 @@ export function DataSourceDialog({
   const sourceTypeLabel = currentSource?.sourceType === "MANUAL_UPLOAD"
     ? "Fonte manual"
     : currentSource?.sourceType === "AUTOMATIC_SOURCE"
-      ? "Fonte automática"
-      : "Dados simulados";
+        ? "Fonte automática"
+        : "Dados simulados";
+
+  const summarizeDates = (dates: string[]) => {
+    if (dates.length === 0) return t("Nenhuma");
+    const visibleDates = dates.slice(0, 5).join(", ");
+    const remaining = dates.length - 5;
+    return `${dates.length.toLocaleString("pt-BR")} · ${visibleDates}${remaining > 0 ? ` ${t("+{count} data(s)", { count: remaining.toLocaleString("pt-BR") })}` : ""}`;
+  };
 
   return (
     <div
@@ -178,9 +185,21 @@ export function DataSourceDialog({
                 </div>
                 <dl className="monitoring-source-preview-meta">
                   <div><dt>{t("Planilha detectada")}</dt><dd>{preview.sheetName}</dd></div>
-                  <div><dt>{t("Linhas")}</dt><dd>{preview.rowCount.toLocaleString("pt-BR")}</dd></div>
+                  <div><dt>{t(preview.history ? "Linhas no seu escopo" : "Linhas")}</dt><dd>{preview.rowCount.toLocaleString("pt-BR")}</dd></div>
                   <div><dt>{t("Período")}</dt><dd>{preview.period ? `${preview.period.start} → ${preview.period.end}` : t("Indisponível")}</dd></div>
                 </dl>
+                {preview.history ? (
+                  <section className="monitoring-source-history-preview" aria-label={t("Prévia do histórico") }>
+                    <h4>{t("Prévia do histórico")}</h4>
+                    <dl className="monitoring-source-preview-meta">
+                      <div><dt>{t("Linhas no arquivo")}</dt><dd>{preview.history.fileRowCount.toLocaleString("pt-BR")}</dd></div>
+                      <div><dt>{t("Datas novas")}</dt><dd title={preview.history.newDates.join(", ")}>{summarizeDates(preview.history.newDates)}</dd></div>
+                      <div><dt>{t("Datas que serão substituídas")}</dt><dd title={preview.history.replacedDates.join(", ")}>{summarizeDates(preview.history.replacedDates)}</dd></div>
+                      <div><dt>{t("Linhas Sem base")}</dt><dd>{preview.history.blankBaseRows.toLocaleString("pt-BR")}</dd></div>
+                      <div><dt>{t("Linhas após publicar histórico")}</dt><dd>{preview.history.resultingRows.toLocaleString("pt-BR")}</dd></div>
+                    </dl>
+                  </section>
+                ) : null}
                 <div className="monitoring-source-headers"><strong>{t("Colunas encontradas")}</strong><p>{preview.headers.map((header) => <span key={header}>{header}</span>)}</p></div>
                 <ul className="monitoring-source-fields">
                   {preview.fields.map((field) => (
