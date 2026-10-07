@@ -50,7 +50,7 @@ class FeishuAuthError(Exception):
 _store_lock = threading.Lock()
 _oauth_attempts: dict[str, OAuthAttempt] = {}
 _consumed_oauth_attempts: dict[str, float] = {}
-_sessions: dict[str, tuple[dict[str, str | None], float]] = {}
+_sessions: dict[str, tuple[dict[str, Any], float]] = {}
 MAX_OAUTH_ATTEMPTS = 1024
 MAX_CONSUMED_OAUTH_ATTEMPTS = 4096
 
@@ -337,7 +337,7 @@ async def fetch_user_info(access_token: str, settings: Settings) -> dict[str, An
     return user
 
 
-def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[str, str | None] | None:
+def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[str, Any] | None:
     enterprise_email = str(user.get("enterprise_email") or "").strip().lower()
     fallback_email = str(user.get("email") or "").strip().lower()
     email = enterprise_email or fallback_email
@@ -395,13 +395,18 @@ def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[
         "role": resolved_role,
         "region": resolved_region,
         "base": resolved_base,
+        # These claims are used only while provisioning the local account.
+        # The raw provider identifiers are never returned by /api/auth/me.
+        "_email": email,
+        "_tenant_key": tenant_key,
+        "_open_id": open_id,
         # Keep the Feishu identity private to the backend session. This keyed
         # digest is stable across logins and does not expose provider claims.
         "_owner_subject": owner_subject,
     }
 
 
-def create_local_session(identity: dict[str, str | None], settings: Settings) -> str:
+def create_local_session(identity: dict[str, Any], settings: Settings) -> str:
     secret = settings.feishu_session_secret
     if not secret or len(secret) < 32:
         raise FeishuAuthError("feishu_session_failed")
@@ -417,7 +422,7 @@ def create_local_session(identity: dict[str, str | None], settings: Settings) ->
     return token
 
 
-def get_local_session(token: str | None, settings: Settings) -> dict[str, str | None] | None:
+def get_local_session(token: str | None, settings: Settings) -> dict[str, Any] | None:
     secret = settings.feishu_session_secret
     if not token or not secret or len(secret) < 32:
         return None

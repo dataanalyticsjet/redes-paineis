@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.core.config import get_settings
+from app.db.session import database_session
+from app.api.dependencies import AuthenticatedViewer, get_current_viewer
 from app.services.feishu_auth import (
     SESSION_COOKIE,
     STATE_COOKIE,
@@ -21,11 +23,11 @@ from app.services.feishu_auth import (
     create_oauth_attempt,
     exchange_authorization_code,
     fetch_user_info,
-    get_local_session,
     redirect_uri_matches_request,
     resolve_authorized_viewer,
     revoke_local_session,
 )
+from app.services.user_access import UserAccessError, identity_for_user, provision_feishu_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["authentication"])
@@ -182,7 +184,22 @@ async def feishu_callback(request: Request) -> Response:
     logger.info("Feishu corporate domain validated and local authorization matched")
 
     try:
-        session_token = create_local_session(identity, settings)
+        with database_session(settings) as db:
+            user_record = provision_feishu_user(db, identity)
+            session_identity = identity_for_user(db, user_record)
+            session_identity["_owner_subject"] = identity.get("_owner_subject")
+    except UserAccessError as error:
+        logger.warning("Feishu account provisioning failed (category=%s)", error.code)
+        return _login_error(request, error.code)
+    except RuntimeError:
+        logger.warning("Feishu account provisioning unavailable (category=user_store_unavailable)")
+        return _login_error(request, "user_store_unavailable")
+    except Exception as error:
+        logger.error("Feishu account provisioning failed (error_type=%s)", type(error).__name__)
+        return _login_error(request, "user_store_unavailable")
+
+    try:
+        session_token = create_local_session(session_identity, settings)
     except FeishuAuthError as error:
         logger.warning("Feishu OAuth failed at session creation (category=%s)", error.code)
         return _login_error(request, error.code)
@@ -202,22 +219,27 @@ async def feishu_callback(request: Request) -> Response:
 
 
 @router.get("/me")
-async def current_user(request: Request) -> Response:
-    identity = get_local_session(request.cookies.get(SESSION_COOKIE), get_settings())
-    if not identity:
-        logger.info("Feishu local session not found")
-        return JSONResponse(
-            {"authenticated": False},
-            status_code=401,
-            headers={"Cache-Control": "no-store"},
-        )
+async def current_user(viewer: AuthenticatedViewer = Depends(get_current_viewer)) -> Response:
+    identity = viewer.identity
     logger.info("Feishu local session recognized")
     return JSONResponse(
         {
             "authenticated": True,
             **{
                 key: identity.get(key)
-                for key in ("username", "role", "region", "base")
+                for key in (
+                    "username",
+                    "role",
+                    "region",
+                    "base",
+                    "platform_role",
+                    "organizational_scope",
+                    "home_region",
+                    "home_base",
+                    "additional_regions",
+                    "effective_regions",
+                    "is_active",
+                )
             },
         },
         headers={"Cache-Control": "no-store"},

@@ -87,7 +87,8 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /formatDateTime/);
   assert.match(route, /async def read_workbook/);
   assert.match(route, /async def write_workbook/);
-  assert.match(route, /get_local_session/);
+  assert.match(route, /Depends\(get_current_viewer\)/);
+  assert.match(route, /Depends\(require_admin\)/);
   assert.match(route, /save_workbook/);
   assert.match(route, /get_workbook/);
   assert.match(localWorkbooks, /HISTORY_KINDS/);

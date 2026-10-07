@@ -9,7 +9,8 @@ const backendTests = await readFile(new URL("../backend/tests/test_workbooks.py"
 test("Excel upload asks FastAPI to validate server-side upload credentials", () => {
   assert.match(frontend, /apiFetch\("\/api\/upload-auth"/);
   assert.match(frontend, /apiFetch\("\/api\/workbook"/);
-  assert.match(backend, /async def verify_upload_auth\(request: Request\)/);
+  assert.match(backend, /async def verify_upload_auth\([\s\S]*?_admin: AuthenticatedViewer = Depends\(require_admin\)/);
+  assert.match(backend, /async def write_workbook\([\s\S]*?_admin: AuthenticatedViewer = Depends\(require_admin\)/);
   assert.match(backend, /hmac\.compare_digest/);
   assert.match(backendTests, /def test_upload_auth_is_separate_from_viewer_session/);
 });

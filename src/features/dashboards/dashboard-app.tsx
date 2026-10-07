@@ -3,7 +3,7 @@
 import { AssistantHome } from "../home/assistant-home";
 import { dashboardCards, type DashboardPanel } from "./dashboard-catalog";
 import { DashboardActionBand } from "./dashboard-action-band";
-import { DemoUserControl } from "../users/demo-user-control";
+import { UserControl } from "../users/user-control";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
 import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-source-dialog";
 import { PresentationLogin } from "../auth/presentation-login";
@@ -80,6 +80,7 @@ import {
 import type { ParsedWorkbook, WorkbookRow } from "../../lib/workbook";
 import { getMonitoringSource } from "../../lib/data-sources/monitoring";
 import { getTaxaSource } from "../../lib/data-sources/taxa";
+import { initialRegionSelection } from "../../lib/initial-region-selection";
 import { DASHBOARD_DATA_SOURCES } from "../../lib/data-sources/catalog";
 import type { DashboardSourceId, ManualDataSource } from "../../lib/data-sources/api";
 import { buildDamageData, type DamageData } from "../../lib/damage";
@@ -604,6 +605,13 @@ interface ViewerIdentity {
   role: "matrix" | "regional";
   region: string | null;
   base: string | null;
+  platform_role?: "USER" | "ADMIN";
+  organizational_scope?: "matrix" | "regional" | "base";
+  home_region?: string | null;
+  home_base?: string | null;
+  additional_regions?: string[];
+  effective_regions?: string[] | null;
+  is_active?: boolean;
 }
 
 interface StatusSummary {
@@ -2451,6 +2459,37 @@ export function DashboardApp() {
     setShowUserControl(false);
   }, []);
 
+  useEffect(() => {
+    if (!viewerAuthorization) return undefined;
+    let checking = false;
+    const verifyCurrentAccess = async () => {
+      if (checking || document.visibilityState === "hidden") return;
+      checking = true;
+      try {
+        const response = await apiFetch("/api/auth/me", { method: "GET", cache: "no-store" });
+        if (response.status === 401) {
+          endViewerSession();
+          return;
+        }
+        if (response.ok) {
+          const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
+          if (identity.authenticated && identity.is_active !== false) setViewerIdentity(identity);
+          else endViewerSession();
+        }
+      } catch {
+        // A temporary network issue does not invalidate an otherwise valid session.
+      } finally {
+        checking = false;
+      }
+    };
+    const interval = window.setInterval(() => void verifyCurrentAccess(), 60_000);
+    window.addEventListener("focus", verifyCurrentAccess);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", verifyCurrentAccess);
+    };
+  }, [endViewerSession, viewerAuthorization]);
+
   const startFeishuLogin = useCallback(() => {
     setViewerAuthError(null);
     setViewerAuthLoading(true);
@@ -2470,7 +2509,7 @@ export function DashboardApp() {
 
   const resetFilters = useCallback((data = loaded) => {
     if (!data) return;
-    const regions = new Set(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)));
+    const regions = initialRegionSelection(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)), viewerIdentity);
     setSelectedRegions(regions);
     const availableResponsibility = monitoringResponsibilityOptionsForData(data, responsibilityLoaded);
     const rms = new Set([...availableResponsibility.rms, UNASSIGNED_RM]);
@@ -2486,11 +2525,11 @@ export function DashboardApp() {
     setDateEnd(data.initialEnd);
     setTableQuery("");
     setPage(1);
-  }, [loaded, responsibilityLoaded]);
+  }, [loaded, responsibilityLoaded, viewerIdentity]);
 
   const applyLoadedData = useCallback((data: LoadedData, responsibility: ResponsibilityData | null = null) => {
     setLoaded(data);
-    const initialRegions = new Set(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)));
+    const initialRegions = initialRegionSelection(data.parsed.rows.map((row) => rowRegion(row, data.parsed.regionColumn)), viewerIdentity);
     setSelectedRegions(initialRegions);
     const availableResponsibility = monitoringResponsibilityOptionsForData(data, responsibility);
     const rms = new Set([...availableResponsibility.rms, UNASSIGNED_RM]);
@@ -2506,11 +2545,11 @@ export function DashboardApp() {
     setDateEnd(data.initialEnd);
     setTableQuery("");
     setPage(1);
-  }, []);
+  }, [viewerIdentity]);
 
   const resetTaxaFilters = useCallback((data = taxaLoaded) => {
     if (!data) return;
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)), viewerIdentity);
     setTaxaSelectedRegions(regions);
     setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions, responsibilityLoaded)));
     setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, data.bases).rmAreas));
@@ -2520,11 +2559,11 @@ export function DashboardApp() {
     setTaxaTableQuery("");
     setTaxaPage(1);
     resetResponsibilityFilters();
-  }, [resetResponsibilityFilters, responsibilityLoaded, taxaLoaded]);
+  }, [resetResponsibilityFilters, responsibilityLoaded, taxaLoaded, viewerIdentity]);
 
   const applyTaxaLoadedData = useCallback((data: TaxaLoadedData, responsibility: ResponsibilityData | null = null) => {
     setTaxaLoaded(data);
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
     setTaxaSelectedRegions(regions);
     setTaxaSelectedBases(new Set(taxaBasesForRegions(data, regions, responsibility)));
     setTaxaSelectedRmAreas(new Set(responsibilityOptions(responsibility, data.bases).rmAreas));
@@ -2533,12 +2572,12 @@ export function DashboardApp() {
     setTaxaDateEnd(data.initialEnd);
     setTaxaTableQuery("");
     setTaxaPage(1);
-  }, []);
+  }, [viewerIdentity]);
 
   const resetMovementFilters = useCallback((data = movementLoaded) => {
     if (!data) return;
     setMovementSummaryMetric("totalStopped");
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)), viewerIdentity);
     setMovementSelectedRegions(regions);
     setMovementSelectedBases(new Set(movementBasesForRegions(data, regions, responsibilityLoaded)));
     setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, data.bases).rmAreas));
@@ -2550,12 +2589,12 @@ export function DashboardApp() {
     setMovementTableQuery("");
     setMovementPage(1);
     resetResponsibilityFilters();
-  }, [movementLoaded, resetResponsibilityFilters, responsibilityLoaded]);
+  }, [movementLoaded, resetResponsibilityFilters, responsibilityLoaded, viewerIdentity]);
 
   const applyMovementLoadedData = useCallback((data: MovementLoadedData, responsibility: ResponsibilityData | null = null) => {
     setMovementLoaded(data);
     setMovementSummaryMetric("totalStopped");
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
     setMovementSelectedRegions(regions);
     setMovementSelectedBases(new Set(movementBasesForRegions(data, regions, responsibility)));
     setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibility, data.bases).rmAreas));
@@ -2566,11 +2605,11 @@ export function DashboardApp() {
     setMovementDateEnd(data.initialEnd);
     setMovementTableQuery("");
     setMovementPage(1);
-  }, []);
+  }, [viewerIdentity]);
 
   const resetSellerFilters = useCallback((data = sellerPerformanceLoaded) => {
     if (!data) return;
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)), viewerIdentity);
     const tiers = new Set<string>(SELLER_CATEGORIES.filter((tier) => data.records.some((record) => record.tier === tier)));
     const bases = new Set(sellerBasesForRegions(data, regions, responsibilityLoaded));
     setSellerSelectedRegions(regions);
@@ -2584,11 +2623,11 @@ export function DashboardApp() {
     setSellerTableQuery("");
     setSellerPage(1);
     resetResponsibilityFilters();
-  }, [resetResponsibilityFilters, responsibilityLoaded, sellerPerformanceLoaded]);
+  }, [resetResponsibilityFilters, responsibilityLoaded, sellerPerformanceLoaded, viewerIdentity]);
 
   const applySellerPerformanceLoadedData = useCallback((data: SellerPerformanceData, responsibility: ResponsibilityData | null = null) => {
     setSellerPerformanceLoaded(data);
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
     const tiers = new Set<string>(SELLER_CATEGORIES.filter((tier) => data.records.some((record) => record.tier === tier)));
     const bases = new Set(sellerBasesForRegions(data, regions, responsibility));
     setSellerSelectedRegions(regions);
@@ -2601,11 +2640,11 @@ export function DashboardApp() {
     setSellerOutcomeFilter(null);
     setSellerTableQuery("");
     setSellerPage(1);
-  }, []);
+  }, [viewerIdentity]);
 
   const applyBipagemLoadedData = useCallback((data: BipagemLoadedData, responsibility: ResponsibilityData | null = null) => {
     setBipagemLoaded(data);
-    const regions = new Set(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)));
+    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
     const rms = new Set(data.records.map((record) => responsibilityForBase(responsibility, record.base).rm));
     const rgms = new Set(data.records.map((record) => responsibilityForBase(responsibility, record.base).rgm));
     setBipagemSelectedRegions(regions);
@@ -2617,17 +2656,17 @@ export function DashboardApp() {
     setBipagemDateStart(data.dates[0] ?? "");
     setBipagemDateEnd(data.dates[data.dates.length - 1] ?? "");
     setBipagemTableQuery("");
-  }, []);
+  }, [viewerIdentity]);
 
   const applyDamageLoadedData = useCallback((data: DamageData, responsibility: ResponsibilityData | null = null) => {
     setDamageLoaded(data);
-    setDamageSelectedRegions(new Set(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region))));
+    setDamageSelectedRegions(initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity));
     setDamageSelectedBases(new Set(data.bases));
     setDamageSelectedRms(new Set(data.records.map((record) => responsibilityForBase(responsibility, record.base).rm)));
     setDamageSelectedRgms(new Set(data.records.map((record) => responsibilityForBase(responsibility, record.base).rgm)));
     setDamageDateStart(data.dates[0] ?? "");
     setDamageDateEnd(data.dates[data.dates.length - 1] ?? "");
-  }, []);
+  }, [viewerIdentity]);
 
   const resetBipagemFilters = useCallback((data = bipagemLoaded) => {
     if (!data) return;
@@ -2741,7 +2780,7 @@ export function DashboardApp() {
           applyLoadedData(monitoring, responsibility);
           applyTaxaLoadedData(taxa, responsibility);
           setEpopLoaded(epop);
-          setEpopSelectedRegions(new Set(epop.regions));
+          setEpopSelectedRegions(initialRegionSelection(epop.regions, viewerIdentity));
           setEpopSelectedBases(new Set(epop.bases));
           setEpopDateStart(epop.dates[0] ?? "");
           setEpopDateEnd(epop.dates.at(-1) ?? "");
@@ -2857,7 +2896,7 @@ export function DashboardApp() {
           if (!active) return;
           if (epopWorkbook) {
             const epop = buildEpopLoadedData(epopWorkbook.parsed, epopWorkbook.fileName, epopWorkbook.updatedAt);
-            setEpopLoaded(epop); setEpopSelectedRegions(new Set(epop.regions)); setEpopSelectedBases(new Set(epop.bases));
+            setEpopLoaded(epop); setEpopSelectedRegions(initialRegionSelection(epop.regions, viewerIdentity)); setEpopSelectedBases(new Set(epop.bases));
             setEpopDateStart(epop.dates[0] ?? ""); setEpopDateEnd(epop.dates[epop.dates.length - 1] ?? "");
           }
         }
@@ -2913,12 +2952,20 @@ export function DashboardApp() {
                 sellerPerformanceWorkbook.fileName,
                 sellerPerformanceWorkbook.updatedAt,
               );
-            const scopedSellerData = viewerIdentity?.region ? {
+            const isMatrixViewer = viewerIdentity?.organizational_scope === "matrix" || viewerIdentity?.role === "matrix";
+            const assignedRegions = viewerIdentity?.effective_regions?.length
+              ? viewerIdentity.effective_regions
+              : [viewerIdentity?.home_region ?? viewerIdentity?.region].filter((region): region is string => Boolean(region));
+            const effectiveRegions = isMatrixViewer ? null : new Set(assignedRegions.map((region) => region.trim().toUpperCase()));
+            const visibleSellerRecords = effectiveRegions
+              ? sellerData.records.filter((record) => effectiveRegions.has(registeredRegionForBase(responsibility, record.base, record.region).trim().toUpperCase()))
+              : sellerData.records;
+            const scopedSellerData = effectiveRegions ? {
               ...sellerData,
-              records: sellerData.records.filter((record) => registeredRegionForBase(responsibility, record.base, record.region) === viewerIdentity.region),
-              regions: [viewerIdentity.region],
-              bases: [...new Set(sellerData.records.filter((record) => registeredRegionForBase(responsibility, record.base, record.region) === viewerIdentity.region).map((record) => record.base))].sort(),
-              sellers: [...new Set(sellerData.records.filter((record) => registeredRegionForBase(responsibility, record.base, record.region) === viewerIdentity.region).map((record) => record.sellerName))].sort(),
+              records: visibleSellerRecords,
+              regions: [...new Set(visibleSellerRecords.map((record) => registeredRegionForBase(responsibility, record.base, record.region)))].sort(),
+              bases: [...new Set(visibleSellerRecords.map((record) => record.base))].sort(),
+              sellers: [...new Set(visibleSellerRecords.map((record) => record.sellerName))].sort(),
             } : sellerData;
             applySellerPerformanceLoadedData(scopedSellerData, responsibility);
           }
@@ -3109,13 +3156,13 @@ export function DashboardApp() {
       const accumulated = historyMerge.parsed;
       const data = buildEpopLoadedData(accumulated, `Histórico EPOP · ${file.name}`, payload.workbook.updatedAt);
       setEpopLoaded(data);
-      setEpopSelectedRegions(new Set(data.regions)); setEpopSelectedBases(new Set(data.bases));
+      setEpopSelectedRegions(initialRegionSelection(data.regions, viewerIdentity)); setEpopSelectedBases(new Set(data.bases));
       setEpopDateStart(data.dates[0] ?? ""); setEpopDateEnd(data.dates[data.dates.length - 1] ?? "");
       setEpopHistoryNotice(historyMerge);
       setView("epop");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível ler a planilha EPOP."); }
     finally { setEpopLoading(false); }
-  }, [epopLoaded]);
+  }, [epopLoaded, viewerIdentity]);
 
   const loadMovementFile = useCallback(async (file: File) => {
     setError(null);
@@ -3396,7 +3443,7 @@ export function DashboardApp() {
   }, [loadBipagemFile, loadDamageFile, loadEpopFile, loadFile, loadMovementFile, loadSellerListFile, loadSellerPerformanceFile, loadSpecialSellerFile, loadTaxaFiles]);
 
   const queueUpload = useCallback((upload: PendingUpload) => {
-    if (viewerIdentity?.role !== "matrix") return;
+    if (viewerIdentity?.platform_role !== "ADMIN") return;
     if (LOCAL_DASHBOARD_DEMO_MODE) {
       setError("O envio de planilhas está desativado no modo de demonstração.");
       return;
@@ -3409,7 +3456,7 @@ export function DashboardApp() {
     setUploadAuthError(null);
     setUploadLoginOpen(true);
     window.requestAnimationFrame(() => uploadUsernameRef.current?.focus());
-  }, [runUpload, viewerIdentity?.role]);
+  }, [runUpload, viewerIdentity?.platform_role]);
 
   const submitUploadLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5649,7 +5696,7 @@ export function DashboardApp() {
         <div className="presentation-home-header-inner">
           <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
           <div className="presentation-header-actions">
-            {view === "home" && LOCAL_DASHBOARD_DEMO_MODE ? <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button> : null}
+            {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button> : null}
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
             <button className="presentation-logout-button" type="button" onClick={endViewerSession}>
               <LogOut size={18} /> {t("Sair")}
@@ -5737,6 +5784,7 @@ export function DashboardApp() {
       {dataSourceDialogId ? <DataSourceDialog
         config={DASHBOARD_DATA_SOURCES[dataSourceDialogId]}
         currentSource={dataSourceSummary}
+        canManage={viewerIdentity.platform_role === "ADMIN"}
         onClose={() => setDataSourceDialogId(null)}
         onImported={(source: ManualDataSource) => {
           try {
@@ -5779,7 +5827,7 @@ export function DashboardApp() {
 
       <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : "dashboard-main"}>
         {view === "home" ? (
-          showUserControl ? <DemoUserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
+          showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
             setError(null);
             setView(nextView);
             setShowUserControl(false);
@@ -7141,7 +7189,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
               {dashboardActionBand}
               {epopHistoryNotice ? <div className="inline-alert success" role="status"><Check size={18} /><span>{t("Histórico EPOP atualizado: {added} nova(s) data(s), {replaced} data(s) atualizada(s) e {total} data(s) disponíveis nos filtros.", { added: formatNumber(epopHistoryNotice.addedDates), replaced: formatNumber(epopHistoryNotice.replacedDates), total: formatNumber(epopHistoryNotice.totalDates) })}</span><button type="button" onClick={() => setEpopHistoryNotice(null)} aria-label={t("Fechar aviso")}><X size={16} /></button></div> : null}
               <section className="filters-card taxa-filters-card epop-primary-filters" aria-label={t("Filtros operacionais EPOP")}>
-                <div className="filters-card-top"><div><h2><Filter size={18} /> {t("Filtros operacionais")}</h2><p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p></div><button type="button" className="reset-button" onClick={() => { setEpopSelectedRegions(new Set(epopLoaded.regions)); setEpopSelectedBases(new Set(epopLoaded.bases)); setEpopDateStart(epopLoaded.dates[0] ?? ""); setEpopDateEnd(epopLoaded.dates.at(-1) ?? ""); }}><RotateCcw size={15} /> {t("Limpar filtros")}</button></div>
+                <div className="filters-card-top"><div><h2><Filter size={18} /> {t("Filtros operacionais")}</h2><p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p></div><button type="button" className="reset-button" onClick={() => { setEpopSelectedRegions(initialRegionSelection(epopLoaded.regions, viewerIdentity)); setEpopSelectedBases(new Set(epopLoaded.bases)); setEpopDateStart(epopLoaded.dates[0] ?? ""); setEpopDateEnd(epopLoaded.dates.at(-1) ?? ""); }}><RotateCcw size={15} /> {t("Limpar filtros")}</button></div>
                 <div className="filter-grid taxa-filter-grid">
                   <MultiSelect label={t("Regional")} options={epopLoaded.regions} selected={epopSelectedRegions} onChange={setEpopSelectedRegions} allLabel={t("Todas as regionais")} singular={t("regional")} plural={t("regionais")} searchable t={t}/>
                   <MultiSelect label="RM" options={responsibilityFilterOptions.rms} selected={selectedRms} onChange={(value) => setSelectedRms(value)} allLabel={t("Todos os RM")} singular="RM" plural="RM" searchable t={t}/>

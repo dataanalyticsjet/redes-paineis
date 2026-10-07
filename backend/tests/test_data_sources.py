@@ -12,7 +12,7 @@ from app.services.data_sources import TAXA_REQUIRED_HEADERS
 
 
 @pytest.fixture
-def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
+def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path, create_user_session) -> TestClient:
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
     monkeypatch.setenv("FEISHU_SESSION_SECRET", "test-session-secret-with-at-least-32-chars")
@@ -26,15 +26,12 @@ def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClien
     feishu_auth.reset_temporary_auth_state()
     data_sources.reset_temporary_data_sources()
 
-    token = feishu_auth.create_local_session(
-        {
-            "username": "Example Viewer",
-            "role": "regional",
-            "region": "SPS",
-            "base": None,
-            "_owner_subject": "test-user-example-viewer",
-        },
-        get_settings(),
+    token, _user = create_user_session(
+        name="Example Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="source-admin",
     )
     client = TestClient(app, base_url="http://localhost:3000")
     client.cookies.set(feishu_auth.SESSION_COOKIE, token)
@@ -169,6 +166,7 @@ def test_data_sources_can_be_enabled_in_production_with_a_feishu_session(
 def test_matrix_user_data_source_preview_is_not_region_filtered(
     authenticated_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    create_user_session,
 ) -> None:
     monkeypatch.setenv("FEISHU_VIEWER_ACCOUNTS_JSON", json.dumps([{
         "email": "matrix@example.test",
@@ -179,22 +177,14 @@ def test_matrix_user_data_source_preview_is_not_region_filtered(
     monkeypatch.setenv("ALLOWED_CORPORATE_DOMAINS", "example.test")
     get_settings.cache_clear()
 
-    settings = get_settings()
-    identity = feishu_auth.resolve_authorized_viewer(
-        {
-            "enterprise_email": "matrix@example.test",
-            "tenant_key": "tenant-test",
-            "open_id": "matrix-open-id",
-            "name": "Matrix Viewer",
-        },
-        settings,
+    get_settings()
+    matrix_token, _user = create_user_session(
+        name="Matrix Admin",
+        platform_role="ADMIN",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="source-matrix",
     )
-    assert identity is not None
-    assert identity["role"] == "matrix"
-    assert identity["region"] is None
-    assert identity["base"] is None
-
-    matrix_token = feishu_auth.create_local_session(identity, settings)
     authenticated_client.cookies.set(feishu_auth.SESSION_COOKIE, matrix_token)
     me = authenticated_client.get("/api/auth/me")
     response = preview(authenticated_client)
@@ -203,6 +193,8 @@ def test_matrix_user_data_source_preview_is_not_region_filtered(
     assert me.json()["role"] == "matrix"
     assert me.json()["region"] is None
     assert me.json()["base"] is None
+    assert me.json()["platform_role"] == "ADMIN"
+    assert me.json()["organizational_scope"] == "matrix"
     assert response.status_code == 200
     assert response.json()["rowCount"] == 2
 
@@ -290,7 +282,10 @@ def test_unconfigured_and_unknown_dashboards_are_rejected(authenticated_client: 
     assert unknown.json()["detail"] == "data_source_dashboard_not_found"
 
 
-def test_data_source_is_isolated_by_dashboard_and_session(authenticated_client: TestClient) -> None:
+def test_published_data_source_is_shared_but_scoped_for_each_session(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
     preview_payload = preview(authenticated_client).json()
     imported = authenticated_client.post(
         "/api/data-sources/monitoring/import",
@@ -301,15 +296,12 @@ def test_data_source_is_isolated_by_dashboard_and_session(authenticated_client: 
         json={"previewId": preview_payload["previewId"]},
     )
 
-    other_token = feishu_auth.create_local_session(
-        {
-            "username": "Example Viewer",
-            "role": "regional",
-            "region": "SPS",
-            "base": None,
-            "_owner_subject": "different-feishu-open-id",
-        },
-        get_settings(),
+    other_token, _other_user = create_user_session(
+        name="RJ Viewer",
+        platform_role="USER",
+        organizational_scope="regional",
+        home_region="RJ",
+        identity_suffix="source-rj-viewer",
     )
     other_client = TestClient(app, base_url="http://localhost:3000")
     other_client.cookies.set(feishu_auth.SESSION_COOKIE, other_token)
@@ -323,8 +315,9 @@ def test_data_source_is_isolated_by_dashboard_and_session(authenticated_client: 
     assert cross_dashboard.status_code == 404
     assert cross_dashboard.json()["detail"] == "data_source_preview_not_found"
     assert other_source.status_code == 200
-    assert other_source.json() == {"source": None}
-    assert cross_session.status_code == 404
+    assert len(other_source.json()["source"]["parsed"]["rows"]) == 1
+    assert other_source.json()["source"]["parsed"]["rows"][0]["Regional Origem"] == "RJ"
+    assert cross_session.status_code == 403
 
 
 def test_import_replaces_only_the_current_dashboard_source(authenticated_client: TestClient) -> None:
@@ -345,7 +338,11 @@ def test_import_replaces_only_the_current_dashboard_source(authenticated_client:
     assert authenticated_client.get("/api/data-sources/taxa").json() == {"source": None}
 
 
-def test_uploaded_xlsx_and_source_survive_preview_service_reset(authenticated_client: TestClient, tmp_path: Path) -> None:
+def test_uploaded_xlsx_and_source_survive_preview_service_reset(
+    authenticated_client: TestClient,
+    tmp_path: Path,
+    create_user_session,
+) -> None:
     xlsx = bytes([0x50, 0x4B, 0x03, 0x04]) + b"local-xlsx"
     payload = {
         "fileName": "monitoramento.xlsx",
@@ -360,15 +357,12 @@ def test_uploaded_xlsx_and_source_survive_preview_service_reset(authenticated_cl
     )
     assert response.status_code == 200
     preview_payload = response.json()
-    same_identity_token = feishu_auth.create_local_session(
-        {
-            "username": "Example Viewer",
-            "role": "regional",
-            "region": "SPS",
-            "base": None,
-            "_owner_subject": "test-user-example-viewer",
-        },
-        get_settings(),
+    same_identity_token, _user = create_user_session(
+        name="Example Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="source-admin",
     )
     same_identity_client = TestClient(app, base_url="http://localhost:3000")
     same_identity_client.cookies.set(feishu_auth.SESSION_COOKIE, same_identity_token)
@@ -385,15 +379,12 @@ def test_uploaded_xlsx_and_source_survive_preview_service_reset(authenticated_cl
     # Simulate an API process restart: preview state is cleared, while the
     # committed dataset and source workbook remain available to a new session.
     data_sources.reset_temporary_data_sources()
-    new_token = feishu_auth.create_local_session(
-        {
-            "username": "Example Viewer",
-            "role": "regional",
-            "region": "SPS",
-            "base": None,
-            "_owner_subject": "test-user-example-viewer",
-        },
-        get_settings(),
+    new_token, _user = create_user_session(
+        name="Example Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="source-admin",
     )
     reauthenticated = TestClient(app, base_url="http://localhost:3000")
     reauthenticated.cookies.set(feishu_auth.SESSION_COOKIE, new_token)

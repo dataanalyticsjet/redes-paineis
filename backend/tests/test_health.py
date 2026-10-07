@@ -2,6 +2,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.core.config import get_settings
 from app.core.config import Settings
 from app.db.session import create_database_engine
 
@@ -20,7 +21,7 @@ def test_development_cors_uses_configured_frontend_origin() -> None:
         if middleware.cls is CORSMiddleware
     )
 
-    assert cors_middleware.kwargs["allow_origins"] == ["http://127.0.0.1:3001"]
+    assert cors_middleware.kwargs["allow_origins"] == [str(get_settings().frontend_base_url).rstrip("/")]
     assert "*" not in cors_middleware.kwargs["allow_origins"]
 
 

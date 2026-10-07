@@ -21,6 +21,7 @@ export interface DataSourceSummary {
 export function DataSourceDialog({
   config,
   currentSource,
+  canManage,
   onClose,
   onImported,
   onRemoved,
@@ -29,6 +30,7 @@ export function DataSourceDialog({
 }: {
   config: DashboardDataSourceConfig;
   currentSource: DataSourceSummary | null;
+  canManage: boolean;
   onClose: () => void;
   onImported: (source: ManualDataSource) => void;
   onRemoved: () => void;
@@ -142,7 +144,7 @@ export function DataSourceDialog({
           <p className="monitoring-source-automation"><span aria-hidden="true">●</span> {t("Atualização automática: em preparação")}</p>
         </section>
 
-        {config.configured ? (
+        {config.configured && canManage ? (
           <>
             <div className="monitoring-source-picker">
               <input
@@ -193,6 +195,10 @@ export function DataSourceDialog({
               </section>
             ) : null}
           </>
+        ) : config.configured ? (
+          <section className="monitoring-source-preview" role="status">
+            <p>{t("Somente leitura — apenas administradores podem atualizar ou remover esta fonte.")}</p>
+          </section>
         ) : (
           <section className="monitoring-source-preview has-errors" role="status">
             <p>{t("Fonte de dados ainda não configurada para este painel.")}</p>
@@ -202,7 +208,7 @@ export function DataSourceDialog({
 
         <div className="monitoring-source-actions">
           <button type="button" className="monitoring-source-cancel" onClick={onClose} disabled={busy}>{t("Cancelar")}</button>
-          {config.configured ? <button type="button" className="monitoring-source-confirm" onClick={() => void confirmImport()} disabled={busy || state !== "VALID" || !preview?.previewId}>
+          {config.configured && canManage ? <button type="button" className="monitoring-source-confirm" onClick={() => void confirmImport()} disabled={busy || state !== "VALID" || !preview?.previewId}>
             <FileSpreadsheet size={16} /> {t("Usar como fonte")}
           </button> : null}
         </div>

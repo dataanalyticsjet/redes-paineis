@@ -21,6 +21,7 @@ from app.services.local_workbooks import (
     remove_dashboard_source as remove_saved_dashboard_source,
     save_dashboard_source,
 )
+from app.services.row_scope import scope_parsed_rows
 
 logger = logging.getLogger(__name__)
 
@@ -187,14 +188,10 @@ def _contract(parsed: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], 
 
 
 def _scope_parsed(parsed: dict[str, Any], identity: dict[str, str | None]) -> dict[str, Any]:
-    if identity.get("role") == "matrix":
+    scope = str(identity.get("organizational_scope") or "").strip().lower()
+    role = str(identity.get("role") or "").strip().lower()
+    if scope == "matrix" or role == "matrix":
         return parsed
-
-    expected_region = (identity.get("region") or "").strip().upper()
-    expected_base = (identity.get("base") or "").strip().upper()
-    if not expected_region and not expected_base:
-        raise DataSourceError("data_source_scope_unavailable", 403)
-
     headers = parsed.get("headers", [])
     region_column = parsed.get("regionColumn")
     if not region_column:
@@ -203,28 +200,23 @@ def _scope_parsed(parsed: dict[str, Any], identity: dict[str, str | None]) -> di
             None,
         )
     base_column = parsed.get("baseColumn")
-    if expected_region and not region_column:
+    home_base = str(identity.get("home_base") or identity.get("base") or "").strip()
+    extras = identity.get("additional_regions") or []
+    if scope == "regional" or (not scope and not home_base):
+        if not (identity.get("home_region") or identity.get("region")):
+            raise DataSourceError("data_source_scope_unavailable", 403)
+    if (scope == "regional" or extras) and not region_column:
         raise DataSourceError("data_source_region_column_required", 422)
-    if expected_base and not base_column:
+    if (scope == "base" or home_base) and not base_column:
         raise DataSourceError("data_source_base_column_required", 422)
-
-    scoped_rows = []
-    for row in parsed.get("rows", []):
-        if expected_region and str(row.get(region_column, "")).strip().upper() != expected_region:
-            continue
-        if expected_base and str(row.get(base_column, "")).strip().upper() != expected_base:
-            continue
-        scoped_rows.append(row)
-    if not scoped_rows:
-        raise DataSourceError("data_source_no_rows_for_scope", 403)
-
-    scoped = {**parsed, "rows": scoped_rows}
     if region_column:
-        scoped["regionColumn"] = region_column
-    metadata = dict(parsed.get("metadata") or {})
-    metadata["rowCount"] = len(scoped_rows)
-    scoped["metadata"] = metadata
-    return scoped
+        parsed["regionColumn"] = region_column
+    if base_column:
+        parsed["baseColumn"] = base_column
+    try:
+        return scope_parsed_rows(parsed, identity)
+    except PermissionError:
+        raise DataSourceError("data_source_scope_unavailable", 403) from None
 
 
 def _source_period(parsed: dict[str, Any]) -> dict[str, str] | None:
@@ -253,11 +245,10 @@ def _validate_upload(request: PreviewSourceRequest) -> tuple[str, str, dict[str,
 
 
 def _monitoring_adapter(parsed: dict[str, Any], identity: dict[str, str | None]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, str] | None, bool]:
-    fields, missing, _metric_columns, _period = _contract(parsed)
+    fields, missing, metric_columns, full_period = _contract(parsed)
     scoped = _scope_parsed(parsed, identity)
-    scoped_fields, scoped_missing, scoped_metrics, period = _contract(scoped)
-    missing = sorted(set([*missing, *scoped_missing]))
-    return scoped, scoped_fields or fields, missing, period, not missing and bool(scoped_metrics)
+    scoped_fields, _scoped_missing, _scoped_metrics, scoped_period = _contract(scoped)
+    return scoped, scoped_fields or fields, missing, scoped_period or full_period, not missing and bool(metric_columns)
 
 
 def _taxa_adapter(parsed: dict[str, Any], identity: dict[str, str | None]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, str] | None, bool]:
@@ -338,7 +329,10 @@ def create_dashboard_preview(
         dashboard_id=dashboard_id,
         owner_key=owner_key,
         session_key=session_key or owner_key,
-        parsed=scoped,
+        # The preview response is scoped, but the published shared source must
+        # retain the validated full workbook. Every subsequent read is scoped
+        # independently for the requesting user.
+        parsed=parsed,
         file_name=file_name,
         file_size_bytes=request.file_size_bytes,
         content_type=content_type,
@@ -453,6 +447,14 @@ def create_owner_key(identity: dict[str, str | None], session_secret: str) -> st
     if not stable_subject:
         raise DataSourceError("data_source_identity_unavailable", 409)
     return hmac.new(session_secret.encode(), stable_subject.encode(), hashlib.sha256).hexdigest()
+
+
+def create_published_source_key(dashboard_id: str, session_secret: str) -> str:
+    """Stable, private filesystem key shared by every viewer of one dashboard."""
+    if dashboard_id not in KNOWN_DASHBOARD_IDS:
+        raise DataSourceError("data_source_dashboard_unconfigured", 409)
+    value = f"published-dashboard-source:v1:{dashboard_id}"
+    return hmac.new(session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
 def create_preview_key(session_token: str, session_secret: str) -> str:

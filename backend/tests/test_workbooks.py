@@ -14,7 +14,7 @@ from app.services.local_workbooks import HISTORY_KINDS, WORKBOOK_KINDS
 
 
 @pytest.fixture
-def workbook_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
+def workbook_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, create_user_session) -> TestClient:
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("FEISHU_SESSION_SECRET", "test-session-secret-with-at-least-32-chars")
     monkeypatch.setenv("UPLOAD_USERNAME", "test-uploader")
@@ -22,8 +22,13 @@ def workbook_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClie
     monkeypatch.setenv("DATA_DIRECTORY", str(tmp_path / "local-data"))
     get_settings.cache_clear()
     feishu_auth.reset_temporary_auth_state()
-    identity = {"username": "SPS Viewer", "role": "regional", "region": "SPS", "base": None}
-    token = feishu_auth.create_local_session(identity, get_settings())
+    token, _user = create_user_session(
+        name="SPS Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="workbook-admin",
+    )
     client = TestClient(app, base_url="http://127.0.0.1:3000")
     client.cookies.set(feishu_auth.SESSION_COOKIE, token)
     yield client
@@ -103,11 +108,14 @@ def test_history_workbooks_expose_parts_without_merging_server_logic(workbook_cl
     assert part.json()["workbook"]["parsed"]["rows"][0]["Regional Origem"] == "SPS"
 
 
-def test_matrix_viewer_keeps_the_existing_unscoped_viewer_behavior(workbook_client: TestClient) -> None:
+def test_matrix_viewer_keeps_the_existing_unscoped_viewer_behavior(workbook_client: TestClient, create_user_session) -> None:
     assert _upload(workbook_client, "movement").status_code == 200
-    matrix_token = feishu_auth.create_local_session(
-        {"username": "Matrix Viewer", "role": "matrix", "region": None, "base": None},
-        get_settings(),
+    matrix_token, _user = create_user_session(
+        name="Matrix Viewer",
+        platform_role="USER",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="workbook-matrix",
     )
     matrix_client = TestClient(app, base_url="http://127.0.0.1:3000")
     matrix_client.cookies.set(feishu_auth.SESSION_COOKIE, matrix_token)
@@ -117,11 +125,15 @@ def test_matrix_viewer_keeps_the_existing_unscoped_viewer_behavior(workbook_clie
     assert len(response.json()["workbook"]["parsed"]["rows"]) == 2
 
 
-def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClient) -> None:
+def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClient, create_user_session) -> None:
     assert _upload(workbook_client, "movement").status_code == 200
-    base_token = feishu_auth.create_local_session(
-        {"username": "Base Viewer", "role": "regional", "region": None, "base": "Base 1"},
-        get_settings(),
+    base_token, _user = create_user_session(
+        name="Base Viewer",
+        platform_role="USER",
+        organizational_scope="base",
+        home_region=None,
+        home_base="Base 1",
+        identity_suffix="workbook-base",
     )
     base_client = TestClient(app, base_url="http://127.0.0.1:3000")
     base_client.cookies.set(feishu_auth.SESSION_COOKIE, base_token)
@@ -133,10 +145,13 @@ def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClie
     assert rows[0]["PDD de saída"] == "Base 1"
 
 
-def test_all_existing_workbook_kinds_use_local_storage(workbook_client: TestClient) -> None:
-    matrix_token = feishu_auth.create_local_session(
-        {"username": "All kinds matrix", "role": "matrix", "region": None, "base": None},
-        get_settings(),
+def test_all_existing_workbook_kinds_use_local_storage(workbook_client: TestClient, create_user_session) -> None:
+    matrix_token, _user = create_user_session(
+        name="All kinds matrix",
+        platform_role="ADMIN",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="workbook-all-matrix",
     )
     matrix_client = TestClient(app, base_url="http://127.0.0.1:3000")
     matrix_client.cookies.set(feishu_auth.SESSION_COOKIE, matrix_token)

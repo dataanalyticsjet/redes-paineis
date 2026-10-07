@@ -106,6 +106,8 @@ async function requestDataSource<T>(dashboardId: DashboardSourceId, action = "",
       const body = await response.json() as { detail?: unknown };
       if (typeof body.detail === "string" && /^data_source_[a-z_]+$/.test(body.detail)) code = body.detail;
       if (body.detail === "authentication_required") code = "data_source_auth_required";
+      if (body.detail === "admin_required") code = "admin_required";
+      if (body.detail === "user_store_unavailable") code = "user_store_unavailable";
     } catch {
       // Keep server details sanitized before they reach the interface.
     }

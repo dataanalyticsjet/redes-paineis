@@ -9,13 +9,14 @@ import re
 import unicodedata
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import UploadFile
 
 from app.core.config import get_settings
-from app.services.feishu_auth import SESSION_COOKIE, get_local_session
+from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_admin
+from app.services.row_scope import scope_parsed_rows
 from app.services.local_workbooks import (
     HISTORY_KINDS,
     WORKBOOK_KINDS,
@@ -48,13 +49,6 @@ def _error(code: str, status: int) -> JSONResponse:
     return JSONResponse({"error": code}, status_code=status, headers={"Cache-Control": "no-store"})
 
 
-def _identity(request: Request) -> tuple[dict[str, str | None] | None, JSONResponse | None]:
-    identity = get_local_session(request.cookies.get(SESSION_COOKIE), get_settings())
-    if not identity:
-        return None, _error("authentication_required", 401)
-    return identity, None
-
-
 def _normalized(value: str) -> str:
     decomposed = unicodedata.normalize("NFD", value)
     without_marks = "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
@@ -67,27 +61,7 @@ def _column(headers: list[str], candidates: tuple[str, ...]) -> str | None:
 
 
 def _filter_rows(parsed: dict[str, Any], identity: dict[str, str | None]) -> dict[str, Any]:
-    role = (identity.get("role") or "").lower()
-    if role == "matrix":
-        return parsed
-    region = (identity.get("region") or "").strip().upper()
-    base = (identity.get("base") or "").strip().upper()
-    if not region and not base:
-        raise PermissionError("viewer_scope_unavailable")
-
-    headers = parsed.get("headers") or []
-    rows = parsed.get("rows") or []
-    if base:
-        column = parsed.get("baseColumn") or next((header for header in headers if "base" in _normalized(header)), None)
-        filtered = [row for row in rows if column and str(row.get(column, "")).strip().upper() == base]
-    else:
-        column = _column(headers, REGION_HEADERS) or parsed.get("regionColumn")
-        filtered = [row for row in rows if column and str(row.get(column, "")).strip().upper() == region]
-    scoped = {**parsed, "rows": filtered}
-    metadata = dict(parsed.get("metadata") or {})
-    metadata["rowCount"] = len(filtered)
-    scoped["metadata"] = metadata
-    return scoped
+    return scope_parsed_rows(parsed, identity)
 
 
 def _seller_ids(performance: dict[str, Any] | None, identity: dict[str, str | None]) -> set[str]:
@@ -201,7 +175,10 @@ async def _parse_post(request: Request) -> tuple[WorkbookPayload, list[tuple[str
 
 
 @router.post("/upload-auth")
-async def verify_upload_auth(request: Request) -> Response:
+async def verify_upload_auth(
+    request: Request,
+    _admin: AuthenticatedViewer = Depends(require_admin),
+) -> Response:
     error = _upload_error(request)
     if error:
         return error
@@ -209,10 +186,11 @@ async def verify_upload_auth(request: Request) -> Response:
 
 
 @router.get("/workbook")
-async def read_workbook(request: Request) -> Response:
-    identity, error = _identity(request)
-    if error:
-        return error
+async def read_workbook(
+    request: Request,
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> Response:
+    identity = viewer.identity
     params = request.query_params
     kind = params.get("kind", "monitoring")
     if kind not in WORKBOOK_KINDS:
@@ -241,7 +219,10 @@ async def read_workbook(request: Request) -> Response:
 
 
 @router.post("/workbook")
-async def write_workbook(request: Request) -> Response:
+async def write_workbook(
+    request: Request,
+    _admin: AuthenticatedViewer = Depends(require_admin),
+) -> Response:
     auth_error = _upload_error(request)
     if auth_error:
         return auth_error

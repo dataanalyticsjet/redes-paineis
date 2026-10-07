@@ -1,1 +1,5 @@
-"""SQLAlchemy models will be added in a later approved phase."""
+"""SQLAlchemy models for explicitly provisioned application tables."""
+
+from app.models.platform_user import PlatformUser, Region, UserAccessAudit, UserRegionAccess
+
+__all__ = ["PlatformUser", "Region", "UserAccessAudit", "UserRegionAccess"]

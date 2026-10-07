@@ -236,6 +236,13 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
         "role": "regional",
         "region": "SPS",
         "base": None,
+        "platform_role": "USER",
+        "organizational_scope": "regional",
+        "home_region": "SPS",
+        "home_base": None,
+        "additional_regions": [],
+        "effective_regions": ["SPS"],
+        "is_active": True,
     }
 
     logout = client.post("/api/auth/logout")
