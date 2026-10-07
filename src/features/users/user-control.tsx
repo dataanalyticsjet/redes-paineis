@@ -180,7 +180,7 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
 
             <div className="user-admin-home-scope">
               <strong>{t("Escopo original — somente leitura")}</strong>
-              <span>{t(editingUser.organizationalScope === "matrix" ? "Matriz" : editingUser.organizationalScope === "base" ? "Base" : "Regional")}: {editingUser.homeBase ? `${regionName(editingUser.homeRegion)} · ${editingUser.homeBase}` : regionName(editingUser.homeRegion)}</span>
+              <span>{editingUser.organizationalScope === "matrix" ? t("Matriz — acesso nacional") : <>{t(editingUser.organizationalScope === "base" ? "Base" : "Regional")}: {editingUser.homeBase ? `${regionName(editingUser.homeRegion)} · ${editingUser.homeBase}` : regionName(editingUser.homeRegion)}</>}</span>
             </div>
 
             <fieldset className="demo-users-access-list user-admin-region-list">

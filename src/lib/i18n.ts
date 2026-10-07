@@ -878,6 +878,7 @@ const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "Usuário — acesso operacional": { en: "User — operational access", zh: "用户 — 运营访问权限" },
   "Administrador — gerencia usuários e fontes": { en: "Administrator — manages users and data sources", zh: "管理员 — 管理用户和数据源" },
   "Escopo original — somente leitura": { en: "Original scope — read-only", zh: "原始范围 — 只读" },
+  "Matriz — acesso nacional": { en: "Head office — national access", zh: "总部 — 全国访问权限" },
   "Regionais adicionais": { en: "Additional regions", zh: "额外区域" },
   "A região de origem permanece como acesso inicial; permissões extras não ampliam o perfil ADMIN.": { en: "The home region remains the initial selection; extra region grants do not expand an administrator's organizational scope.", zh: "所属区域仍是默认选择；额外区域授权不会扩大管理员的组织范围。" },
   "Usuários de Matriz já possuem escopo nacional.": { en: "Head-office users already have national scope.", zh: "总部用户已拥有全国范围。" },
