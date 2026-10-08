@@ -87,6 +87,19 @@ def _responsibility_owner_key(request: Request) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _responsibility_source_payload(metadata: dict[str, Any], parsed: dict[str, Any], stats: dict[str, Any]) -> dict[str, Any]:
+    updated_at = metadata.get("updatedAt")
+    return {
+        "fileName": metadata.get("fileName"),
+        "updatedAt": updated_at,
+        "publishedAt": updated_at,
+        "sheetName": parsed.get("sheetName", ""),
+        "versionId": metadata.get("latestVersion"),
+        "status": "ACTIVE",
+        **stats,
+    }
+
+
 def _seller_ids(
     performance: dict[str, Any] | None,
     identity: dict[str, str | None],
@@ -226,11 +239,7 @@ async def responsibility_workbook_metadata(
         metadata, parsed = stored
         stats = validate_responsibility_workbook(parsed)
         return JSONResponse({
-            "source": {
-                "fileName": metadata.get("fileName"),
-                "updatedAt": metadata.get("updatedAt"),
-                **stats,
-            }
+            "source": _responsibility_source_payload(metadata, parsed, stats)
         }, headers={"Cache-Control": "no-store"})
     except ResponsibilityWorkbookError as error:
         return _error(error.code, error.status_code)
@@ -280,7 +289,9 @@ async def publish_responsibility_workbook(
             _responsibility_owner_key(request),
             data_root(get_settings().data_directory),
         )
-        return JSONResponse({"source": published}, headers={"Cache-Control": "no-store"})
+        return JSONResponse({
+            "source": _responsibility_source_payload(published, published, published)
+        }, headers={"Cache-Control": "no-store"})
     except ResponsibilityWorkbookError as error:
         return _error(error.code, error.status_code)
     except LocalWorkbookError as error:
@@ -325,9 +336,6 @@ async def write_workbook(
     request: Request,
     _admin: AuthenticatedViewer = Depends(require_admin),
 ) -> Response:
-    auth_error = _upload_error(request)
-    if auth_error:
-        return auth_error
     try:
         payload, source_files = await _parse_post(request)
         if payload.kind not in WORKBOOK_KINDS:

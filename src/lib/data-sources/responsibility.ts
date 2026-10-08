@@ -16,6 +16,15 @@ export interface ResponsibilitySourcePreview extends ResponsibilitySourceStats {
   sheetName: string;
 }
 
+export interface ResponsibilitySourceMetadata extends ResponsibilitySourceStats {
+  fileName: string;
+  updatedAt?: string;
+  publishedAt?: string;
+  sheetName?: string;
+  versionId?: string;
+  status?: "ACTIVE";
+}
+
 async function readError(response: Response): Promise<Error> {
   try {
     const body = await response.json() as { error?: unknown };
@@ -46,7 +55,7 @@ export async function previewResponsibilitySource(file: File, parsed: ParsedWork
   return await response.json() as ResponsibilitySourcePreview;
 }
 
-export async function publishResponsibilitySource(previewId: string): Promise<ResponsibilitySourceStats> {
+export async function publishResponsibilitySource(previewId: string): Promise<ResponsibilitySourceMetadata> {
   const response = await apiFetch("/api/workbook/responsibility-list/publish", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -54,14 +63,14 @@ export async function publishResponsibilitySource(previewId: string): Promise<Re
     cache: "no-store",
   });
   if (!response.ok) throw await readError(response);
-  const payload = await response.json() as { source?: ResponsibilitySourceStats };
+  const payload = await response.json() as { source?: ResponsibilitySourceMetadata };
   if (!payload.source) throw new Error("responsibility_list_publish_failed");
   return payload.source;
 }
 
-export async function getResponsibilitySource(): Promise<{ fileName: string; updatedAt?: string } & ResponsibilitySourceStats | null> {
+export async function getResponsibilitySource(): Promise<ResponsibilitySourceMetadata | null> {
   const response = await apiFetch("/api/workbook/responsibility-list", { cache: "no-store" });
   if (!response.ok) throw await readError(response);
-  const payload = await response.json() as { source?: ({ fileName: string; updatedAt?: string } & ResponsibilitySourceStats) | null };
+  const payload = await response.json() as { source?: ResponsibilitySourceMetadata | null };
   return payload.source ?? null;
 }

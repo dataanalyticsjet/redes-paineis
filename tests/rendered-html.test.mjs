@@ -101,7 +101,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(route, /async def write_workbook/);
   assert.match(route, /Depends\(get_current_viewer\)/);
   assert.match(route, /Depends\(require_admin\)/);
-  assert.match(source, /onDataSource=\{SOURCE_ID_BY_VIEW\[view\] \? \(\) => setDataSourceDialogId\(SOURCE_ID_BY_VIEW\[view\] \?\? null\) : undefined\}/);
+  assert.match(source, /onDataSource=\{canManageActiveDataSource && activeDataSourceId \? \(\) => setDataSourceDialogId\(activeDataSourceId\) : undefined\}/);
   assert.match(source, /className="primary-upload-button" type="button" onClick=\{\(\) => setDataSourceDialogId\("taxa"\)\}/);
   assert.doesNotMatch(source, /view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE/);
   assert.match(source, /canManage=\{viewerIdentity\.platform_role === "ADMIN"\}/);
@@ -401,8 +401,10 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /sortSellerReportRowsByAwaiting/);
   assert.match(source, /aria-sort="descending"/);
   assert.match(source, /className="presentation-language-switcher"/);
-  assert.match(source, /Autorizar envio de Excel/);
-  assert.match(source, /\/api\/upload-auth/);
+  assert.doesNotMatch(source, /Autorizar envio de Excel/);
+  assert.doesNotMatch(source, /\/api\/upload-auth/);
+  assert.match(source, /<DashboardActionBand/);
+  assert.match(source, /canManageActiveDataSource && activeDataSourceId/);
   assert.match(route, /async def verify_upload_auth/);
   assert.match(route, /def _upload_authorized\(request: Request\)/);
   assert.match(route, /upload_auth_not_configured/);

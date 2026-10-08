@@ -23,7 +23,6 @@ import {
   Filter,
   Info,
   Layers3,
-  LockKeyhole,
   LogOut,
   MapPin,
   PackageCheck,
@@ -45,7 +44,6 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
-  type FormEvent,
   type ReactNode,
 } from "react";
 import {
@@ -338,14 +336,12 @@ interface SavedWorkbook {
 async function postWorkbook(
   payload: Record<string, unknown>,
   files: File[],
-  authorization: string | null,
 ): Promise<Response> {
   const body = new FormData();
   body.append("payload", JSON.stringify(payload));
   for (const file of files) body.append("files", file, file.name);
   return apiFetch("/api/workbook", {
     method: "POST",
-    headers: { authorization: authorization ?? "" },
     body,
   });
 }
@@ -1993,20 +1989,21 @@ function MultiSelect({
 interface EmptyDashboardPanelProps {
   loading: boolean;
   error: string | null;
+  canManageUpload: boolean;
   onDrop: (file: File) => void;
   onAddSource?: () => void;
   inputId?: string;
   t: DashboardTranslator;
 }
 
-function EmptyDashboardPanel({ loading, error, onDrop, onAddSource, t, inputId = "monitoring-upload" }: EmptyDashboardPanelProps) {
+function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSource, t, inputId = "monitoring-upload" }: EmptyDashboardPanelProps) {
   const [dragging, setDragging] = useState(false);
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
     const file = event.dataTransfer.files?.[0];
-    if (file) {
+    if (file && canManageUpload) {
       if (onAddSource) onAddSource();
       else onDrop(file);
     }
@@ -2055,7 +2052,7 @@ function EmptyDashboardPanel({ loading, error, onDrop, onAddSource, t, inputId =
         <h2>{t(loading ? "Buscando última atualização..." : onAddSource ? "Nenhuma fonte de dados carregada." : "Publique o arquivo Excel")}</h2>
         <p>{t(onAddSource ? "Adicione uma planilha para alimentar este painel. Os dados serão pré-visualizados antes da confirmação." : "Arraste a planilha para cá ou selecione o arquivo baixado. Depois de publicar, todos veem a mesma atualização pelo link.")}</p>
       </div>
-      {onAddSource ? (
+      {canManageUpload ? onAddSource ? (
         <button className="primary-upload-button" type="button" onClick={onAddSource} disabled={loading}>
           <Database size={18} /> {t("Adicionar fonte de dados")}
         </button>
@@ -2064,7 +2061,7 @@ function EmptyDashboardPanel({ loading, error, onDrop, onAddSource, t, inputId =
           <Upload size={18} />
           {t(loading ? "Processando…" : "Carregar arquivo Excel")}
         </label>
-      )}
+      ) : null}
       </div>
 
       <section className="kpi-grid" aria-label={t("Indicadores aguardando arquivo")}>
@@ -2089,9 +2086,10 @@ function BilingualText({
   return <>{translateDashboardText(language, source, values)}</>;
 }
 
-function PendingLastMileDashboard({ title, onOpenSource, t }: {
+function PendingLastMileDashboard({ title, onOpenSource, canManageSource, t }: {
   title: string;
   onOpenSource: () => void;
+  canManageSource: boolean;
   t: DashboardTranslator;
 }) {
   return (
@@ -2104,7 +2102,7 @@ function PendingLastMileDashboard({ title, onOpenSource, t }: {
       </section>
       <section className="last-mile-pending-panel" aria-labelledby="last-mile-pending-title">
         <p id="last-mile-pending-title">{t("Este painel está aguardando configuração da fonte de dados.")}</p>
-        <button type="button" onClick={onOpenSource}><Database size={16} /> {t("Fonte de dados")}</button>
+        {canManageSource ? <button type="button" onClick={onOpenSource}><Database size={16} /> {t("Fonte de dados")}</button> : null}
       </section>
     </>
   );
@@ -2285,6 +2283,7 @@ export function DashboardApp() {
   const [view, setView] = useState<DashboardView>("home");
   const [showUserControl, setShowUserControl] = useState(false);
   const [responsibilitySourceDialogOpen, setResponsibilitySourceDialogOpen] = useState(false);
+  const [responsibilityRefreshPending, setResponsibilityRefreshPending] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisCopied, setAnalysisCopied] = useState(false);
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
@@ -2369,14 +2368,6 @@ export function DashboardApp() {
   const [damageDateEnd, setDamageDateEnd] = useState("");
   const [damageLoading, setDamageLoading] = useState(true);
   const sellerDetailHeadingRef = useRef<HTMLHeadingElement>(null);
-  const uploadUsernameRef = useRef<HTMLInputElement>(null);
-  const uploadAuthorizationRef = useRef<string | null>(null);
-  const [uploadLoginOpen, setUploadLoginOpen] = useState(false);
-  const [uploadUsername, setUploadUsername] = useState("");
-  const [uploadPassword, setUploadPassword] = useState("");
-  const [uploadAuthError, setUploadAuthError] = useState<string | null>(null);
-  const [uploadAuthLoading, setUploadAuthLoading] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tableQuery, setTableQuery] = useState("");
@@ -2435,9 +2426,6 @@ export function DashboardApp() {
     setResponsibilityLoaded(null);
     setBipagemLoaded(null);
     setDamageLoaded(null);
-    uploadAuthorizationRef.current = null;
-    setPendingUpload(null);
-    setUploadLoginOpen(false);
     setView("home");
     setShowUserControl(false);
   }, []);
@@ -3044,7 +3032,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "monitoring", fileName: file.name, parsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: Omit<SavedWorkbook, "parsed">; error?: string };
       if (!response.ok || !payload.workbook) {
@@ -3104,7 +3091,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "taxa", fileName, parsed, mergeHistory: true },
         files,
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as {
         workbook?: Omit<SavedWorkbook, "parsed"> & { parsed?: ParsedWorkbook };
@@ -3147,7 +3133,7 @@ export function DashboardApp() {
     try {
       const { parseWorkbook } = await import("../../lib/workbook");
       const parsed = parseWorkbook(await file.arrayBuffer());
-      const response = await postWorkbook({ kind: "epop", fileName: file.name, parsed }, [file], uploadAuthorizationRef.current);
+      const response = await postWorkbook({ kind: "epop", fileName: file.name, parsed }, [file]);
       const payload = await response.json() as { workbook?: { updatedAt?: string }; error?: string };
       if (!response.ok || !payload.workbook) throw new Error(payload.error ?? "Não foi possível publicar o relatório EPOP.");
       // EPOP is an incremental daily history: keep prior days in the browser
@@ -3187,7 +3173,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "movement", fileName: file.name, parsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
       if (!response.ok || !payload.workbook) {
@@ -3228,7 +3213,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "sellerList", fileName: file.name, parsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
       if (!response.ok || !payload.workbook) {
@@ -3287,7 +3271,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "sellerSpecialList", fileName: file.name, parsed: normalizedParsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
       if (!response.ok || !payload.workbook) throw new Error(payload.error ?? "Não foi possível publicar os sellers especiais.");
@@ -3330,7 +3313,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "bipagem", fileName: file.name, parsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
       if (!response.ok || !payload.workbook) throw new Error(payload.error ?? "Não foi possível publicar o relatório de falta de bipagem.");
@@ -3365,7 +3347,6 @@ export function DashboardApp() {
       const response = await postWorkbook(
         { kind: "damage", fileName: file.name, parsed },
         [file],
-        uploadAuthorizationRef.current,
       );
       const payload = (await response.json()) as { workbook?: Omit<SavedWorkbook, "parsed"> & { parsed?: ParsedWorkbook }; error?: string };
       if (!response.ok || !payload.workbook) throw new Error(payload.error ?? "Não foi possível publicar o relatório de avaria e extravio.");
@@ -3393,7 +3374,7 @@ export function DashboardApp() {
     if (upload.kind === "bipagem") return loadBipagemFile(file);
     if (upload.kind === "damage") return loadDamageFile(file);
     return Promise.resolve();
-  }, [loadBipagemFile, loadDamageFile, loadEpopFile, loadFile, loadMovementFile, loadSellerListFile, loadSpecialSellerFile, loadTaxaFiles]);
+  }, [loadBipagemFile, loadDamageFile, loadEpopFile, loadFile, loadSellerListFile, loadSpecialSellerFile, loadTaxaFiles]);
 
   const queueUpload = useCallback((upload: PendingUpload) => {
     if (viewerIdentity?.platform_role !== "ADMIN") return;
@@ -3401,47 +3382,8 @@ export function DashboardApp() {
       setError("O envio de planilhas está desativado no modo de demonstração.");
       return;
     }
-    if (uploadAuthorizationRef.current) {
-      void runUpload(upload);
-      return;
-    }
-    setPendingUpload(upload);
-    setUploadAuthError(null);
-    setUploadLoginOpen(true);
-    window.requestAnimationFrame(() => uploadUsernameRef.current?.focus());
+    void runUpload(upload);
   }, [runUpload, viewerIdentity?.platform_role]);
-
-  const submitUploadLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setUploadAuthLoading(true);
-    setUploadAuthError(null);
-    try {
-      const authorization = `Basic ${window.btoa(`${uploadUsername}:${uploadPassword}`)}`;
-      const response = await apiFetch("/api/upload-auth", {
-        method: "POST",
-        headers: { authorization },
-      });
-      if (!response.ok) throw new Error(t("Usuário ou senha inválidos."));
-      const upload = pendingUpload;
-      uploadAuthorizationRef.current = authorization;
-      setUploadPassword("");
-      setPendingUpload(null);
-      setUploadLoginOpen(false);
-      if (upload) window.setTimeout(() => void runUpload(upload), 0);
-    } catch (cause) {
-      setUploadAuthError(cause instanceof Error ? cause.message : t("Não foi possível autorizar o upload."));
-    } finally {
-      setUploadAuthLoading(false);
-    }
-  };
-
-  const closeUploadLogin = () => {
-    if (uploadAuthLoading) return;
-    setUploadLoginOpen(false);
-    setPendingUpload(null);
-    setUploadPassword("");
-    setUploadAuthError(null);
-  };
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -5062,6 +5004,9 @@ export function DashboardApp() {
   const handlePrintReport = () => {
     window.setTimeout(() => window.print(), 30);
   };
+  const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
+  const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
+  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true;
   const dashboardActionBand = (
     <DashboardActionBand
       reportDate={reportGeneratedAt}
@@ -5072,7 +5017,7 @@ export function DashboardApp() {
       onPrint={handlePrintReport}
       onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
       onShare={openPanelFeishuShare}
-      onDataSource={SOURCE_ID_BY_VIEW[view] ? () => setDataSourceDialogId(SOURCE_ID_BY_VIEW[view] ?? null) : undefined}
+      onDataSource={canManageActiveDataSource && activeDataSourceId ? () => setDataSourceDialogId(activeDataSourceId) : undefined}
       sourceLabel={view === "taxa" && taxaLoaded?.sourceType === "MANUAL_UPLOAD" ? taxaLoaded.fileName : undefined}
       t={t}
     />
@@ -5095,7 +5040,7 @@ export function DashboardApp() {
     rowCount: sellerManualSource.rowCount,
     period: sellerManualSource.period ?? undefined,
   } : dataSourceDataset ? {
-    sourceType: "sourceType" in dataSourceDataset
+    sourceType: "sourceType" in dataSourceDataset && dataSourceDataset.sourceType
       ? dataSourceDataset.sourceType
       : dataSourceDataset.fileName === DEMO_WORKBOOK_NAME ? "DEMONSTRATION" : "MANUAL_UPLOAD",
     fileName: dataSourceDataset.fileName,
@@ -5636,7 +5581,7 @@ export function DashboardApp() {
           <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
           <div className="presentation-header-actions">
             {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <>
-              <button className="presentation-user-control-button" type="button" onClick={() => setResponsibilitySourceDialogOpen(true)}><FileSpreadsheet size={18} /> {t("De-para oficial")}</button>
+              <button className="presentation-user-control-button" type="button" onClick={() => { setResponsibilityRefreshPending(false); setResponsibilitySourceDialogOpen(true); }}><FileSpreadsheet size={18} /> {t("De-para oficial")}</button>
               <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button>
             </> : null}
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
@@ -5652,57 +5597,6 @@ export function DashboardApp() {
           <button className="dashboard-back-link" type="button" onClick={() => { setView("home"); setShowUserControl(false); }}>
             <ArrowLeft size={17} /> {t("Voltar para o início")}
           </button>
-        </div>
-      ) : null}
-
-      {uploadLoginOpen ? (
-        <div
-          className="upload-login-overlay"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeUploadLogin();
-          }}
-        >
-          <div
-            className="upload-login-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="upload-login-title"
-          >
-            <button type="button" className="upload-login-close" onClick={closeUploadLogin} aria-label={t("Fechar")}>
-              <X size={18} />
-            </button>
-            <span className="upload-login-icon"><LockKeyhole size={24} /></span>
-            <h2 id="upload-login-title">{t("Autorizar envio de Excel")}</h2>
-            <p>{t("Informe o usuário e a senha para publicar arquivos no dashboard.")}</p>
-            <form onSubmit={submitUploadLogin}>
-              <label htmlFor="upload-username">{t("Usuário")}</label>
-              <input
-                ref={uploadUsernameRef}
-                id="upload-username"
-                autoComplete="username"
-                value={uploadUsername}
-                onChange={(event) => setUploadUsername(event.target.value)}
-                required
-              />
-              <label htmlFor="upload-password">{t("Senha")}</label>
-              <input
-                id="upload-password"
-                type="password"
-                autoComplete="current-password"
-                value={uploadPassword}
-                onChange={(event) => setUploadPassword(event.target.value)}
-                required
-              />
-              {uploadAuthError ? <p className="upload-login-error" role="alert">{uploadAuthError}</p> : null}
-              <div className="upload-login-actions">
-                <button type="button" onClick={closeUploadLogin}>{t("Cancelar")}</button>
-                <button type="submit" disabled={uploadAuthLoading}>
-                  {t(uploadAuthLoading ? "Verificando..." : "Entrar e carregar")}
-                </button>
-              </div>
-            </form>
-          </div>
         </div>
       ) : null}
 
@@ -5724,8 +5618,13 @@ export function DashboardApp() {
 
       <FeishuShareDialog preview={feishuSharePreview} onClose={() => setFeishuSharePreview(null)} t={t} />
       {responsibilitySourceDialogOpen ? <ResponsibilitySourceDialog
-        onClose={() => setResponsibilitySourceDialogOpen(false)}
-        onPublished={() => window.location.reload()}
+        onClose={() => {
+          setResponsibilitySourceDialogOpen(false);
+          if (responsibilityRefreshPending) window.location.reload();
+        }}
+        onPublished={() => setResponsibilityRefreshPending(true)}
+        formatDateTime={formatDateTime}
+        formatNumber={formatNumber}
         t={t}
       /> : null}
       {dataSourceDialogId ? <DataSourceDialog
@@ -5794,11 +5693,12 @@ export function DashboardApp() {
           <PendingLastMileDashboard
             title={pendingLastMilePanel.title}
             onOpenSource={() => setDataSourceDialogId(SOURCE_ID_BY_VIEW[view] ?? null)}
+            canManageSource={viewerIdentity.platform_role === "ADMIN"}
             t={t}
           />
         ) : view === "damage" ? (
           !damageLoaded ? (
-            <EmptyDashboardPanel loading={damageLoading} error={error} onDrop={(file) => queueUpload({ kind: "damage", files: [file] })} inputId="damage-upload" t={t} />
+            <EmptyDashboardPanel loading={damageLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "damage", files: [file] })} inputId="damage-upload" t={t} />
           ) : (
             <>
               <section className="dashboard-intro">
@@ -5838,7 +5738,7 @@ export function DashboardApp() {
           )
         ) : view === "bipagem" ? (
           !bipagemLoaded ? (
-            <EmptyDashboardPanel loading={bipagemLoading} error={error} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
+            <EmptyDashboardPanel loading={bipagemLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
           ) : (
             <>
               <section className="dashboard-intro">
@@ -6052,7 +5952,7 @@ export function DashboardApp() {
           )
         ) : view === "movimentacao" ? (
           !movementLoaded ? (
-            <EmptyDashboardPanel loading={movementLoading} error={error} onDrop={(file) => queueUpload({ kind: "movement", files: [file] })} inputId="movement-upload" t={t} />
+            <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "movement", files: [file] })} inputId="movement-upload" t={t} />
           ) : (
             <>
               <section className="dashboard-intro">
@@ -6508,9 +6408,9 @@ export function DashboardApp() {
                   <h2>{t(sellerManualSource ? "Fonte J&T publicada" : "Fonte J&T não publicada")}</h2>
                   <p>{t("Este é o arquivo abastecido diariamente para calcular aguardando coleta, processados e percentual de processamento.")}</p>
                 </div>
-                <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("sellerPerformance")} disabled={sellerLoading}>
+                {viewerIdentity.platform_role === "ADMIN" ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("sellerPerformance")} disabled={sellerLoading}>
                   <Database size={18} /> {t(sellerManualSource ? "Gerenciar fonte J&T" : "Adicionar fonte J&T")}
-                </button>
+                </button> : null}
               </div>
             </>
           ) : (
@@ -6552,7 +6452,7 @@ export function DashboardApp() {
                     <p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p>
                   </div>
                   <div className="seller-file-actions">
-                    <label className="secondary-upload-button" htmlFor="seller-list-upload"><Upload size={15} /> {t("Lista oficial de sellers")}</label>
+                    {viewerIdentity.platform_role === "ADMIN" ? <label className="secondary-upload-button" htmlFor="seller-list-upload"><Upload size={15} /> {t("Lista oficial de sellers")}</label> : null}
                     <button
                       type="button"
                       className="reset-button"
@@ -7100,7 +7000,7 @@ export function DashboardApp() {
             <>
               <section className="dashboard-intro"><div><div className="eyebrow"><Check size={15} /> EPOP / ePOD</div><h1>{t("Cobertura EPOP")}</h1><p>{t("Carregue o relatório EPOP para acompanhar a cobertura de comprovantes TikTok.")}</p></div></section>
               {error ? <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{t(error)}</span><button type="button" onClick={() => setError(null)}><X size={16} /></button></div> : null}
-              <div className={`filters-card upload-ready-card${epopLoading ? " loading" : ""}`}><div className="upload-ready-icon"><FileSpreadsheet size={26} /></div><div><span className="card-eyebrow">EPOP / ePOD</span><h2>{epopLoading ? t("Processando relatório EPOP...") : t("Publique o relatório EPOP")}</h2><p>{t("A taxa usa somente sellers TikTok elegíveis: regional preenchida, base ativa no RJ, ID válido e quantidade coletada maior que zero.")}</p></div><label className="primary-upload-button" htmlFor="epop-upload"><Upload size={18} />{t("Selecionar planilha")}</label></div>
+              <div className={`filters-card upload-ready-card${epopLoading ? " loading" : ""}`}><div className="upload-ready-icon"><FileSpreadsheet size={26} /></div><div><span className="card-eyebrow">EPOP / ePOD</span><h2>{epopLoading ? t("Processando relatório EPOP...") : t("Publique o relatório EPOP")}</h2><p>{t("A taxa usa somente sellers TikTok elegíveis: regional preenchida, base ativa no RJ, ID válido e quantidade coletada maior que zero.")}</p></div>{viewerIdentity.platform_role === "ADMIN" ? <label className="primary-upload-button" htmlFor="epop-upload"><Upload size={18} />{t("Selecionar planilha")}</label> : null}</div>
             </>
           ) : (() => {
             const rows = epopLoaded.records.filter((row) => row.date >= epopDateStart && row.date <= epopDateEnd && epopSelectedRegions.has(row.region) && epopSelectedBases.has(row.base) && selectedRms.has(responsibilityForBase(responsibilityLoaded, row.base).rm) && selectedRgms.has(responsibilityForBase(responsibilityLoaded, row.base).rgm));
@@ -7243,10 +7143,10 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <h2>{taxaLoading ? t("Buscando última atualização...") : t("Publique o Excel de taxa")}</h2>
                   <p>{t("Na primeira carga, selecione até duas planilhas. Depois, envie o arquivo diário: o histórico permanece salvo e somente datas repetidas são atualizadas.")}</p>
                 </div>
-                <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("taxa")} disabled={taxaLoading}>
+                {viewerIdentity.platform_role === "ADMIN" ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("taxa")} disabled={taxaLoading}>
                   <Upload size={18} />
                   {taxaLoading ? t("Processando…") : t("Selecionar planilha(s)")}
-                </button>
+                </button> : null}
               </div>
             </>
           ) : (
@@ -7827,7 +7727,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
             </>
           )
         ) : !loaded ? (
-          <EmptyDashboardPanel loading={loading} error={error} onDrop={(file) => queueUpload({ kind: "monitoring", files: [file] })} onAddSource={() => setDataSourceDialogId("monitoring")} inputId="monitoring-upload" t={t} />
+          <EmptyDashboardPanel loading={loading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "monitoring", files: [file] })} onAddSource={() => setDataSourceDialogId("monitoring")} inputId="monitoring-upload" t={t} />
         ) : (
           <>
             <section className="dashboard-intro">

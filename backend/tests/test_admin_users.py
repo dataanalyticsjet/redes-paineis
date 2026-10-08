@@ -322,6 +322,10 @@ def test_user_cannot_publish_workbook_even_with_basic_upload_password(
     )
     viewer = TestClient(app, base_url="http://127.0.0.1:8000")
     viewer.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    assert viewer.post(
+        "/api/workbook",
+        json={"kind": "movement", "fileName": "x.xlsx", "parsed": {"headers": ["x"], "rows": [{}]}},
+    ).status_code == 403
     assert viewer.post("/api/upload-auth", headers=_basic_upload_header()).status_code == 403
     assert viewer.post(
         "/api/workbook",

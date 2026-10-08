@@ -63,7 +63,6 @@ def _upload(client: TestClient, kind: str, name: str = "dados.xlsx", display_nam
     payload = {"kind": kind, "fileName": display_name or name, "parsed": _parsed()}
     return client.post(
         "/api/workbook",
-        headers={"Authorization": _authorization()},
         data={"payload": json.dumps(payload, ensure_ascii=False)},
         files=[("files", (name, b"PK\x03\x04test-xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
     )
@@ -79,18 +78,22 @@ def _responsibility_parsed() -> dict[str, object]:
     return {"sheetName": "Ativas", "headers": headers, "rows": rows, "metadata": {"rowCount": len(rows)}, "warnings": []}
 
 
-def _responsibility_upload(client: TestClient, parsed: dict[str, object]):
-    payload = {"kind": "responsibilityList", "fileName": "De_para DoomsDay.xlsx", "parsed": parsed}
+def _responsibility_upload(client: TestClient, parsed: dict[str, object], file_name: str = "De_para DoomsDay.xlsx"):
+    payload = {"kind": "responsibilityList", "fileName": file_name, "parsed": parsed}
     return client.post(
         "/api/workbook/responsibility-list/preview",
         data={"payload": json.dumps(payload, ensure_ascii=False)},
-        files=[("files", ("De_para DoomsDay.xlsx", b"PK\x03\x04official-map", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+        files=[("files", (file_name, b"PK\x03\x04official-map", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
     )
 
 
-def test_workbook_requires_session_and_upload_credentials() -> None:
+def test_workbook_requires_authenticated_admin_session() -> None:
     with TestClient(app, base_url="http://127.0.0.1:3000") as client:
         assert client.get("/api/workbook?kind=movement").status_code == 401
+        assert client.post(
+            "/api/workbook",
+            json={"kind": "movement", "fileName": "x.xlsx", "parsed": _parsed()},
+        ).status_code == 401
 
 
 def test_workbook_upload_persists_source_and_scopes_reads(workbook_client: TestClient, tmp_path: Path) -> None:
@@ -180,11 +183,37 @@ def test_responsibility_list_preview_and_publish_use_admin_session_without_basic
 
     metadata = workbook_client.get("/api/workbook/responsibility-list")
     assert metadata.status_code == 200
-    assert metadata.json()["source"]["baseCount"] == 3
+    source = metadata.json()["source"]
+    assert source["fileName"] == "De_para DoomsDay.xlsx"
+    assert source["publishedAt"] == source["updatedAt"]
+    assert source["sheetName"] == "Ativas"
+    assert source["versionId"]
+    assert source["status"] == "ACTIVE"
+    assert source["rowCount"] == 3
+    assert source["baseCount"] == 3
+    assert source["duplicateBaseCount"] == 0
     current = tmp_path / "local-data" / "workbooks" / "responsibilityList" / "current.json"
     assert current.exists()
+    pointer = json.loads(current.read_text(encoding="utf-8"))
+    assert source["versionId"] == pointer["latestVersion"]
     stored_bytes = list((current.parent / "versions").rglob("source-00-De_para DoomsDay.xlsx"))
     assert len(stored_bytes) == 1
+
+    replacement = _responsibility_parsed()
+    replacement["rows"] = [{**replacement["rows"][0], "Nome da base": "NOVA-BASE-SC"}, *replacement["rows"][1:]]
+    staged = _responsibility_upload(workbook_client, replacement, "De_para atualizado.xlsx").json()
+    assert staged["canPublish"] is True
+    still_active = workbook_client.get("/api/workbook/responsibility-list").json()["source"]
+    assert still_active == source
+
+    published_replacement = workbook_client.post(
+        "/api/workbook/responsibility-list/publish",
+        json={"previewId": staged["previewId"]},
+    )
+    assert published_replacement.status_code == 200
+    refreshed = workbook_client.get("/api/workbook/responsibility-list").json()["source"]
+    assert refreshed["fileName"] == "De_para atualizado.xlsx"
+    assert refreshed["versionId"] != source["versionId"]
 
 
 def test_responsibility_list_duplicate_bases_block_publishing(workbook_client: TestClient) -> None:
@@ -234,13 +263,13 @@ def test_all_existing_workbook_kinds_use_local_storage(workbook_client: TestClie
         assert len(response.json()["workbook"]["parsed"]["rows"]) == 2
 
 
-def test_upload_auth_is_separate_from_viewer_session(workbook_client: TestClient) -> None:
+def test_legacy_upload_auth_remains_available_but_admin_session_publishes_without_it(workbook_client: TestClient) -> None:
     response = workbook_client.post("/api/upload-auth", headers={"Authorization": _authorization()})
     assert response.status_code == 200
     assert response.json() == {"authenticated": True}
 
-    unauthorized = workbook_client.post("/api/workbook", json={"kind": "movement", "fileName": "x.xlsx", "parsed": _parsed()})
-    assert unauthorized.status_code == 401
+    published = _upload(workbook_client, "movement")
+    assert published.status_code == 200
 
 
 @pytest.mark.parametrize("authorization", [None, "Bearer invalid", "Basic !!!", "Basic d3Jvbmc6cGFzcw=="])

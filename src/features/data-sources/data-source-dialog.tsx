@@ -142,7 +142,7 @@ export function DataSourceDialog({
               {currentSource.fileSizeBytes !== undefined ? <div><dt>{t("Tamanho")}</dt><dd>{(currentSource.fileSizeBytes / 1024 / 1024).toFixed(2)} MB</dd></div> : null}
               <div><dt>{t("Quantidade de registros")}</dt><dd>{currentSource.rowCount.toLocaleString("pt-BR")}</dd></div>
               <div><dt>{t("Período")}</dt><dd>{currentSource.period ? `${currentSource.period.start} → ${currentSource.period.end}` : t("Indisponível")}</dd></div>
-              <div><dt>{t("Última atualização")}</dt><dd>{currentSource.updatedAt ? formatDateTime(currentSource.updatedAt) : t("Indisponível")}</dd></div>
+              <div><dt>{t(currentSource.sourceType === "MANUAL_UPLOAD" ? "Publicado em" : "Última atualização")}</dt><dd>{currentSource.updatedAt ? formatDateTime(currentSource.updatedAt) : t("Indisponível")}</dd></div>
               <div><dt>{t("Status")}</dt><dd className={currentSource.sourceType === "DEMONSTRATION" ? "is-demo" : "is-loaded"}>{t(currentSource.sourceType === "DEMONSTRATION" ? "Dados simulados" : "Dados carregados")}</dd></div>
             </dl>
           ) : (
@@ -165,7 +165,7 @@ export function DataSourceDialog({
               />
               <button type="button" className="monitoring-source-select" onClick={() => fileInputRef.current?.click()} disabled={busy}>
                 {busy ? <LoaderCircle className="monitoring-source-spinner" size={16} /> : <Upload size={16} />}
-                {t(currentSource?.sourceType === "MANUAL_UPLOAD" ? "Substituir arquivo" : "Selecionar arquivo")}
+                {t(currentSource?.sourceType === "MANUAL_UPLOAD" ? "Selecionar novo arquivo" : "Selecionar arquivo")}
               </button>
               {currentSource?.sourceType === "MANUAL_UPLOAD" ? (
                 <button type="button" className="monitoring-source-remove" onClick={() => void removeSource()} disabled={busy}>

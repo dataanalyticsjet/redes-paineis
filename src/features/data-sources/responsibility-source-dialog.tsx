@@ -1,29 +1,53 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileSpreadsheet, LoaderCircle, Upload, X } from "lucide-react";
 import type { DashboardTranslator } from "../../lib/i18n";
-import { parseResponsibilitySource, previewResponsibilitySource, publishResponsibilitySource, type ResponsibilitySourcePreview } from "../../lib/data-sources/responsibility.ts";
+import { getResponsibilitySource, parseResponsibilitySource, previewResponsibilitySource, publishResponsibilitySource, type ResponsibilitySourceMetadata, type ResponsibilitySourcePreview } from "../../lib/data-sources/responsibility.ts";
 
 export function ResponsibilitySourceDialog({
   onClose,
   onPublished,
+  formatDateTime,
+  formatNumber,
   t,
 }: {
   onClose: () => void;
   onPublished: () => void;
+  formatDateTime: (value?: string) => string;
+  formatNumber: (value: number) => string;
   t: DashboardTranslator;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const hasPublishedRef = useRef(false);
   const [preview, setPreview] = useState<ResponsibilitySourcePreview | null>(null);
+  const [currentSource, setCurrentSource] = useState<ResponsibilitySourceMetadata | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(true);
+  const [sourceLoadFailed, setSourceLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void getResponsibilitySource()
+      .then((source) => { if (active && !hasPublishedRef.current) setCurrentSource(source); })
+      .catch((cause) => {
+        if (active && !hasPublishedRef.current) {
+          setSourceLoadFailed(true);
+          setError(cause instanceof Error ? cause.message : "responsibility_list_request_failed");
+        }
+      })
+      .finally(() => { if (active) setSourceLoading(false); });
+    return () => { active = false; };
+  }, []);
 
   const chooseFile = async (file?: File) => {
     if (!file) return;
     setBusy(true);
     setPreview(null);
     setError("");
+    setSuccess("");
     try {
       const parsed = await parseResponsibilitySource(file);
       setPreview(await previewResponsibilitySource(file, parsed));
@@ -39,8 +63,13 @@ export function ResponsibilitySourceDialog({
     if (!preview?.previewId || !preview.canPublish) return;
     setBusy(true);
     setError("");
+    setSuccess("");
     try {
-      await publishResponsibilitySource(preview.previewId);
+      const source = await publishResponsibilitySource(preview.previewId);
+      hasPublishedRef.current = true;
+      setCurrentSource(source);
+      setPreview(null);
+      setSuccess("De-para publicado com sucesso.");
       onPublished();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "responsibility_list_publish_failed");
@@ -60,10 +89,31 @@ export function ResponsibilitySourceDialog({
           <div><span className="monitoring-source-eyebrow">{t("De-para oficial")}</span><h2 id="responsibility-source-title">{t("Atualizar de-para de bases")}</h2></div>
         </div>
         <p className="monitoring-source-empty">{t("Selecione a aba Ativas do De_para DoomsDay.xlsx. A publicação substitui a versão oficial usada por todos os painéis.")}</p>
+        <section className="monitoring-source-current" aria-label={t("Fonte oficial atual")}>
+          <h3>{t("Fonte oficial atual")}</h3>
+          {sourceLoading ? (
+            <p className="monitoring-source-processing" role="status"><LoaderCircle className="monitoring-source-spinner" size={15} /> {t("Carregando fonte oficial...")}</p>
+          ) : currentSource ? (
+            <>
+              <p><strong>{currentSource.fileName}</strong></p>
+              <dl>
+                <div><dt>{t("Publicado em")}</dt><dd>{formatDateTime(currentSource.publishedAt ?? currentSource.updatedAt)}</dd></div>
+                {currentSource.sheetName ? <div><dt>{t("Aba")}</dt><dd>{currentSource.sheetName}</dd></div> : null}
+                <div><dt>{t("Registros")}</dt><dd>{formatNumber(currentSource.rowCount)}</dd></div>
+                <div><dt>{t("Bases")}</dt><dd>{formatNumber(currentSource.baseCount)}</dd></div>
+                <div><dt>{t("Duplicidades")}</dt><dd>{formatNumber(currentSource.duplicateBaseCount)}</dd></div>
+                <div><dt>{t("Status")}</dt><dd className="is-loaded">{t("Ativa")}</dd></div>
+              </dl>
+            </>
+          ) : sourceLoadFailed ? null : (
+            <p className="monitoring-source-empty">{t("Sem fonte oficial publicada.")}</p>
+          )}
+        </section>
+        {success ? <div className="inline-alert success" role="status"><CheckCircle2 size={16} /> {t(success)}</div> : null}
         <div className="monitoring-source-picker">
           <input ref={inputRef} className="sr-only" type="file" accept=".xlsx,.xls" onChange={(event) => void chooseFile(event.currentTarget.files?.[0])} disabled={busy} aria-label={t("Selecionar arquivo")} />
           <button type="button" className="monitoring-source-select" onClick={() => inputRef.current?.click()} disabled={busy}>
-            {busy ? <LoaderCircle className="monitoring-source-spinner" size={16} /> : <Upload size={16} />}{t("Selecionar arquivo")}
+            {busy ? <LoaderCircle className="monitoring-source-spinner" size={16} /> : <Upload size={16} />}{t(currentSource ? "Selecionar novo arquivo" : "Selecionar arquivo")}
           </button>
         </div>
         {busy ? <p className="monitoring-source-processing" role="status"><LoaderCircle className="monitoring-source-spinner" size={15} /> {t("Validando arquivo…")}</p> : null}

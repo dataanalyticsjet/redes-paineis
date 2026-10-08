@@ -148,7 +148,7 @@ def publish_preview(preview_id: str, owner_key: str, root: Path) -> dict[str, An
             entry.source_files,
         )
         _previews.pop(preview_id, None)
-    return {**metadata, **entry.stats}
+    return {**metadata, "sheetName": entry.parsed.get("sheetName", ""), **entry.stats}
 
 
 def reset_temporary_previews() -> None:
