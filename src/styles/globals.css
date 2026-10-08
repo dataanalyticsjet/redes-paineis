@@ -7448,6 +7448,48 @@ tbody tr:hover td {
     break-inside: avoid !important;
     page-break-inside: avoid !important;
   }
+
+  .dashboard-main-sellers .chart-card,
+  .dashboard-main-sellers .table-card {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .dashboard-main-sellers .seller-regional-table-wrap,
+  .dashboard-main-sellers .table-scroll {
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .dashboard-main-sellers table {
+    width: 100% !important;
+    min-width: 0 !important;
+    table-layout: fixed !important;
+  }
+
+  .dashboard-main-sellers table thead {
+    display: table-header-group !important;
+    position: static !important;
+  }
+
+  .dashboard-main-sellers table th,
+  .dashboard-main-sellers table td {
+    min-width: 0 !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+  }
+
+  .dashboard-main-sellers table tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .dashboard-main-sellers .table-search,
+  .dashboard-main-sellers .seller-report-mode,
+  .dashboard-main-sellers .seller-file-actions {
+    display: none !important;
+  }
 }
 .monitoring-source-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 12px; max-height: 180px; overflow: auto; margin: 0; padding: 0; list-style: none; }
 .monitoring-source-fields li { display: grid; grid-template-columns: minmax(0, 1fr) auto 14px; align-items: center; gap: 7px; min-width: 0; padding: 6px 8px; border: 1px solid #eeecec; border-radius: 7px; color: #414852; font-size: 11px; }

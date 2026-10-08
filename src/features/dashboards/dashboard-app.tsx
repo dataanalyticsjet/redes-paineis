@@ -61,6 +61,8 @@ import {
   filterSellerReportRows,
   filterSellerRowsByOutcome,
   normalizeSellerCategory,
+  resolveSellerOrganization,
+  sellerCategoryMatches,
   sortSellerReportRowsByAwaiting,
   summarizeAwaitingByBaseAndRm,
   summarizeSellerOutcomes,
@@ -593,7 +595,7 @@ interface SellerPerformanceRecord {
   sellerName: string;
   sellerCode: string;
   origin: string;
-  tier: SellerTier;
+  tier: SellerTier | null;
   isSpecial: boolean;
   awaiting: number;
   dropOff: number;
@@ -1575,13 +1577,16 @@ function sellerOptionsForFilters(
   tiers: Set<string>,
   responsibility: ResponsibilityData | null = null,
 ): string[] {
+  const availableCategories = SELLER_CATEGORIES.filter((category) =>
+    data.records.some((record) => record.tier === category),
+  );
   return Array.from(
     new Set(
       data.records
         .filter((record) =>
           regions.has(registeredRegionForBase(responsibility, record.base, record.region)) &&
           bases.has(record.base) &&
-          tiers.has(record.tier))
+          sellerCategoryMatches(record.tier, tiers, availableCategories))
         .map((record) => record.sellerCode),
     ),
   ).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
@@ -1653,9 +1658,10 @@ function mergeSellerReferenceData(reference: SellerReferenceData, special: Speci
 
 function buildSellerPerformanceData(
   parsed: ParsedWorkbook,
-  reference: SellerReferenceData,
+  reference: SellerReferenceData | null,
   fileName: string,
   updatedAt?: string,
+  responsibility: ResponsibilityData | null = null,
 ): SellerPerformanceData {
   const headers = parsed.headers;
   const columns: SellerPerformanceColumns = {
@@ -1681,17 +1687,16 @@ function buildSellerPerformanceData(
     arrivedSc: findRequiredHeader(headers, "Status atual – Chegou ao SC", ["Status atual – Chegou ao SC", "Chegou ao SC"]),
   };
 
-  const sellerMap = new Map(reference.records.map((record) => [record.sellerCode, record]));
+  const sellerMap = new Map((reference?.records ?? []).map((record) => [record.sellerCode, record]));
   let unknownSellerRows = 0;
   const matchedRecords = parsed.rows.flatMap((row, index) => {
-    const sellerCode = normalizeSellerCode(row[columns.sellerCode]);
-    const referenceRecord = sellerMap.get(sellerCode);
-    if (!referenceRecord) {
-      unknownSellerRows += 1;
-      return [];
-    }
     const date = toDashboardISODate(row[columns.date]);
     if (!date) return [];
+    const sellerCode = normalizeSellerCode(row[columns.sellerCode]) || "Sem código";
+    const referenceRecord = sellerMap.get(sellerCode);
+    if (reference && !referenceRecord) {
+      unknownSellerRows += 1;
+    }
     const awaiting = taxaValue(row, columns.awaiting);
     const dropOff = taxaValue(row, columns.dropOff);
     const collected = taxaValue(row, columns.collected);
@@ -1702,17 +1707,20 @@ function buildSellerPerformanceData(
     const processed = dropOff + collected + received + receivedBase + inTransitBase + arrivedSc;
     const total = awaiting + processed;
 
+    const base = String(row[columns.base] ?? "").trim() || "Sem base";
+    const rawRegion = String(row[columns.region] ?? "").trim() || "Sem regional";
+    const organization = resolveSellerOrganization({ base, region: rawRegion }, responsibility);
     return [{
       key: `${date}::${sellerCode}::${index}`,
       date,
-      region: String(row[columns.region] ?? "").trim() || "Sem regional",
-      base: String(row[columns.base] ?? "").trim() || "Sem base",
+      region: organization.region,
+      base,
       client: String(row[columns.client] ?? "").trim() || "Sem cliente",
       sellerName: String(row[columns.sellerName] ?? "").trim() || "Sem loja",
       sellerCode,
       origin: String(row[columns.origin] ?? "").trim() || "Sem origem",
-      tier: referenceRecord.tier,
-      isSpecial: referenceRecord.isSpecial,
+      tier: referenceRecord?.tier ?? null,
+      isSpecial: referenceRecord?.isSpecial ?? false,
       awaiting,
       dropOff,
       collected,
@@ -1738,7 +1746,7 @@ function buildSellerPerformanceData(
 
   const matchedSellerCodes = new Set(matchedRecords.map((record) => record.sellerCode));
   const fallbackDate = sourceDates[sourceDates.length - 1];
-  const missingRecords = reference.records
+  const missingRecords = (reference?.records ?? [])
     .filter((record) => !matchedSellerCodes.has(record.sellerCode))
     .map((record, index) => ({
       key: `${fallbackDate}::${record.sellerCode}::missing::${index}`,
@@ -2746,6 +2754,7 @@ export function DashboardApp() {
             sellerReference,
             DEMO_WORKBOOK_NAME,
             demoUpdatedAt,
+            responsibility,
           );
           const bipagem = buildBipagemLoadedData(scopeDemoWorkbook(fixtures.bipagem, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
           const damage = buildDamageData(scopeDemoWorkbook(fixtures.damage, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
@@ -2936,34 +2945,34 @@ export function DashboardApp() {
         } catch (cause) {
           console.error("[Redes Painéis] Falha ao carregar a fonte compartilhada do Monitoramento J&T.", cause);
         }
-        if (sellerReference) {
+        if (sellerManualSourceResponse) {
           if (!active) return;
-          if (sellerManualSourceResponse) {
-            const sellerData = buildSellerPerformanceData(
-                sellerManualSourceResponse.parsed,
-                sellerReference,
-                sellerManualSourceResponse.fileName,
-                sellerManualSourceResponse.importedAt,
-              );
-            const isMatrixViewer = viewerIdentity?.organizational_scope === "matrix" || viewerIdentity?.role === "matrix";
-            const assignedRegions = viewerIdentity?.effective_regions?.length
-              ? viewerIdentity.effective_regions
-              : [viewerIdentity?.home_region ?? viewerIdentity?.region].filter((region): region is string => Boolean(region));
-            const effectiveRegions = isMatrixViewer ? null : new Set(assignedRegions.map((region) => region.trim().toUpperCase()));
-            const visibleSellerRecords = effectiveRegions
-              ? sellerData.records.filter((record) => effectiveRegions.has(registeredRegionForBase(responsibility, record.base, record.region).trim().toUpperCase()))
-              : sellerData.records;
-            const scopedSellerData = effectiveRegions ? {
-              ...sellerData,
-              records: visibleSellerRecords,
-              regions: [...new Set(visibleSellerRecords.map((record) => registeredRegionForBase(responsibility, record.base, record.region)))].sort(),
-              bases: [...new Set(visibleSellerRecords.map((record) => record.base))].sort(),
-              sellers: [...new Set(visibleSellerRecords.map((record) => record.sellerName))].sort(),
-            } : sellerData;
-            applySellerPerformanceLoadedData(scopedSellerData, responsibility);
+          const sellerData = buildSellerPerformanceData(
+            sellerManualSourceResponse.parsed,
+            sellerReference,
+            sellerManualSourceResponse.fileName,
+            sellerManualSourceResponse.importedAt,
+            responsibility,
+          );
+          const isMatrixViewer = viewerIdentity?.organizational_scope === "matrix" || viewerIdentity?.role === "matrix";
+          const assignedRegions = viewerIdentity?.effective_regions?.length
+            ? viewerIdentity.effective_regions
+            : [viewerIdentity?.home_region ?? viewerIdentity?.region].filter((region): region is string => Boolean(region));
+          const effectiveRegions = isMatrixViewer ? null : new Set(assignedRegions.map((region) => region.trim().toUpperCase()));
+          const visibleSellerRecords = effectiveRegions
+            ? sellerData.records.filter((record) => effectiveRegions.has(registeredRegionForBase(responsibility, record.base, record.region).trim().toUpperCase()))
+            : sellerData.records;
+          const scopedSellerData = effectiveRegions ? {
+            ...sellerData,
+            records: visibleSellerRecords,
+            regions: [...new Set(visibleSellerRecords.map((record) => registeredRegionForBase(responsibility, record.base, record.region)))].sort(),
+            bases: [...new Set(visibleSellerRecords.map((record) => record.base))].sort(),
+            sellers: [...new Set(visibleSellerRecords.map((record) => record.sellerName))].sort(),
+          } : sellerData;
+          applySellerPerformanceLoadedData(scopedSellerData, responsibility);
+          if (!sellerReference) {
+            setSellerDependencyMessage("A lista oficial de sellers não está publicada neste ambiente. As categorias não serão inferidas do XLSX J&T.");
           }
-        } else if (sellerManualSourceResponse && active) {
-          setSellerDependencyMessage("A fonte J&T está publicada. Categorias e recortes por seller aguardam a lista oficial de sellers.");
         }
         const bipagemResponse = await fetchOptionalWorkbook("bipagem");
         {
@@ -3232,7 +3241,7 @@ export function DashboardApp() {
       setSellerReferenceLoaded(reference);
       if (sellerPerformanceLoaded) {
         applySellerPerformanceLoadedData(
-          buildSellerPerformanceData(sellerPerformanceLoaded.parsed, reference, sellerPerformanceLoaded.fileName, sellerPerformanceLoaded.updatedAt),
+          buildSellerPerformanceData(sellerPerformanceLoaded.parsed, reference, sellerPerformanceLoaded.fileName, sellerPerformanceLoaded.updatedAt, responsibilityLoaded),
           responsibilityLoaded,
         );
       }
@@ -3288,7 +3297,7 @@ export function DashboardApp() {
       setSellerReferenceLoaded(reference);
       if (sellerPerformanceLoaded) {
         applySellerPerformanceLoadedData(
-          buildSellerPerformanceData(sellerPerformanceLoaded.parsed, reference, sellerPerformanceLoaded.fileName, sellerPerformanceLoaded.updatedAt),
+          buildSellerPerformanceData(sellerPerformanceLoaded.parsed, reference, sellerPerformanceLoaded.fileName, sellerPerformanceLoaded.updatedAt, responsibilityLoaded),
           responsibilityLoaded,
         );
       }
@@ -4857,16 +4866,16 @@ export function DashboardApp() {
   const sellerFilteredRecords = useMemo(() => {
     if (!sellerPerformanceLoaded || !sellerDateStart || !sellerDateEnd || sellerDateStart > sellerDateEnd) return [];
     const normalizedCode = normalizeSearchText(sellerCodeQuery.trim());
-    return sellerPerformanceLoaded.records.map((record) => ({
-      ...record,
-      region: registeredRegionForBase(responsibilityLoaded, record.base, record.region),
-      rm: responsibilityForBase(responsibilityLoaded, record.base).rm,
-      rgm: responsibilityForBase(responsibilityLoaded, record.base).rgm,
-    })).filter(
+    const availableCategories = SELLER_CATEGORIES.filter((category) =>
+      sellerPerformanceLoaded.records.some((record) => record.tier === category),
+    );
+    return sellerPerformanceLoaded.records.map((record) =>
+      resolveSellerOrganization(record, responsibilityLoaded),
+    ).filter(
       (record) =>
         sellerSelectedRegions.has(record.region) &&
         sellerSelectedBases.has(record.base) &&
-        sellerSelectedTiers.has(record.tier) &&
+        sellerCategoryMatches(record.tier, sellerSelectedTiers, availableCategories) &&
         sellerSelectedSellers.has(record.sellerCode) &&
         matchesResponsibility(responsibilityLoaded, record.base, selectedRms, selectedRgms) &&
         record.date >= sellerDateStart &&
@@ -4903,13 +4912,14 @@ export function DashboardApp() {
   }, [sellerFilteredRecords]);
 
   const sellerCategoryLabel = useMemo(() => {
+    if (!sellerReferenceLoaded) return t("J&T");
     const categories = SELLER_CATEGORIES.filter((category) => sellerSelectedTiers.has(category)).map((category) => t(category));
     if (categories.length === 0) return t("Nenhuma categoria");
     return new Intl.ListFormat(dashboardLocale(language), {
       style: "long",
       type: "conjunction",
     }).format(categories);
-  }, [language, sellerSelectedTiers, t]);
+  }, [language, sellerReferenceLoaded, sellerSelectedTiers, t]);
 
   const sellerPeriod = sellerPerformanceLoaded
     ? formatConsolidatedPeriod(sellerDateStart, sellerDateEnd)
@@ -5737,19 +5747,16 @@ export function DashboardApp() {
               setView("taxa");
             } else if (dataSourceDialogId === "sellerPerformance") {
               setSellerManualSource(source);
-              if (sellerReferenceLoaded) {
-                applySellerPerformanceLoadedData(
-                  buildSellerPerformanceData(source.parsed, sellerReferenceLoaded, source.fileName, source.importedAt),
-                  responsibilityLoaded,
-                );
-              } else {
-                setSellerPerformanceLoaded(null);
-                setSellerDependencyMessage("A fonte J&T foi salva. Categorias e recortes por seller aguardam a lista oficial de sellers.");
-              }
+              applySellerPerformanceLoadedData(
+                buildSellerPerformanceData(source.parsed, sellerReferenceLoaded, source.fileName, source.importedAt, responsibilityLoaded),
+                responsibilityLoaded,
+              );
+              setSellerDependencyMessage(sellerReferenceLoaded
+                ? null
+                : "A lista oficial de sellers não está publicada neste ambiente. As categorias não serão inferidas do XLSX J&T.");
               setView("sellers");
-              if (sellerReferenceLoaded) setSellerDependencyMessage(null);
             }
-            if (dataSourceDialogId !== "sellerPerformance" || sellerReferenceLoaded) setError(null);
+            setError(null);
           } catch {
             setError("data_source_import_invalid");
           }
@@ -5776,7 +5783,7 @@ export function DashboardApp() {
         t={t}
       /> : null}
 
-      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : "dashboard-main"}>
+      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : "dashboard-main"}>
         {view === "home" ? (
           showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
             setError(null);
@@ -6453,7 +6460,7 @@ export function DashboardApp() {
             </>
           )
         ) : view === "sellers" ? (
-          !sellerReferenceLoaded || !sellerPerformanceLoaded ? (
+          !sellerPerformanceLoaded ? (
             <>
               <section className="dashboard-intro">
                 <div>
@@ -6512,11 +6519,17 @@ export function DashboardApp() {
                 <div>
                   <div className="eyebrow"><ShieldCheck size={15} /> {t("SELLERS {categories}", { categories: sellerCategoryLabel })}</div>
                   <h1>{t("Monitoramento {categories}", { categories: sellerCategoryLabel })}</h1>
-                  <p>{t("Percentual de processamento por seller, categoria, regional e base. Sellers somente aguardando coleta aparecem com 0%.")}</p>
+                  <p>{t(sellerReferenceLoaded
+                    ? "Percentual de processamento por seller, categoria, regional e base. Sellers somente aguardando coleta aparecem com 0%."
+                    : "Acompanhe o processamento de coleta por seller, regional e base usando o resumo JMS publicado.")}</p>
                 </div>
                 <div className="dataset-meta" aria-label={t("Resumo do arquivo de sellers")}>
                   <span><Layers3 size={16} /> {t("{count} linhas · {categories}", { count: formatNumber(sellerPerformanceLoaded.records.length), categories: sellerCategoryLabel })}</span>
-                  <span><ShieldCheck size={16} /> {t("{count} sellers na lista", { count: formatNumber(sellerReferenceLoaded.records.length) })}</span>
+                  {sellerReferenceLoaded ? (
+                    <span><ShieldCheck size={16} /> {t("{count} sellers na lista", { count: formatNumber(sellerReferenceLoaded.records.length) })}</span>
+                  ) : (
+                    <span><ShieldCheck size={16} /> {t("Lista oficial de sellers indisponível")}</span>
+                  )}
                   <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(sellerRegionOptions.length) })}</span>
                   <span><Database size={16} /> {t("{count} bases", { count: formatNumber(sellerPerformanceLoaded.bases.length) })}</span>
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(sellerPerformanceLoaded.updatedAt) })}</span>
@@ -6566,21 +6579,23 @@ export function DashboardApp() {
                     getOptionLabel={sellerOptionLabel}
                     t={t}
                   />
-                  <MultiSelect
-                    label={t("Categoria")}
-                    options={SELLER_CATEGORIES.filter((tier) => sellerReferenceLoaded.tiers.includes(tier))}
-                    selected={sellerSelectedTiers}
-                    onChange={(value) => {
-                      setSellerSelectedTiers(value);
-                      setSellerSelectedSellers(new Set(sellerOptionsForFilters(sellerPerformanceLoaded, sellerSelectedRegions, sellerSelectedBases, value, responsibilityLoaded)));
-                      setSellerPage(1);
-                    }}
-                    allLabel={t("Todas as categorias")}
-                    singular={t("Categoria")}
-                    plural={t("Categoria")}
-                    getOptionLabel={(option) => t(option)}
-                    t={t}
-                  />
+                  {sellerReferenceLoaded ? (
+                    <MultiSelect
+                      label={t("Categoria")}
+                      options={SELLER_CATEGORIES.filter((tier) => sellerReferenceLoaded.tiers.includes(tier))}
+                      selected={sellerSelectedTiers}
+                      onChange={(value) => {
+                        setSellerSelectedTiers(value);
+                        setSellerSelectedSellers(new Set(sellerOptionsForFilters(sellerPerformanceLoaded, sellerSelectedRegions, sellerSelectedBases, value, responsibilityLoaded)));
+                        setSellerPage(1);
+                      }}
+                      allLabel={t("Todas as categorias")}
+                      singular={t("Categoria")}
+                      plural={t("Categoria")}
+                      getOptionLabel={(option) => t(option)}
+                      t={t}
+                    />
+                  ) : null}
                   <MultiSelect
                     label={t("Regional")}
                     options={sellerRegionOptions}
@@ -6816,7 +6831,9 @@ export function DashboardApp() {
                       <span className="card-eyebrow">{t("STATUS DO PROCESSAMENTO")}</span>
                       <h2>{t("Composição {categories}", { categories: sellerCategoryLabel })}</h2>
                     </div>
-                    <span className="card-badge">{t("{count} categoria(s)", { count: sellerSelectedTiers.size })}</span>
+                    {sellerReferenceLoaded ? (
+                      <span className="card-badge">{t("{count} categoria(s)", { count: sellerSelectedTiers.size })}</span>
+                    ) : null}
                   </div>
                   <div className="composition-list compact-origin-list">
                     {[
@@ -7055,7 +7072,9 @@ export function DashboardApp() {
                         ? t("Nenhum seller com resultado {result} nos filtros atuais.", {
                             result: t(SELLER_OUTCOME_LABELS[sellerOutcomeFilter]),
                           })
-                        : t("Ajuste categoria, regional, base ou código do seller.")}
+                          : t(sellerReferenceLoaded
+                            ? "Ajuste categoria, regional, base ou código do seller."
+                            : "Ajuste regional, base ou código do seller.")}
                     </p>
                     <button
                       type="button"
@@ -7071,7 +7090,7 @@ export function DashboardApp() {
                 <span><ShieldCheck size={15} /> {t("Último resumo JMS {categories} publicado disponível para todos pelo link", { categories: sellerCategoryLabel })}</span>
                 <span>{t("Resumo: {summary} · Lista: {list}", {
                   summary: sellerPerformanceLoaded.fileName,
-                  list: sellerReferenceLoaded.fileName,
+                  list: sellerReferenceLoaded?.fileName ?? t("Lista oficial de sellers indisponível"),
                 })}</span>
               </footer>
             </>

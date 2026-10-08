@@ -7,6 +7,8 @@ import {
   filterSellerReportRows,
   filterSellerRowsByOutcome,
   normalizeSellerCategory,
+  resolveSellerOrganization,
+  sellerCategoryMatches,
   selectTopSellersBelowRate,
   sortSellerReportRowsByAwaiting,
   summarizeAwaitingByBaseAndRm,
@@ -16,9 +18,11 @@ import {
 import { SELLER_MONITORING_FIELDS, normalizeSellerMonitoringWorkbook, summarizeSellerMonitoring } from "../src/lib/data-sources/seller-monitoring.ts";
 import { DASHBOARD_DATA_SOURCES } from "../src/lib/data-sources/catalog.ts";
 import type { ParsedWorkbook } from "../src/lib/workbook.ts";
+import { buildResponsibilityData } from "../src/lib/responsibility.ts";
+import { initialRegionSelection } from "../src/lib/initial-region-selection.ts";
 
 function workbook(): ParsedWorkbook {
-  const row = Object.fromEntries(SELLER_MONITORING_FIELDS.map((header) => [header, 0]));
+  const row: Record<string, unknown> = Object.fromEntries(SELLER_MONITORING_FIELDS.map((header) => [header, 0]));
   row["Data"] = "2026-10-06";
   row["Regional Origem"] = "PR";
   row["PDD de saida"] = "BNU -SC";
@@ -62,6 +66,77 @@ test("J&T monitoring normalizes the official XLSX contract and retains the exist
     total: 33,
     rate: 21 / 33,
   });
+});
+
+test("the J&T control totals remain unchanged when official regions are remapped", () => {
+  const parsed = workbook();
+  const row = { ...parsed.rows[0] };
+  row["Regional Origem"] = "PR";
+  row["PDD de saida"] = "BNU -SC";
+  row["Status atual – Aguardando coleta"] = 1_220_993;
+  row["Status atual – Recebido no Drop-off"] = 36_178;
+  row["Status atual – Coletado"] = 60_915;
+  row["Status atual – Recebido"] = 4;
+  row["Status atual – Recebido na base"] = 137_180;
+  row["当前状态-网点发件流程中"] = 531_447;
+  row["Status atual – Chegou ao SC"] = 3_355_655;
+  parsed.rows = [row];
+
+  const normalized = normalizeSellerMonitoringWorkbook(parsed);
+  assert.deepEqual(summarizeSellerMonitoring(normalized), {
+    awaiting: 1_220_993,
+    processed: 4_121_379,
+    total: 5_342_372,
+    rate: 4_121_379 / 5_342_372,
+  });
+});
+
+test("official SC and RS base mapping moves them to SR while PR remains PR", () => {
+  const headers = ["Regional", "Região RM", "Responsável Rm", "Código da base", "Nome da base", "Descrição"];
+  const parsed: ParsedWorkbook = {
+    sheetName: "Ativas",
+    headers,
+    rows: [
+      { Regional: "SR", "Região RM": "SR-SC", "Responsável Rm": "樊善方 Shanfang Fan (Sean Fan)", "Código da base": "147113", "Nome da base": "BNU -SC", Descrição: "Própria" },
+      { Regional: "SR", "Região RM": "SR-RS", "Responsável Rm": "周正军 Zhengjun Zhou (Victor)", "Código da base": "151135", "Nome da base": "CQA -RS", Descrição: "Própria" },
+      { Regional: "PR", "Região RM": "PR-CWB", "Responsável Rm": "Diego Souza Braga Da Silva", "Código da base": "155158", "Nome da base": "F MGR 02-PR", Descrição: "Franquia" },
+    ],
+    statusColumns: [],
+    metadata: { sheetNames: ["Ativas"], headerRow: 1, rowCount: 3, columnCount: 6, columns: [], date1904: false },
+    warnings: [],
+  };
+  const responsibility = buildResponsibilityData(parsed, "De_para DoomsDay.xlsx");
+  const enriched = [
+    { region: "PR", base: "BNU -SC" },
+    { region: "PR", base: "CQA -RS" },
+    { region: "PR", base: "F MGR 02-PR" },
+  ].map((record) => resolveSellerOrganization(record, responsibility));
+
+  assert.deepEqual(enriched.map(({ base, region, rm, rgm }) => ({ base, region, rm, rgm })), [
+    { base: "BNU -SC", region: "SR", rm: "樊善方 Shanfang Fan (Sean Fan)", rgm: "董文彤 WENTONG DONG (Winta)" },
+    { base: "CQA -RS", region: "SR", rm: "周正军 Zhengjun Zhou (Victor)", rgm: "董文彤 WENTONG DONG (Winta)" },
+    { base: "F MGR 02-PR", region: "PR", rm: "Diego Souza Braga Da Silva", rgm: "@高俊波" },
+  ]);
+  assert.deepEqual(enriched.filter((record) => record.region === "SR").map((record) => record.base), ["BNU -SC", "CQA -RS"]);
+  assert.deepEqual(enriched.filter((record) => record.region === "PR").map((record) => record.base), ["F MGR 02-PR"]);
+
+  const allRegions = initialRegionSelection(enriched.map((record) => record.region), {
+    role: "matrix", organizational_scope: "matrix", region: null,
+  });
+  assert.deepEqual([...new Set(allRegions)], ["SR", "PR"]);
+  const selectedSr = new Set(["SR"]);
+  assert.deepEqual(enriched.filter((record) => selectedSr.has(record.region)).map((record) => record.base), ["BNU -SC", "CQA -RS"]);
+  const clearedRegions = initialRegionSelection(enriched.map((record) => record.region), {
+    role: "matrix", organizational_scope: "matrix", region: null,
+  });
+  assert.deepEqual([...new Set(clearedRegions)], ["SR", "PR"]);
+});
+
+test("missing official seller categories never exclude JMS rows or infer a category", () => {
+  assert.equal(sellerCategoryMatches(null, new Set(), []), true);
+  assert.equal(sellerCategoryMatches("J&T 重点保障", new Set(["J&T 重点保障", "单商多服"]), ["J&T 重点保障", "单商多服"]), true);
+  assert.equal(sellerCategoryMatches(null, new Set(["J&T 重点保障"]), ["J&T 重点保障", "单商多服"]), false);
+  assert.equal(sellerCategoryMatches("单商多服", new Set(["J&T 重点保障"]), ["J&T 重点保障", "单商多服"]), false);
 });
 
 test("J&T source rejects a missing required status field instead of guessing", () => {

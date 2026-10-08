@@ -1,3 +1,10 @@
+import {
+  officialRgmForRegion,
+  registeredRegionForBase,
+  responsibilityForBase,
+  type ResponsibilityData,
+} from "./responsibility.ts";
+
 export type SellerReportMode = "seller" | "base" | "regional";
 export type SellerOutcome = "complete" | "partial" | "zero";
 export type SellerCategory = "J&T 重点保障" | "单商多服";
@@ -27,11 +34,36 @@ export interface SellerMetricRecord {
   rgm?: string;
   sellerCode: string;
   sellerName: string;
-  tier: SellerCategory;
+  tier: SellerCategory | null;
   origin: string;
   awaiting: number;
   processed: number;
   total: number;
+}
+
+/** Categories are metadata from the official seller list, never inferred from JMS rows. */
+export function sellerCategoryMatches(
+  rowCategory: SellerCategory | null | undefined,
+  selectedCategories: ReadonlySet<string>,
+  availableCategories: readonly SellerCategory[],
+): boolean {
+  const allAvailableSelected = availableCategories.every((category) => selectedCategories.has(category));
+  return allAvailableSelected || (rowCategory != null && selectedCategories.has(rowCategory));
+}
+
+/** Resolve organizational labels before aggregation so official SR assignments remain visible. */
+export function resolveSellerOrganization<T extends { region: string; base: string }>(
+  record: T,
+  responsibility: ResponsibilityData | null,
+): T & { region: string; rm: string; rgm: string } {
+  const region = registeredRegionForBase(responsibility, record.base, record.region);
+  const assignment = responsibilityForBase(responsibility, record.base);
+  return {
+    ...record,
+    region,
+    rm: assignment.rm,
+    rgm: officialRgmForRegion(region) ?? assignment.rgm,
+  };
 }
 
 export interface SellerReportRow {
@@ -137,7 +169,7 @@ export function buildSellerReportRows(
     if (mode === "seller" && current.sellerName === "Sem loja" && record.sellerName !== "Sem loja") {
       current.sellerName = record.sellerName;
     }
-    current.tiers.add(record.tier);
+    if (record.tier) current.tiers.add(record.tier);
     current.regions.add(record.region);
     current.bases.add(record.base);
     current.rms.add(record.rm?.trim() || "Sem RM");
@@ -154,7 +186,7 @@ export function buildSellerReportRows(
     .map((group) => ({
       key: group.key,
       period: group.period,
-      tierLabel: summarizeLabels(group.tiers),
+      tierLabel: summarizeLabels(group.tiers) || "—",
       region: summarizeLabels(group.regions),
       base: mode === "regional" ? `${group.bases.size} base(s)` : summarizeLabels(group.bases),
       rmLabel: summarizeLabels(group.rms),

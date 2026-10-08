@@ -345,6 +345,16 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.doesNotMatch(source, /id="seller-performance-upload"/);
   assert.match(source, /buildSellerReferenceData/);
   assert.match(source, /buildSellerPerformanceData/);
+  assert.match(source, /tier: referenceRecord\?\.tier \?\? null/);
+  assert.match(source, /if \(reference && !referenceRecord\)/);
+  assert.doesNotMatch(source, /if \(!referenceRecord\)\s*\{\s*unknownSellerRows\s*\+=\s*1;\s*return \[\];/);
+  assert.match(source, /sellerCategoryMatches\(record\.tier, sellerSelectedTiers, availableCategories\)/);
+  assert.match(source, /!sellerPerformanceLoaded \?/);
+  assert.doesNotMatch(source, /!sellerReferenceLoaded \|\| !sellerPerformanceLoaded/);
+  assert.match(source, /sellerReferenceLoaded \? \(/);
+  assert.match(source, /view === "sellers" \? "dashboard-main dashboard-main-sellers"/);
+  assert.match(styles, /\.dashboard-main-sellers table thead\s*\{[\s\S]*?display: table-header-group !important/);
+  assert.match(styles, /\.dashboard-main-sellers \.seller-regional-table-wrap,[\s\S]*?overflow: visible !important/);
   assert.match(source, /preferredSheetName: "SELLERS"/);
   assert.match(source, /重点保障商家类型/);
   assert.match(source, /Id Seller\/remetente/);
