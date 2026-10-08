@@ -21,6 +21,14 @@ import {
   previewSellerMonitoringSource,
   removeSellerMonitoringSource,
 } from "./seller-monitoring.ts";
+import {
+  importMovementSource,
+  MOVEMENT_REQUIRED_FIELDS,
+  normalizeMovementWorkbook,
+  parseMovementWorkbookFile,
+  previewMovementSource,
+  removeMovementSource,
+} from "./movement.ts";
 
 export type DataSourceMode = "MANUAL" | "AUTOMATIC";
 export type DashboardDataSourceStatus = "SOURCE_CONFIGURED" | "SOURCE_NOT_CONFIGURED";
@@ -127,7 +135,22 @@ export const DASHBOARD_DATA_SOURCES: Record<DashboardSourceId, DashboardDataSour
     remove: removeTaxaSource,
   },
   epop: pendingSource("epop", "Cobertura EPOP"),
-  movement: pendingSource("movement", "Sem movimentação"),
+  movement: {
+    id: "movement",
+    title: "Sem movimentação",
+    description: "Fonte snapshot do painel Sem movimentação.",
+    status: "SOURCE_CONFIGURED",
+    configured: true,
+    sourceModes: ["MANUAL"],
+    acceptedFormats: [".xlsx", ".xls"],
+    requiredFields: [...MOVEMENT_REQUIRED_FIELDS],
+    optionalFields: [],
+    parse: parseMovementWorkbookFile,
+    normalize: normalizeMovementWorkbook,
+    preview: previewMovementSource,
+    import: importMovementSource,
+    remove: removeMovementSource,
+  },
   sellerPerformance: {
     id: "sellerPerformance",
     title: "Monitoramento J&T",

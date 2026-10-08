@@ -9,7 +9,7 @@ from app.core.config import get_settings
 from app.main import app
 from app.services import data_sources, feishu_auth
 from app.services.local_workbooks import data_root, save_dashboard_source, save_workbook
-from app.services.data_sources import TAXA_REQUIRED_HEADERS
+from app.services.data_sources import MOVEMENT_REQUIRED_HEADERS, TAXA_REQUIRED_HEADERS
 
 
 @pytest.fixture
@@ -106,6 +106,42 @@ def parsed_responsibility_workbook() -> dict[str, object]:
         {"Regional": "PR", "UF": "PR", "Região RM": "PR-CWB", "Responsável Rm": "Diego", "Código da base": "PR1", "Nome da base": "CWB-PR", "Descrição": "Ativa"},
     ]
     return {"sheetName": "Ativas", "headers": headers, "rows": rows, "metadata": {"rowCount": len(rows)}, "warnings": []}
+
+
+def parsed_movement_workbook(bases: list[str] | None = None) -> dict[str, object]:
+    headers = list(MOVEMENT_REQUIRED_HEADERS)
+    rows = []
+    base_records = bases or ["BNU -SC", "CQA -RS", "CWB-PR"]
+    for index, base in enumerate(base_records):
+        row: dict[str, object] = {header: 0 for header in headers}
+        row.update({
+            "Regional responsável": "PR",
+            "Código da unidade responsável": f"CODE-{index + 1}",
+            "Nome da unidade responsável": base,
+            "Total de pedidos sem movimentação": (index + 1) * 10,
+            "Qtd pedidos em trânsito": (index + 1) * 100,
+            "Sem mov. há mais de 1 dia": (index + 1) * 4,
+            "Sem mov. há mais de 2 dias": (index + 1) * 3,
+            "Sem mov. há mais de 3 dias": (index + 1) * 2,
+            "Sem mov. há mais de 4 dias": index + 1,
+            "Horário da última operação": "2026-10-06 09:15",
+            "Taxa de sem mov 14+dias": 0.1,
+            "Taxa de sem mov 30+dias": 0.05,
+        })
+        rows.append(row)
+    return {
+        "sheetName": "sheet0",
+        "headers": headers,
+        "rows": rows,
+        "dateColumn": None,
+        "baseColumn": "Nome da unidade responsável",
+        "regionColumn": "Regional responsável",
+        "originColumn": None,
+        "statusColumn": None,
+        "statusColumns": [],
+        "metadata": {"sheetNames": ["sheet0"], "headerRow": 1, "rowCount": len(rows), "columnCount": len(headers), "columns": [], "date1904": False},
+        "warnings": [],
+    }
 
 
 def parsed_seller_monitoring_workbook() -> dict[str, object]:
@@ -290,6 +326,18 @@ def preview_taxa(client: TestClient, parsed: dict[str, object] | None = None):
             "fileSizeBytes": 2048,
             "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "parsed": parsed or parsed_taxa_workbook(),
+        },
+    )
+
+
+def preview_movement(client: TestClient, parsed: dict[str, object] | None = None, file_name: str = "sem-movimentacao.xlsx"):
+    return client.post(
+        "/api/data-sources/movement/preview",
+        json={
+            "fileName": file_name,
+            "fileSizeBytes": 2048,
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "parsed": parsed or parsed_movement_workbook(),
         },
     )
 
@@ -818,3 +866,122 @@ def test_unsafe_name_and_wrong_mime_are_rejected(authenticated_client: TestClien
     )
     assert wrong_mime.status_code == 422
     assert wrong_mime.json()["detail"] == "data_source_mime_invalid"
+
+
+def test_movement_snapshot_canonicalizes_before_scope_and_replaces_without_merging(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
+    save_workbook(data_root(get_settings().data_directory), "responsibilityList", "De_para DoomsDay.xlsx", parsed_responsibility_workbook())
+
+    pr_token, _ = create_user_session(
+        name="PR Admin",
+        platform_role="ADMIN",
+        organizational_scope="regional",
+        home_region="PR",
+        identity_suffix="movement-pr-admin",
+    )
+    pr_client = _session_client(pr_token)
+    preview_response = preview_movement(pr_client)
+    assert preview_response.status_code == 200
+    preview_body = preview_response.json()
+    assert preview_body["canImport"] is True
+    assert preview_body["period"] is None
+    assert preview_body["rowCount"] == 1
+    assert len(preview_body["fields"]) == len(MOVEMENT_REQUIRED_HEADERS)
+
+    published = pr_client.post(
+        "/api/data-sources/movement/import",
+        json={"previewId": preview_body["previewId"]},
+    )
+    assert published.status_code == 200
+    # The publisher only receives the rows allowed by their own PR scope.
+    assert published.json()["rowCount"] == 1
+    assert [row["Nome da unidade responsável"] for row in published.json()["parsed"]["rows"]] == ["CWB-PR"]
+
+    owner_key = data_sources.create_published_source_key("movement", get_settings().feishu_session_secret)
+    canonical = data_sources.get_dashboard_source("movement", owner_key)
+    assert canonical is not None
+    assert canonical["rowCount"] == 3
+    assert canonical["period"] is None
+    assert [row["Regional responsável"] for row in canonical["parsed"]["rows"]] == ["SR", "SR", "PR"]
+
+    pr_read = pr_client.get("/api/data-sources/movement").json()["source"]
+    assert [row["Nome da unidade responsável"] for row in pr_read["parsed"]["rows"]] == ["CWB-PR"]
+
+    sr_token, _ = create_user_session(
+        name="SR User",
+        organizational_scope="regional",
+        home_region="SR",
+        identity_suffix="movement-sr-user",
+    )
+    sr_source = _session_client(sr_token).get("/api/data-sources/movement").json()["source"]
+    assert {row["Nome da unidade responsável"] for row in sr_source["parsed"]["rows"]} == {"BNU -SC", "CQA -RS"}
+    assert {row["Regional responsável"] for row in sr_source["parsed"]["rows"]} == {"SR"}
+
+    matrix_token, _ = create_user_session(
+        name="Matrix User",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="movement-matrix-user",
+    )
+    matrix_client = _session_client(matrix_token)
+    matrix_source = matrix_client.get("/api/data-sources/movement").json()["source"]
+    assert matrix_source["rowCount"] == 3
+    assert {row["Regional responsável"] for row in matrix_source["parsed"]["rows"]} == {"PR", "SR"}
+
+    # A replacement is a new current snapshot, not a historical row merge.
+    matrix_admin_token, _ = create_user_session(
+        name="Matrix Admin",
+        platform_role="ADMIN",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="movement-matrix-admin",
+    )
+    matrix_admin = _session_client(matrix_admin_token)
+    replacement_preview = preview_movement(matrix_admin, parsed_movement_workbook(["BNU -SC"]), "sem-movimentacao-seguinte.xlsx").json()
+    replacement = matrix_admin.post("/api/data-sources/movement/import", json={"previewId": replacement_preview["previewId"]})
+    assert replacement.status_code == 200
+    assert replacement.json()["rowCount"] == 1
+    current = data_sources.get_dashboard_source("movement", owner_key)
+    assert current is not None
+    assert current["rowCount"] == 1
+    assert [row["Nome da unidade responsável"] for row in current["parsed"]["rows"]] == ["BNU -SC"]
+    versions = Path(get_settings().data_directory) / "sources" / "movement" / owner_key / "versions"
+    assert len(list(versions.iterdir())) == 2
+
+
+def test_movement_data_source_requires_admin_and_does_not_infer_without_official_mapping(
+    authenticated_client: TestClient,
+    create_user_session,
+) -> None:
+    user_token, _ = create_user_session(
+        name="Matrix User",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="movement-non-admin",
+    )
+    user_client = _session_client(user_token)
+    denied = preview_movement(user_client)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "admin_required"
+
+    parsed = parsed_movement_workbook(["UNMAPPED BASE"])
+    parsed["rows"][0]["Regional responsável"] = "PR"
+    matrix_admin_token, _ = create_user_session(
+        name="Matrix Admin",
+        platform_role="ADMIN",
+        organizational_scope="matrix",
+        home_region=None,
+        identity_suffix="movement-unmapped-admin",
+    )
+    matrix_admin = _session_client(matrix_admin_token)
+    allowed = preview_movement(matrix_admin, parsed)
+    assert allowed.status_code == 200
+    assert allowed.json()["canImport"] is True
+    assert allowed.json()["rowCount"] == 1
+    # Without an official base association, the source's explicit raw region is
+    # retained; no PR-to-SR inference is performed by the backend.
+    imported = matrix_admin.post("/api/data-sources/movement/import", json={"previewId": allowed.json()["previewId"]})
+    assert imported.status_code == 200
+    assert imported.json()["parsed"]["rows"][0]["Regional responsável"] == "PR"

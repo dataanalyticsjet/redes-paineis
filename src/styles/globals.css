@@ -7518,3 +7518,66 @@ tbody tr:hover td {
   .monitoring-source-fields { grid-template-columns: minmax(0, 1fr); }
   .monitoring-source-actions button { flex: 1 1 130px; }
 }
+
+@media print {
+  .dashboard-main-movement .dashboard-action-band,
+  .dashboard-main-movement .table-search,
+  .dashboard-main-movement .pagination {
+    display: none !important;
+  }
+
+  .dashboard-main-movement .movement-summary-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .dashboard-main-movement .movement-summary-card {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .dashboard-main-movement .movement-summary-card:nth-child(2),
+  .dashboard-main-movement .table-card {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+
+  .dashboard-main-movement .movement-summary-table-wrap,
+  .dashboard-main-movement .movement-table-scroll {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .dashboard-main-movement .movement-summary-table,
+  .dashboard-main-movement .movement-table-scroll table {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    table-layout: fixed !important;
+  }
+
+  .dashboard-main-movement .movement-summary-table thead,
+  .dashboard-main-movement .movement-table-scroll thead {
+    display: table-header-group !important;
+    position: static !important;
+  }
+
+  .dashboard-main-movement .movement-summary-table th,
+  .dashboard-main-movement .movement-summary-table td,
+  .dashboard-main-movement .movement-table-scroll th,
+  .dashboard-main-movement .movement-table-scroll td {
+    min-width: 0 !important;
+    padding: 2px 1.5px !important;
+    overflow-wrap: anywhere !important;
+    white-space: normal !important;
+    word-break: break-word;
+    font-size: 4.2px !important;
+  }
+
+  .dashboard-main-movement .movement-summary-table tr,
+  .dashboard-main-movement .movement-table-scroll tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+}

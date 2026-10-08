@@ -121,6 +121,28 @@ SELLER_MONITORING_REQUIRED_HEADERS = (
 )
 SELLER_MONITORING_METRIC_HEADERS = SELLER_MONITORING_REQUIRED_HEADERS[8:]
 
+MOVEMENT_REQUIRED_HEADERS = (
+    "Regional responsável",
+    "Código da unidade responsável",
+    "Nome da unidade responsável",
+    "Total de pedidos sem movimentação",
+    "Qtd pedidos em trânsito",
+    "Sem mov. há mais de 1 dia",
+    "Sem mov. há mais de 2 dias",
+    "Sem mov. há mais de 3 dias",
+    "Sem mov. há mais de 4 dias",
+    "Sem mov. há mais de 5 dias",
+    "Sem mov. há mais de 6 dias",
+    "Sem mov. há mais de 7 dias",
+    "Sem mov. há mais de 10 dias",
+    "Sem mov. há mais de 14 dias",
+    "Sem mov. há mais de 30 dias",
+    "Horário da última operação",
+    "Taxa de sem mov 14+dias",
+    "Taxa de sem mov 30+dias",
+)
+MOVEMENT_NUMERIC_HEADERS = (*MOVEMENT_REQUIRED_HEADERS[3:15], *MOVEMENT_REQUIRED_HEADERS[16:])
+
 
 def reset_temporary_data_sources() -> None:
     """Clear short-lived previews; imported datasets live in ignored local files."""
@@ -381,9 +403,77 @@ def _seller_monitoring_adapter(parsed: dict[str, Any], identity: dict[str, str |
     return scoped, fields, sorted(set(missing)), period, not missing
 
 
+def _movement_numeric_cell(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str) and value.strip():
+        text = value.strip().replace("%", "").replace(" ", "")
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        try:
+            float(text)
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _movement_adapter(parsed: dict[str, Any], identity: dict[str, str | None]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, str] | None, bool]:
+    header_by_normalized = {_normalized_header(header): header for header in parsed["headers"]}
+    fields = [
+        {
+            "name": expected,
+            "classification": "required",
+            "present": _normalized_header(expected) in header_by_normalized,
+        }
+        for expected in MOVEMENT_REQUIRED_HEADERS
+    ]
+    missing = [field["name"] for field in fields if not field["present"]]
+    region_column = header_by_normalized.get(_normalized_header(MOVEMENT_REQUIRED_HEADERS[0]))
+    base_column = header_by_normalized.get(_normalized_header(MOVEMENT_REQUIRED_HEADERS[2]))
+    parsed.update({
+        # "Horário da última operação" is descriptive event data, not the
+        # snapshot date; this source replaces the current snapshot on publish.
+        "dateColumn": None,
+        "baseColumn": base_column,
+        "regionColumn": region_column,
+        "originColumn": None,
+        "statusColumn": None,
+        "statusColumns": [],
+    })
+    if not parsed["rows"]:
+        missing.append("Dados da planilha")
+    for expected in MOVEMENT_NUMERIC_HEADERS:
+        column = header_by_normalized.get(_normalized_header(expected))
+        if column and not any(_movement_numeric_cell(row.get(column)) for row in parsed["rows"]):
+            missing.append(f"Valores numéricos: {expected}")
+
+    recognized = {
+        header_by_normalized[_normalized_header(expected)]
+        for expected in MOVEMENT_REQUIRED_HEADERS
+        if _normalized_header(expected) in header_by_normalized
+    }
+    fields.extend(
+        {"name": header, "classification": "unrecognized", "present": True}
+        for header in parsed["headers"]
+        if header not in recognized
+    )
+    # Do not expose an unscoped count for a malformed file to a regional/base
+    # viewer. The preview stays invalid and contains no rows until the required
+    # scoping dimensions are present.
+    if not region_column or not base_column:
+        scoped = {**parsed, "rows": []}
+    else:
+        scoped = _scope_parsed(parsed, identity)
+    return scoped, fields, sorted(set(missing)), None, not missing
+
+
 _DATA_SOURCE_ADAPTERS = {
     "monitoring": _monitoring_adapter,
     "taxa": _taxa_adapter,
+    "movement": _movement_adapter,
     "sellerPerformance": _seller_monitoring_adapter,
 }
 
@@ -488,7 +578,7 @@ def create_dashboard_preview(
         file_size_bytes=request.file_size_bytes,
         content_type=content_type,
         period=period,
-        row_count=len(scoped["rows"]),
+        row_count=len(parsed["rows"]) if dashboard_id == "movement" else len(scoped["rows"]),
         expires_at=now + PREVIEW_TTL_SECONDS,
         source_bytes=source_bytes,
     )
@@ -543,6 +633,10 @@ def import_dashboard_preview(
         try:
             responsibility = _official_responsibility(data_root(get_settings().data_directory))
             parsed_to_save = canonicalize_parsed_regions(parsed_to_save, responsibility)
+            if dashboard_id == "movement":
+                # Movement uploads are current snapshots. Persist the complete,
+                # canonicalized file; each viewer's response is scoped later.
+                rows_to_save = len(parsed_to_save.get("rows") or [])
             if dashboard_id == "sellerPerformance":
                 current_source = read_saved_dashboard_source(
                     data_root(get_settings().data_directory), dashboard_id, owner_key

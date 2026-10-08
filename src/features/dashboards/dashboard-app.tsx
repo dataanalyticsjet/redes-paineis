@@ -80,12 +80,24 @@ import {
 } from "../../lib/i18n";
 import type { ParsedWorkbook, WorkbookRow } from "../../lib/workbook";
 import { getMonitoringSource } from "../../lib/data-sources/monitoring";
+import { getMovementSource } from "../../lib/data-sources/movement";
 import { getTaxaSource } from "../../lib/data-sources/taxa";
 import { initialRegionSelection } from "../../lib/initial-region-selection";
 import { DASHBOARD_DATA_SOURCES } from "../../lib/data-sources/catalog";
 import type { DashboardSourceId, ManualDataSource } from "../../lib/data-sources/api";
 import { buildDamageData, type DamageData } from "../../lib/damage";
-import { MOVEMENT_SUMMARY_METRICS, selectMovementSummaryMetric } from "../../lib/movement-summary";
+import {
+  aggregateMovementByRegion,
+  aggregateMovementByRm,
+  deriveMovementFilterOptions,
+  formatMovementRate,
+  initialMovementFilterSelections,
+  MOVEMENT_SUMMARY_METRICS,
+  movementFrom2DaysTotal,
+  movementSelectionsAfterChange,
+  movementWeightedRate,
+  selectMovementSummaryMetric,
+} from "../../lib/movement-summary";
 import {
   formatTaxaRate as formatNullableTaxaRate,
   legacyTaxaAverageCollectionHours,
@@ -119,7 +131,6 @@ import {
   responsibilityOptions,
   UNASSIGNED_RGM,
   UNASSIGNED_RM,
-  UNASSIGNED_RM_AREA,
   type ResponsibilityData,
 } from "../../lib/responsibility";
 import {
@@ -295,7 +306,7 @@ const FEISHU_AUTH_ERROR_MESSAGES: Record<string, string> = {
 };
 type BipagemProblemType = "collection" | "receipt";
 type SellerTier = SellerCategory;
-type UploadKind = "monitoring" | "taxa" | "epop" | "movement" | "sellerList" | "sellerSpecialList" | "bipagem" | "damage";
+type UploadKind = "monitoring" | "taxa" | "epop" | "sellerList" | "sellerSpecialList" | "bipagem" | "damage";
 
 interface PendingUpload {
   kind: UploadKind;
@@ -483,6 +494,9 @@ interface MovementColumns {
 interface MovementRecord {
   key: string;
   region: string;
+  rmArea: string;
+  rm: string;
+  rgm: string;
   code: string;
   base: string;
   totalStopped: number;
@@ -498,8 +512,8 @@ interface MovementRecord {
   over14Days: number;
   over30Days: number;
   lastOperation: string;
-  rate14Days: number;
-  rate30Days: number;
+  rate14Days: number | null;
+  rate30Days: number | null;
   date: string;
   aging: string;
   status: string;
@@ -512,6 +526,9 @@ interface MovementLoadedData {
   format: "summary" | "list";
   parsed: ParsedWorkbook;
   fileName: string;
+  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD";
+  fileSizeBytes?: number;
+  contentType?: string;
   columns: MovementColumns;
   records: MovementRecord[];
   bases: string[];
@@ -526,20 +543,6 @@ interface MovementLoadedData {
   blankBaseRows: number;
   blankRegionRows: number;
   updatedAt?: string;
-}
-
-function movementFrom2DaysTotal(record: MovementRecord) {
-  return (
-    record.over2Days +
-    record.over3Days +
-    record.over4Days +
-    record.over5Days +
-    record.over6Days +
-    record.over7Days +
-    record.over10Days +
-    record.over14Days +
-    record.over30Days
-  );
 }
 
 interface SellerReferenceRecord {
@@ -1090,7 +1093,13 @@ function movementValue(row: WorkbookRow, column: string): number {
   return parseNumeric(row[column]);
 }
 
-function formatMovementCell(value: unknown): string {
+function formatMovementCell(value: unknown, percentageColumn = false): string {
+  if (percentageColumn) {
+    return formatMovementRate(
+      typeof value === "number" ? value : null,
+      dashboardLocale(activeDashboardLanguage()),
+    );
+  }
   if (typeof value === "number") {
     if (value > 20_000 && value < 80_000) return formatExcelDateTime(value);
     if (Math.abs(value) > 0 && Math.abs(value) < 1) return formatRate(value);
@@ -1443,7 +1452,15 @@ function buildEpopLoadedData(parsed: ParsedWorkbook, fileName: string, updatedAt
   return { parsed, fileName, updatedAt, records, dates, regions: [...new Set(records.map((record) => record.region))].sort(), bases: [...new Set(records.map((record) => record.base))].sort() };
 }
 
-function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updatedAt?: string): MovementLoadedData {
+function buildMovementLoadedData(
+  parsed: ParsedWorkbook,
+  fileName: string,
+  updatedAt?: string,
+  responsibility: ResponsibilityData | null = null,
+  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD",
+  fileSizeBytes?: number,
+  contentType?: string,
+): MovementLoadedData {
   const headers = parsed.headers;
   const listAging = findOptionalHeader(headers, ["Aging"]);
   const listStatus = findOptionalHeader(headers, ["Tipo da última operação", "Tipo da ultima operacao", "Status"]);
@@ -1477,17 +1494,48 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
     quantity: listQuantity,
   };
 
-  const records = parsed.rows.map((row, index) => {
+  const canonicalRows = parsed.rows.map((sourceRow) => {
+    const base = String(sourceRow[columns.base] ?? "").trim() || "Sem base";
+    const rawRegion = String(sourceRow[columns.region] ?? "").trim() || "Sem regional";
+    const region = registeredRegionForBase(responsibility, base, rawRegion);
+    return { ...sourceRow, [columns.region]: region };
+  });
+  const canonicalParsed: ParsedWorkbook = {
+    ...parsed,
+    rows: canonicalRows,
+    regionColumn: columns.region,
+    baseColumn: columns.base,
+    dateColumn: isListFormat ? listDate : undefined,
+    metadata: { ...parsed.metadata, rowCount: canonicalRows.length, dateRange: undefined },
+  };
+
+  const records = canonicalParsed.rows.map((row, index) => {
     const region = String(row[columns.region] ?? "").trim() || "Sem regional";
     const base = String(row[columns.base] ?? "").trim() || "Sem base";
+    const assignment = responsibilityForBase(responsibility, base);
+    const rmArea = rmAreaForBase(responsibility, base);
+    const rm = assignment.rm;
+    const rgm = officialRgmForRegion(region) ?? assignment.rgm;
     const code = String(row[columns.code] ?? "").trim() || "—";
     const quantity = isListFormat ? Math.max(0, movementValue(row, listQuantity) || 1) : movementValue(row, columns.totalStopped);
     const aging = String(row[columns.aging] ?? "").trim() || "Todas as faixas";
     const agingDays = Number(aging.match(/(\d+)\s*(?:day|dia)/i)?.[1] ?? 0);
     const bucket = (day: number) => isListFormat && agingDays === day ? quantity : 0;
+    const over14Days = isListFormat ? bucket(14) : movementValue(row, columns.over14Days);
+    const over30Days = isListFormat ? (agingDays >= 30 ? quantity : 0) : movementValue(row, columns.over30Days);
+    const rate14Days = isListFormat ? null : movementWeightedRate(over14Days, quantity);
+    const rate30Days = isListFormat ? null : movementWeightedRate(over30Days, quantity);
+    const values = Object.fromEntries(headers.map((header) => [header, row[header]]));
+    if (!isListFormat) {
+      values[columns.rate14Days] = rate14Days;
+      values[columns.rate30Days] = rate30Days;
+    }
     return {
       key: `${region}::${base}::${code}::${index}`,
       region,
+      rmArea,
+      rm,
+      rgm,
       code,
       base,
       totalStopped: quantity,
@@ -1500,17 +1548,17 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
       over6Days: isListFormat ? bucket(6) : movementValue(row, columns.over6Days),
       over7Days: isListFormat ? bucket(7) : movementValue(row, columns.over7Days),
       over10Days: isListFormat ? bucket(10) : movementValue(row, columns.over10Days),
-      over14Days: isListFormat ? bucket(14) : movementValue(row, columns.over14Days),
-      over30Days: isListFormat ? (agingDays >= 30 ? quantity : 0) : movementValue(row, columns.over30Days),
+      over14Days,
+      over30Days,
       lastOperation: formatMovementCell(row[columns.lastOperation]),
-      rate14Days: isListFormat ? 0 : movementValue(row, columns.rate14Days),
-      rate30Days: isListFormat ? 0 : movementValue(row, columns.rate30Days),
+      rate14Days,
+      rate30Days,
       date: toDashboardISODate(row[columns.date]),
       aging,
       status: String(row[columns.status] ?? row[columns.lastOperation] ?? "").trim() || "Sem status",
       origin: String(row[columns.origin] ?? "").trim() || "Sem origem",
       quantity,
-      values: Object.fromEntries(headers.map((header) => [header, row[header]])),
+      values,
     } satisfies MovementRecord;
   });
 
@@ -1528,8 +1576,11 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
   const origins = Array.from(new Set(records.map((record) => record.origin))).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
   return {
-    parsed,
+    parsed: canonicalParsed,
     fileName,
+    sourceType,
+    fileSizeBytes,
+    contentType,
     columns,
     records,
     bases,
@@ -1542,8 +1593,8 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
     initialEnd: dates[dates.length - 1] ?? "",
     displayColumns: headers,
     format: isListFormat ? "list" : "summary",
-    blankBaseRows: parsed.rows.filter((row) => !String(row[columns.base] ?? "").trim()).length,
-    blankRegionRows: parsed.rows.filter((row) => !String(row[columns.region] ?? "").trim()).length,
+    blankBaseRows: canonicalParsed.rows.filter((row) => !String(row[columns.base] ?? "").trim()).length,
+    blankRegionRows: canonicalParsed.rows.filter((row) => !String(row[columns.region] ?? "").trim()).length,
     updatedAt,
   };
 }
@@ -1551,12 +1602,6 @@ function buildMovementLoadedData(parsed: ParsedWorkbook, fileName: string, updat
 function taxaBasesForRegions(data: TaxaLoadedData, regions: Set<string>): string[] {
   return Array.from(
     new Set(data.records.filter((record) => regions.has(record.region)).map((record) => record.base)),
-  ).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
-}
-
-function movementBasesForRegions(data: MovementLoadedData, regions: Set<string>, responsibility: ResponsibilityData | null = null): string[] {
-  return Array.from(
-    new Set(data.records.filter((record) => regions.has(registeredRegionForBase(responsibility, record.base, record.region))).map((record) => record.base)),
   ).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
 }
 
@@ -1993,10 +2038,14 @@ interface EmptyDashboardPanelProps {
   onDrop: (file: File) => void;
   onAddSource?: () => void;
   inputId?: string;
+  eyebrow?: string;
+  title?: string;
+  description?: string;
+  sourceLabel?: string;
   t: DashboardTranslator;
 }
 
-function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSource, t, inputId = "monitoring-upload" }: EmptyDashboardPanelProps) {
+function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSource, t, inputId = "monitoring-upload", eyebrow, title, description, sourceLabel }: EmptyDashboardPanelProps) {
   const [dragging, setDragging] = useState(false);
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -2013,9 +2062,9 @@ function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSou
     <>
       <section className="dashboard-intro">
         <div>
-          <div className="eyebrow"><Activity size={15} /> {t("Visão consolidada")}</div>
-          <h1>{t("DASH BOARD - MONITORAMENTO DE COLETA")}</h1>
-          <p>{t("O dashboard abre a última planilha publicada. Carregue um Excel para atualizar todos os acessos.")}</p>
+          <div className="eyebrow"><Activity size={15} /> {t(eyebrow ?? "Visão consolidada")}</div>
+          <h1>{t(title ?? "DASH BOARD - MONITORAMENTO DE COLETA")}</h1>
+          <p>{t(description ?? "O dashboard abre a última planilha publicada. Carregue um Excel para atualizar todos os acessos.")}</p>
         </div>
         <div className="dataset-meta" aria-label={t("Resumo aguardando arquivo")}>
           <span><Layers3 size={16} /> {t("Aguardando dados publicados")}</span>
@@ -2048,7 +2097,7 @@ function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSou
           <FileSpreadsheet size={26} />
         </div>
         <div>
-          <span className="card-eyebrow">{t("ARQUIVO DE MONITORAMENTO")}</span>
+          <span className="card-eyebrow">{t(sourceLabel ?? "ARQUIVO DE MONITORAMENTO")}</span>
         <h2>{t(loading ? "Buscando última atualização..." : onAddSource ? "Nenhuma fonte de dados carregada." : "Publique o arquivo Excel")}</h2>
         <p>{t(onAddSource ? "Adicione uma planilha para alimentar este painel. Os dados serão pré-visualizados antes da confirmação." : "Arraste a planilha para cá ou selecione o arquivo baixado. Depois de publicar, todos veem a mesma atualização pelo link.")}</p>
       </div>
@@ -2318,7 +2367,9 @@ export function DashboardApp() {
   const [movementLoaded, setMovementLoaded] = useState<MovementLoadedData | null>(null);
   const [movementSelectedBases, setMovementSelectedBases] = useState<Set<string>>(new Set());
   const [movementSelectedRegions, setMovementSelectedRegions] = useState<Set<string>>(new Set());
-  const [movementSelectedRmAreas, setMovementSelectedRmAreas] = useState<Set<string>>(new Set([UNASSIGNED_RM_AREA]));
+  const [movementSelectedRms, setMovementSelectedRms] = useState<Set<string>>(new Set());
+  const [movementSelectedRmAreas, setMovementSelectedRmAreas] = useState<Set<string>>(new Set());
+  const [movementSelectedRgms, setMovementSelectedRgms] = useState<Set<string>>(new Set());
   const [movementSelectedAgings, setMovementSelectedAgings] = useState<Set<string>>(new Set());
   const [movementSelectedStatuses, setMovementSelectedStatuses] = useState<Set<string>>(new Set());
   const [movementSelectedOrigins, setMovementSelectedOrigins] = useState<Set<string>>(new Set());
@@ -2551,10 +2602,13 @@ export function DashboardApp() {
   const resetMovementFilters = useCallback((data = movementLoaded) => {
     if (!data) return;
     setMovementSummaryMetric("totalStopped");
-    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibilityLoaded, record.base, record.region)), viewerIdentity);
-    setMovementSelectedRegions(regions);
-    setMovementSelectedBases(new Set(movementBasesForRegions(data, regions, responsibilityLoaded)));
-    setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, data.bases).rmAreas));
+    const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
+    const selections = initialMovementFilterSelections(data.records, regions);
+    setMovementSelectedRegions(selections.regions);
+    setMovementSelectedRms(selections.rms);
+    setMovementSelectedRmAreas(selections.rmAreas);
+    setMovementSelectedBases(selections.bases);
+    setMovementSelectedRgms(selections.rgms);
     setMovementSelectedAgings(new Set(data.agings));
     setMovementSelectedStatuses(new Set(data.statuses));
     setMovementSelectedOrigins(new Set(data.origins));
@@ -2562,16 +2616,18 @@ export function DashboardApp() {
     setMovementDateEnd(data.initialEnd);
     setMovementTableQuery("");
     setMovementPage(1);
-    resetResponsibilityFilters();
-  }, [movementLoaded, resetResponsibilityFilters, responsibilityLoaded, viewerIdentity]);
+  }, [movementLoaded, viewerIdentity]);
 
-  const applyMovementLoadedData = useCallback((data: MovementLoadedData, responsibility: ResponsibilityData | null = null) => {
+  const applyMovementLoadedData = useCallback((data: MovementLoadedData) => {
     setMovementLoaded(data);
     setMovementSummaryMetric("totalStopped");
-    const regions = initialRegionSelection(data.records.map((record) => registeredRegionForBase(responsibility, record.base, record.region)), viewerIdentity);
-    setMovementSelectedRegions(regions);
-    setMovementSelectedBases(new Set(movementBasesForRegions(data, regions, responsibility)));
-    setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibility, data.bases).rmAreas));
+    const regions = initialRegionSelection(data.records.map((record) => record.region), viewerIdentity);
+    const selections = initialMovementFilterSelections(data.records, regions);
+    setMovementSelectedRegions(selections.regions);
+    setMovementSelectedRms(selections.rms);
+    setMovementSelectedRmAreas(selections.rmAreas);
+    setMovementSelectedBases(selections.bases);
+    setMovementSelectedRgms(selections.rgms);
     setMovementSelectedAgings(new Set(data.agings));
     setMovementSelectedStatuses(new Set(data.statuses));
     setMovementSelectedOrigins(new Set(data.origins));
@@ -2728,7 +2784,15 @@ export function DashboardApp() {
             // Keep the existing scoped demo fixture when no local taxa source is stored.
           }
           const epop = buildEpopLoadedData(scopeDemoWorkbook(fixtures.epop, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
-          const movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          let movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt, responsibility);
+          try {
+            const localSource = (await getMovementSource()).source;
+            if (active && localSource) {
+              movement = buildMovementLoadedData(localSource.parsed, localSource.fileName, localSource.importedAt, responsibility, "MANUAL_UPLOAD", localSource.fileSizeBytes, localSource.contentType);
+            }
+          } catch {
+            // Keep the scoped demo fixture when no local movement snapshot is published.
+          }
           const sellerPerformanceParsed = scopeDemoWorkbook(fixtures.sellerPerformance, viewerIdentity);
           const sellerListParsed = scopeDemoSellerReference(fixtures.sellerList, sellerPerformanceParsed, viewerIdentity, false);
           const specialSellerParsed = scopeDemoSellerReference(fixtures.sellerSpecialList, sellerPerformanceParsed, viewerIdentity, true);
@@ -2759,7 +2823,7 @@ export function DashboardApp() {
           setEpopSelectedBases(new Set(epop.bases));
           setEpopDateStart(epop.dates[0] ?? "");
           setEpopDateEnd(epop.dates.at(-1) ?? "");
-          applyMovementLoadedData(movement, responsibility);
+          applyMovementLoadedData(movement);
           applySellerPerformanceLoadedData(sellerPerformance, responsibility);
           applyBipagemLoadedData(bipagem, responsibility);
           applyDamageLoadedData(damage, responsibility);
@@ -2874,7 +2938,6 @@ export function DashboardApp() {
             ));
           }
         }
-        const movementResponse = await fetchOptionalWorkbook("movement");
         const epopResponse = await fetchOptionalWorkbook("epop");
         {
           const epopWorkbook = await readTaxaHistory(epopResponse, "epop");
@@ -2885,18 +2948,22 @@ export function DashboardApp() {
             setEpopDateStart(epop.dates[0] ?? ""); setEpopDateEnd(epop.dates[epop.dates.length - 1] ?? "");
           }
         }
-        {
-          const movementWorkbook = await readOptionalWorkbook(movementResponse);
+        try {
+          const movementSource = (await getMovementSource()).source;
           if (!active) return;
-          if (movementWorkbook) {
-            applyMovementLoadedData(
-              buildMovementLoadedData(
-                movementWorkbook.parsed,
-                movementWorkbook.fileName,
-                movementWorkbook.updatedAt,
-              ), responsibility,
-            );
+          if (movementSource) {
+            applyMovementLoadedData(buildMovementLoadedData(
+              movementSource.parsed,
+              movementSource.fileName,
+              movementSource.importedAt,
+              responsibility,
+              "MANUAL_UPLOAD",
+              movementSource.fileSizeBytes,
+              movementSource.contentType,
+            ));
           }
+        } catch {
+          // The dashboard remains empty when no shared movement snapshot exists.
         }
         const sellerSpecialListResponse = await fetchOptionalWorkbook("sellerSpecialList");
         let sellerReference: SellerReferenceData | null = null;
@@ -3153,46 +3220,6 @@ export function DashboardApp() {
     finally { setEpopLoading(false); }
   }, [epopLoaded, viewerIdentity]);
 
-  const loadMovementFile = useCallback(async (file: File) => {
-    setError(null);
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    if (extension !== "xlsx" && extension !== "xls") {
-      setError("Selecione um arquivo Excel no formato .xlsx ou .xls.");
-      return;
-    }
-    if (file.size > MAX_FILE_BYTES) {
-      setError("O arquivo ultrapassa o limite de 50 MB.");
-      return;
-    }
-
-    setMovementLoading(true);
-    try {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 30));
-      const [{ parseWorkbook }] = await Promise.all([import("../../lib/workbook")]);
-      const parsed = parseWorkbook(await file.arrayBuffer());
-      const response = await postWorkbook(
-        { kind: "movement", fileName: file.name, parsed },
-        [file],
-      );
-      const payload = (await response.json()) as { workbook?: SavedWorkbook; error?: string };
-      if (!response.ok || !payload.workbook) {
-        throw new Error(payload.error ?? "Não foi possível publicar a movimentação.");
-      }
-
-      applyMovementLoadedData(
-        buildMovementLoadedData(payload.workbook.parsed, payload.workbook.fileName, payload.workbook.updatedAt),
-        responsibilityLoaded,
-      );
-      setView("movimentacao");
-    } catch (cause) {
-      if (recoverFromStaleModuleImport(cause)) return;
-      const message = cause instanceof Error ? cause.message : "Não foi possível ler esta planilha.";
-      setError(message.replace(/^Não foi possível ler o arquivo Excel\s*/i, "Não foi possível ler a planilha "));
-    } finally {
-      setMovementLoading(false);
-    }
-  }, [applyMovementLoadedData, responsibilityLoaded]);
-
   const loadSellerListFile = useCallback(async (file: File) => {
     setError(null);
     const extension = file.name.split(".").pop()?.toLowerCase();
@@ -3368,7 +3395,6 @@ export function DashboardApp() {
     if (upload.kind === "monitoring") return loadFile(file);
     if (upload.kind === "taxa") return loadTaxaFiles(upload.files);
     if (upload.kind === "epop") return loadEpopFile(file);
-    if (upload.kind === "movement") return loadMovementFile(file);
     if (upload.kind === "sellerList") return loadSellerListFile(file);
     if (upload.kind === "sellerSpecialList") return loadSpecialSellerFile(file);
     if (upload.kind === "bipagem") return loadBipagemFile(file);
@@ -3400,12 +3426,6 @@ export function DashboardApp() {
   const handleEpopFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) queueUpload({ kind: "epop", files: [file] });
-    event.target.value = "";
-  };
-
-  const handleMovementFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) queueUpload({ kind: "movement", files: [file] });
     event.target.value = "";
   };
 
@@ -3669,11 +3689,37 @@ export function DashboardApp() {
     if (!taxaLoaded) return [];
     return [...new Set(taxaLoaded.records.map((record) => record.region))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
   }, [taxaLoaded]);
-  const movementRegionOptions = useMemo(() => {
-    if (!movementLoaded) return [];
-    return [...new Set(movementLoaded.records.map((record) =>
-      registeredRegionForBase(responsibilityLoaded, record.base, record.region)))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
-  }, [movementLoaded, responsibilityLoaded]);
+  const movementFilterOptions = useMemo(() => deriveMovementFilterOptions(
+    movementLoaded?.records ?? [],
+    {
+      regions: movementSelectedRegions,
+      rms: movementSelectedRms,
+      rmAreas: movementSelectedRmAreas,
+      bases: movementSelectedBases,
+      rgms: movementSelectedRgms,
+    },
+  ), [movementLoaded, movementSelectedBases, movementSelectedRegions, movementSelectedRmAreas, movementSelectedRgms, movementSelectedRms]);
+  const movementRegionOptions = movementFilterOptions.regions;
+  const movementRmOptions = movementFilterOptions.rms;
+  const movementRmAreaOptions = movementFilterOptions.rmAreas;
+  const movementBaseOptions = movementFilterOptions.bases;
+  const movementRgmOptions = movementFilterOptions.rgms;
+  const applyMovementFilterSelection = useCallback((kind: "regions" | "rms" | "rmAreas" | "bases" | "rgms", value: Set<string>) => {
+    if (!movementLoaded) return;
+    const next = movementSelectionsAfterChange(movementLoaded.records, {
+      regions: movementSelectedRegions,
+      rms: movementSelectedRms,
+      rmAreas: movementSelectedRmAreas,
+      bases: movementSelectedBases,
+      rgms: movementSelectedRgms,
+    }, kind, value);
+    setMovementSelectedRegions(next.regions);
+    setMovementSelectedRms(next.rms);
+    setMovementSelectedRmAreas(next.rmAreas);
+    setMovementSelectedBases(next.bases);
+    setMovementSelectedRgms(next.rgms);
+    setMovementPage(1);
+  }, [movementLoaded, movementSelectedBases, movementSelectedRegions, movementSelectedRmAreas, movementSelectedRgms, movementSelectedRms]);
   const sellerRegionOptions = useMemo(() => {
     if (!sellerPerformanceLoaded) return [];
     return [...new Set(sellerPerformanceLoaded.records.map((record) =>
@@ -4574,35 +4620,17 @@ export function DashboardApp() {
   const downloadTaxaRmPocExcel = downloadTaxaManagementWorkbook;
   const downloadTaxaTableExcel = downloadTaxaManagementWorkbook;
 
-  const movementBaseOptions = useMemo(() => {
-    if (!movementLoaded) return [];
-    return movementBasesForRegions(movementLoaded, movementSelectedRegions, responsibilityLoaded).filter((base) =>
-      matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms));
-  }, [movementLoaded, movementSelectedRegions, responsibilityLoaded, selectedRgms, selectedRms]);
-
-  const movementRmAreaOptions = useMemo(
-    () => responsibilityOptions(responsibilityLoaded, movementBaseOptions).rmAreas,
-    [movementBaseOptions, responsibilityLoaded],
-  );
-
   const movementFilteredRecords = useMemo(() => {
     if (!movementLoaded) return [];
-    return movementLoaded.records.map((record) => movementLoaded.format === "summary" ? selectMovementSummaryMetric(record, movementSummaryMetric) : record).map((record) => ({
-      ...record,
-      region: registeredRegionForBase(responsibilityLoaded, record.base, record.region),
-    })).filter(
+    return movementFilterOptions.filteredRows.map((record) => movementLoaded.format === "summary" ? selectMovementSummaryMetric(record, movementSummaryMetric) : record).filter(
       (record) =>
-        movementSelectedRegions.has(record.region) &&
-        movementSelectedBases.has(record.base) &&
-        matchesResponsibility(responsibilityLoaded, record.base, selectedRms, selectedRgms) &&
-        movementSelectedRmAreas.has(rmAreaForBase(responsibilityLoaded, record.base)) &&
         movementSelectedAgings.has(record.aging) &&
         movementSelectedStatuses.has(record.status) &&
         movementSelectedOrigins.has(record.origin) &&
         (!record.date || !movementDateStart || record.date >= movementDateStart) &&
         (!record.date || !movementDateEnd || record.date <= movementDateEnd),
     );
-  }, [movementDateEnd, movementDateStart, movementLoaded, movementSummaryMetric, movementSelectedAgings, movementSelectedBases, movementSelectedOrigins, movementSelectedRegions, movementSelectedRmAreas, movementSelectedStatuses, responsibilityLoaded, selectedRgms, selectedRms]);
+  }, [movementDateEnd, movementDateStart, movementFilterOptions.filteredRows, movementLoaded, movementSummaryMetric, movementSelectedAgings, movementSelectedOrigins, movementSelectedStatuses]);
 
   const movementSummary = useMemo(() => {
     const totalStopped = movementFilteredRecords.reduce((sum, record) => sum + record.totalStopped, 0);
@@ -4637,7 +4665,7 @@ export function DashboardApp() {
       const volume = record.totalStopped > 0 ? record.totalStopped : record.quantity;
       const regional = regionals.get(record.region) ?? { region: record.region, volume: 0, bases: new Map() };
       regional.volume += volume;
-      const base = regional.bases.get(record.base) ?? { base: record.base, rm: responsibilityForBase(responsibilityLoaded, record.base).rm, volume: 0 };
+      const base = regional.bases.get(record.base) ?? { base: record.base, rm: record.rm, volume: 0 };
       base.volume += volume;
       regional.bases.set(record.base, base);
       regionals.set(record.region, regional);
@@ -4658,35 +4686,16 @@ export function DashboardApp() {
       "⚠️ **Prioridade hoje: tratar as bases com maior volume sem movimentação.**", "⚠️ **今日重点：优先处理无流转订单量大的网点。**", "",
       "Contamos com a atuação dos responsáveis.", "请各负责人重点跟进改善。",
     ].join("\n");
-  }, [movementDateEnd, movementDateStart, movementFilteredRecords, movementSummary.totalStopped, responsibilityLoaded]);
+  }, [movementDateEnd, movementDateStart, movementFilteredRecords, movementSummary.totalStopped]);
   const movementRegionalOver2Summary = useMemo(() => {
-    const groups = new Map<string, { region: string; rgm: string; over2Days: number; orders: number }>();
-    for (const record of movementFilteredRecords) {
-      const current =
-        groups.get(record.region) ??
-        { region: record.region, rgm: officialRgmForRegion(record.region) ?? UNASSIGNED_RGM, over2Days: 0, orders: 0 };
-      current.over2Days += movementFrom2DaysTotal(record);
-      current.orders += record.totalStopped;
-      groups.set(record.region, current);
-    }
-    return [...groups.values()]
+    return aggregateMovementByRegion(movementFilteredRecords)
       .sort((a, b) => b.orders - a.orders || a.region.localeCompare(b.region, dashboardLocale(language), { numeric: true }));
   }, [language, movementFilteredRecords]);
 
   const movementRmOver2Summary = useMemo(() => {
-    const groups = new Map<string, { rmArea: string; rm: string; rgm: string; over2Days: number; orders: number }>();
-    for (const record of movementFilteredRecords) {
-      const responsibility = responsibilityForBase(responsibilityLoaded, record.base);
-      const rmArea = rmAreaForBase(responsibilityLoaded, record.base);
-      const key = `${rmArea}::${responsibility.rm}::${responsibility.rgm}`;
-      const current = groups.get(key) ?? { rmArea, rm: responsibility.rm, rgm: responsibility.rgm, over2Days: 0, orders: 0 };
-      current.over2Days += movementFrom2DaysTotal(record);
-      current.orders += record.totalStopped;
-      groups.set(key, current);
-    }
-    return [...groups.values()]
+    return aggregateMovementByRm(movementFilteredRecords)
       .sort((a, b) => b.orders - a.orders || a.rmArea.localeCompare(b.rmArea, dashboardLocale(language), { numeric: true }) || a.rm.localeCompare(b.rm, dashboardLocale(language), { numeric: true }));
-  }, [language, movementFilteredRecords, responsibilityLoaded]);
+  }, [language, movementFilteredRecords]);
 
   const movementTableRows = useMemo(() => {
     const normalizedQuery = normalizeSearchText(movementTableQuery.trim());
@@ -4701,17 +4710,15 @@ export function DashboardApp() {
   const movementConsolidatedRows = useMemo(() => {
     const groups = new Map<string, { period: string; region: string; base: string; code: string; rmArea: string; rm: string; rgm: string; aging: string; status: string; origin: string; orders: number }>();
     for (const record of movementTableRows) {
-      const responsibility = responsibilityForBase(responsibilityLoaded, record.base);
-      const rmArea = rmAreaForBase(responsibilityLoaded, record.base);
-      const key = [record.region, record.base, record.code, responsibility.rm, responsibility.rgm, record.aging, record.status, record.origin].join("::");
+      const key = [record.region, record.base, record.code, record.rmArea, record.rm, record.rgm, record.aging, record.status, record.origin].join("::");
       const current = groups.get(key) ?? {
         period: movementDateStart && movementDateEnd ? `${formatDate(movementDateStart)} a ${formatDate(movementDateEnd)}` : "Todo o período",
         region: record.region,
         base: record.base,
         code: record.code,
-        rmArea,
-        rm: responsibility.rm,
-        rgm: officialRgmForRegion(record.region) ?? responsibility.rgm,
+        rmArea: record.rmArea,
+        rm: record.rm,
+        rgm: record.rgm,
         aging: record.aging,
         status: record.status,
         origin: record.origin,
@@ -4721,7 +4728,7 @@ export function DashboardApp() {
       groups.set(key, current);
     }
     return [...groups.values()].sort((a, b) => b.orders - a.orders || a.region.localeCompare(b.region, dashboardLocale(language), { numeric: true }) || a.base.localeCompare(b.base, dashboardLocale(language), { numeric: true }));
-  }, [language, movementDateEnd, movementDateStart, movementTableRows, responsibilityLoaded]);
+  }, [language, movementDateEnd, movementDateStart, movementTableRows]);
 
   const sellerBaseOptions = useMemo(() => {
     if (!sellerPerformanceLoaded) return [];
@@ -4754,13 +4761,6 @@ export function DashboardApp() {
       setTaxaSelectedBases(new Set(bases));
       setTaxaPage(1);
     }
-    if (movementLoaded) {
-      const bases = movementBasesForRegions(movementLoaded, movementSelectedRegions, responsibilityLoaded).filter((base) =>
-        matchesResponsibility(responsibilityLoaded, base, nextRms, nextRgms));
-      setMovementSelectedBases(new Set(bases));
-      setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
-      setMovementPage(1);
-    }
     if (sellerPerformanceLoaded) {
       const bases = new Set(sellerBasesForRegions(sellerPerformanceLoaded, sellerSelectedRegions, responsibilityLoaded).filter((base) =>
         matchesResponsibility(responsibilityLoaded, base, nextRms, nextRgms)));
@@ -4776,8 +4776,6 @@ export function DashboardApp() {
     }
   }, [
     loaded,
-    movementLoaded,
-    movementSelectedRegions,
     responsibilityLoaded,
     selectedRegions,
     selectedRgms,
@@ -4944,9 +4942,10 @@ export function DashboardApp() {
     if (view === "movimentacao") return [
       period(movementDateStart, movementDateEnd),
       line("Regional", movementSelectedRegions, movementRegionOptions, "Todas as regionais"),
-      line("RM", selectedRms, responsibilityFilterOptions.rms, "Todos os RM"),
-      line("Região do RM", selectedRgms, responsibilityFilterOptions.rgms, "Todas as regiões do RM"),
+      line("RM", movementSelectedRms, movementRmOptions, "Todos os RM"),
+      line("Região do RM", movementSelectedRmAreas, movementRmAreaOptions, "Todas as regiões do RM"),
       line("Base", movementSelectedBases, movementBaseOptions, "Todas as bases"),
+      line("RGM", movementSelectedRgms, movementRgmOptions, "Todos os RGM"),
       ...(movementLoaded ? [
         line("Origem do pedido", movementSelectedOrigins, movementLoaded.origins, "Todas as origens"),
         line("Status", movementSelectedStatuses, movementLoaded.statuses, "Todos os status"),
@@ -5156,21 +5155,16 @@ export function DashboardApp() {
 
       const detailHeaders = [
         ...movementLoaded.displayColumns.map((column) => t(column)),
-        t("Regional consolidada"), t("Base responsável"), t("Região do RM"), "RM", "RGM",
+        t("Região do RM"), "RM", "RGM",
         t("Total de pedidos sem movimentação"),
       ];
-      const detailRows: ExcelExportValue[][] = movementTableRows.map((row) => {
-        const responsibility = responsibilityForBase(responsibilityLoaded, row.base);
-        return [
-          ...movementLoaded.displayColumns.map((column) => row.values[column] as ExcelExportValue),
-          row.region,
-          row.base,
-          rmAreaForBase(responsibilityLoaded, row.base),
-          responsibility.rm,
-          officialRgmForRegion(row.region) ?? responsibility.rgm,
-          row.quantity,
-        ];
-      });
+      const detailRows: ExcelExportValue[][] = movementTableRows.map((row) => [
+        ...movementLoaded.displayColumns.map((column) => row.values[column] as ExcelExportValue),
+        row.rmArea,
+        row.rm,
+        row.rgm,
+        row.quantity,
+      ]);
       detailRows.push([t("Total geral"), ...Array.from({ length: detailHeaders.length - 2 }, () => ""), movementTableRows.reduce((sum, row) => sum + row.quantity, 0)]);
 
       await downloadTaxaManagementExcel(
@@ -5214,7 +5208,7 @@ export function DashboardApp() {
             widths: [
               ...movementLoaded.displayColumns.map((column) =>
                 /remessa|código|codigo|pedidos/i.test(column) ? 18 : /nome|operação|operacao|responsável|responsavel/i.test(column) ? 28 : 20),
-              18, 28, 18, 34, 34, 26,
+              18, 34, 34, 26,
             ],
             percentageColumns: [],
             performanceColumn: -1,
@@ -5227,7 +5221,7 @@ export function DashboardApp() {
     } catch {
       setError(t("Não foi possível gerar o arquivo Excel."));
     }
-  }, [movementConsolidatedRows, movementDateEnd, movementDateStart, movementLoaded, movementRegionalOver2Summary, movementRmOver2Summary, movementSummary.totalStopped, movementSummaryMetric, movementTableRows, responsibilityLoaded, t]);
+  }, [movementConsolidatedRows, movementDateEnd, movementDateStart, movementLoaded, movementRegionalOver2Summary, movementRmOver2Summary, movementSummary.totalStopped, movementSummaryMetric, movementTableRows, t]);
 
   const sellerRegionalPerformance = useMemo(
     () => sellerRowsByRegional
@@ -5392,13 +5386,14 @@ export function DashboardApp() {
     movementLoaded &&
       movementSelectedBases.size === movementBaseOptions.length &&
       movementSelectedRegions.size === movementRegionOptions.length &&
+      movementSelectedRms.size === movementRmOptions.length &&
       movementSelectedRmAreas.size === movementRmAreaOptions.length &&
+      movementSelectedRgms.size === movementRgmOptions.length &&
       movementSelectedAgings.size === movementLoaded.agings.length &&
       movementSelectedStatuses.size === movementLoaded.statuses.length &&
       movementSelectedOrigins.size === movementLoaded.origins.length &&
       movementDateStart === movementLoaded.initialStart &&
-      movementDateEnd === movementLoaded.initialEnd &&
-      responsibilityFiltersAreDefault,
+      movementDateEnd === movementLoaded.initialEnd,
   );
   const sellerFiltersAreDefault = Boolean(
     sellerPerformanceLoaded &&
@@ -5535,14 +5530,6 @@ export function DashboardApp() {
         disabled={taxaLoading}
       />
       <input
-        id="movement-upload"
-        className="sr-only"
-        type="file"
-        accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-        onChange={handleMovementFileInput}
-        disabled={movementLoading}
-      />
-      <input
         id="seller-list-upload"
         className="sr-only"
         type="file"
@@ -5644,6 +5631,17 @@ export function DashboardApp() {
                 buildTaxaLoadedData(source.parsed, source.fileName, source.importedAt, "MANUAL_UPLOAD", source.fileSizeBytes, source.contentType),
               );
               setView("taxa");
+            } else if (dataSourceDialogId === "movement") {
+              applyMovementLoadedData(buildMovementLoadedData(
+                source.parsed,
+                source.fileName,
+                source.importedAt,
+                responsibilityLoaded,
+                "MANUAL_UPLOAD",
+                source.fileSizeBytes,
+                source.contentType,
+              ));
+              setView("movimentacao");
             } else if (dataSourceDialogId === "sellerPerformance") {
               setSellerManualSource(source);
               applySellerPerformanceLoadedData(
@@ -5673,6 +5671,11 @@ export function DashboardApp() {
                 buildTaxaLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", "DEMONSTRATION"),
               );
             } else setTaxaLoaded(null);
+          } else if (dataSourceDialogId === "movement") {
+            if (LOCAL_DASHBOARD_DEMO_MODE && viewerIdentity) {
+              const fixture = scopeDemoWorkbook(DASHBOARD_DEMO_FIXTURES.movement, viewerIdentity);
+              applyMovementLoadedData(buildMovementLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", responsibilityLoaded, "DEMONSTRATION"));
+            } else setMovementLoaded(null);
           } else if (dataSourceDialogId === "sellerPerformance") {
             setSellerManualSource(null);
             setSellerPerformanceLoaded(null);
@@ -5682,7 +5685,7 @@ export function DashboardApp() {
         t={t}
       /> : null}
 
-      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : "dashboard-main"}>
+      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}>
         {view === "home" ? (
           showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
             setError(null);
@@ -5952,7 +5955,7 @@ export function DashboardApp() {
           )
         ) : view === "movimentacao" ? (
           !movementLoaded ? (
-            <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "movement", files: [file] })} inputId="movement-upload" t={t} />
+            <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
           ) : (
             <>
               <section className="dashboard-intro">
@@ -5999,14 +6002,7 @@ export function DashboardApp() {
                     label={t("Regional")}
                     options={movementRegionOptions}
                     selected={movementSelectedRegions}
-                    onChange={(value) => {
-                      setMovementSelectedRegions(value);
-                      const bases = movementBasesForRegions(movementLoaded, value, responsibilityLoaded).filter((base) =>
-                        matchesResponsibility(responsibilityLoaded, base, selectedRms, selectedRgms));
-                      setMovementSelectedBases(new Set(bases));
-                      setMovementSelectedRmAreas(new Set(responsibilityOptions(responsibilityLoaded, bases).rmAreas));
-                      setMovementPage(1);
-                    }}
+                    onChange={(value) => applyMovementFilterSelection("regions", value)}
                     allLabel={t("Todas as regionais")}
                     singular={t("regional")}
                     plural={t("regionais")}
@@ -6015,9 +6011,9 @@ export function DashboardApp() {
                   />
                   <MultiSelect
                     label="RM"
-                    options={responsibilityFilterOptions.rms}
-                    selected={selectedRms}
-                    onChange={(value) => applyResponsibilityFilter("rm", value)}
+                    options={movementRmOptions}
+                    selected={movementSelectedRms}
+                    onChange={(value) => applyMovementFilterSelection("rms", value)}
                     allLabel={t("Todos os RM")}
                     singular="RM"
                     plural="RM"
@@ -6029,7 +6025,7 @@ export function DashboardApp() {
                     label={t("Região do RM")}
                     options={movementRmAreaOptions}
                     selected={movementSelectedRmAreas}
-                    onChange={(value) => { setMovementSelectedRmAreas(value); setMovementPage(1); }}
+                    onChange={(value) => applyMovementFilterSelection("rmAreas", value)}
                     allLabel={t("Todas as regiões do RM")}
                     singular={t("região do RM")}
                     plural={t("regiões do RM")}
@@ -6040,18 +6036,15 @@ export function DashboardApp() {
                     label={t("Base")}
                     options={movementBaseOptions}
                     selected={movementSelectedBases}
-                    onChange={(value) => {
-                      setMovementSelectedBases(value);
-                      setMovementPage(1);
-                    }}
+                    onChange={(value) => applyMovementFilterSelection("bases", value)}
                     allLabel={t("Todas as bases")}
                     singular={t("base")}
                     plural={t("bases")}
                     searchable
                     t={t}
                   />
-                  <MultiSelect label="RGM" options={responsibilityFilterOptions.rgms} selected={selectedRgms}
-                    onChange={(value) => applyResponsibilityFilter("rgm", value)} allLabel={t("Todos os RGM")}
+                  <MultiSelect label="RGM" options={movementRgmOptions} selected={movementSelectedRgms}
+                    onChange={(value) => applyMovementFilterSelection("rgms", value)} allLabel={t("Todos os RGM")}
                     singular="RGM" plural="RGM" searchable t={t} />
                   {movementLoaded.format === "summary" ? (
                     <div className="filter-field">
@@ -6281,6 +6274,7 @@ export function DashboardApp() {
                         <thead>
                           <tr>
                             {movementLoaded.displayColumns.map((column) => <th key={column}>{t(column)}</th>)}
+                            <th>{t("Região do RM")}</th>
                             <th>RM</th>
                             <th>RGM</th>
                           </tr>
@@ -6296,12 +6290,16 @@ export function DashboardApp() {
                                   {column === movementLoaded.columns.region ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
-                                    formatMovementCell(row.values[column])
+                                    formatMovementCell(
+                                      row.values[column],
+                                      column === movementLoaded.columns.rate14Days || column === movementLoaded.columns.rate30Days,
+                                    )
                                   )}
                                 </td>
                               ))}
-                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
-                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
+                              <td>{t(row.rmArea)}</td>
+                              <td>{t(row.rm)}</td>
+                              <td>{t(row.rgm)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -6316,12 +6314,16 @@ export function DashboardApp() {
                                   {column === movementLoaded.columns.region ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
-                                    formatMovementCell(row.values[column])
+                                    formatMovementCell(
+                                      row.values[column],
+                                      column === movementLoaded.columns.rate14Days || column === movementLoaded.columns.rate30Days,
+                                    )
                                   )}
                                 </td>
                               ))}
-                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rm}</td>
-                              <td>{monitoringResponsibilityForBase(responsibilityLoaded, row.base, row.region).rgm}</td>
+                              <td>{t(row.rmArea)}</td>
+                              <td>{t(row.rm)}</td>
+                              <td>{t(row.rgm)}</td>
                             </tr>
                           ))}
                         </tbody>
