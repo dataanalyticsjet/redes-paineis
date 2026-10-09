@@ -273,4 +273,3 @@ def contract_sha256(contract: SourceContract) -> bytes:
     }
     canonical = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).digest()
-

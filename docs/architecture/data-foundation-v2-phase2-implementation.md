@@ -29,6 +29,7 @@ O plano do mapa está em [legacy-base-mapping-migration-v1.json](/tmp/redes-pain
 
 ## Rotas preparadas
 
+- `GET /api/v2/base-mapping/current` (versão vigente e contagem de bases visíveis no escopo do usuário)
 - `POST /api/v2/imports/preview`
 - `POST /api/v2/imports/{job_id}/validate`
 - `POST /api/v2/imports/{job_id}/publish`
@@ -43,7 +44,15 @@ O plano do mapa está em [legacy-base-mapping-migration-v1.json](/tmp/redes-pain
 - `GET /api/v2/base-mapping/name-candidates/{job_id}` (somente ADMIN; lista valores da carga e candidatos exatos sem aprová-los)
 - `POST /api/v2/base-mapping/name-decisions` (somente ADMIN; registra uma decisão explícita, exata, imutável por versão e auditada)
 
-As rotas de importação exigem sessão autenticada, papel `ADMIN`, origem do frontend configurada e chave de idempotência para publicação. O papel `ADMIN` só habilita a capacidade de escrita; ele não altera o escopo das consultas.
+As rotas de importação, prévia, revalidação, decisões de nomes e publicação exigem sessão autenticada, papel `ADMIN` e `organizational_scope=matrix` explícito. A prévia apresenta contagens nacionais do arquivo enviado; por isso, um ADMIN regional/base recebe `403 matrix_scope_required`. O papel `ADMIN` não altera o escopo das consultas. Publicações operacionais usam chave de idempotência; a migração inicial também é protegida contra segunda versão/ponteiro.
+
+## Central administrativa local
+
+A tela **Central de Dados** está integrada ao início do produto e aparece para ADMIN. Ela lista contratos, estados, histórico de publicações visível no escopo, última publicação e status/contagem do de-para vigente. Administradores sem autorização `matrix` podem consultar somente o histórico/contagem do próprio escopo e não recebem ações de importação. ADMIN com escopo `matrix` pode enviar a prévia dos cinco Excels ou do de-para, ver erros/contagens/cobertura, revisar cada associação exata e confirmar a publicação. Nomes ambíguos nunca recebem ligação; nomes sem correspondência podem ser rejeitados com justificativa.
+
+O backend continua com `DATA_QUERIES_ENABLED=false` e `DATA_IMPORT_ENABLED=false` por padrão. A tela informa quando a V2 está desligada. A implementação da interface não ativou flags, não conectou o frontend legado às novas consultas e não alterou dashboards.
+
+Metadados de catálogo e contrato ficam disponíveis quando uma das duas flags está habilitada; o histórico de publicações e as consultas de datas/registros/exportação continuam condicionados a `DATA_QUERIES_ENABLED`. Isso permite revisar a migração inicial com importação habilitada e consultas ainda desligadas.
 
 ## Verificação local
 
@@ -59,7 +68,7 @@ O parser foi executado diretamente contra os cinco arquivos oficiais, sem banco,
 
 Sem mapa carregado, os cinco arquivos continuam bloqueados para publicação. Com os códigos do DoomsDay usados apenas como fixture local de teste, `no_movement` encontrou 141/151 códigos e `pdd_collection_failure` 1.598/1.617. Nos três arquivos baseados em nome, ainda não há decisões aprovadas: há nomes distintos candidatos por igualdade exata (925 em Monitoramento de Coleta, 554 em Taxa de Coleta e 558 em J&T), e nomes sem igualdade exata (155, 43 e 66, respectivamente). Nenhum candidato foi resolvido automaticamente. Quatro duplicatas integrais de J&T continuam preservadas.
 
-`compileall` concluiu sem erros. As dependências do `backend/requirements.txt` foram instaladas somente em `/tmp/redes-paineis-data-foundation-v2-venv`. Os testes focados de contrato, mapping, escopo e configuração passaram. A suíte completa está em execução para a revisão atual.
+No clone Windows, a suíte completa do backend passou: **108 testes**, usando SQLite/temporários isolados; `DATA_FOUNDATION_REVIEW_WORKBOOKS` apontou para a pasta local dos arquivos oficiais. Depois da separação entre metadados e consultas, os **7 testes focados de escopo** passaram novamente. Nenhum teste conectou ao MySQL Tencent. O frontend passou com **114 testes** e build de produção. O build emite o aviso de chunk maior que 500 kB já observado no projeto; o backend mostra um aviso de depreciação do `starlette.testclient`/`httpx`, sem falhas.
 
 ## Procedimento manual futuro
 
@@ -75,7 +84,7 @@ Sem mapa carregado, os cinco arquivos continuam bloqueados para publicação. Co
 ## Pendências e limites
 
 - A cópia DoomsDay passou a validação estrutural, mas ainda falta confirmar sua equivalência com a versão atualmente publicada na plataforma. A carga inicial continua sem execução.
-- Não há tela administrativa para essas decisões; os dois endpoints de revisão estão preparados. Uma ligação exige igualdade exata com `base_name`, alvo único e justificativa; decisões já gravadas não são sobrescritas. Nomes sem candidato e nomes ambíguos continuam sem liberação regional.
+- A tela de administração e o fluxo manual de revisão foram concluídos. Uma ligação exige igualdade exata com `base_name`, alvo único e justificativa; decisões já gravadas não são sobrescritas. Nomes sem candidato e nomes ambíguos continuam sem liberação regional.
 - Permanecem decisões de negócio documentadas: confirmar completude diária dos quatro arquivos, cobertura do snapshot Sem Movimentação e tratamento futuro das quatro duplicatas de J&T. A implementação preserva todas elas.
 - O armazenamento de staging local privado é uma base técnica; criptografia/retention e integração com COS/KMS precisam de decisão operacional antes de ativar importação em servidor.
 - A análise do schema usa o DDL de referência local e não substitui a conferência do schema vivo. Nenhuma incompatibilidade conhecida exigiu alterar tabela; nenhuma das 20 tabelas foi tocada.

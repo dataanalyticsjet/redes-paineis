@@ -959,4 +959,3 @@ def validate_job_again(
         })
         _insert_errors(connection, _uuid_bytes(job_id), summary)
     return {"jobId": job_id, **summary.as_api_dict()}
-

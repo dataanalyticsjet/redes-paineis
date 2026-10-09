@@ -19,7 +19,13 @@ from app.api.dependencies import AuthenticatedViewer, get_current_viewer, requir
 from app.core.config import get_settings
 from app.db.session import get_data_database_engine
 from app.services.data_foundation.contracts import CONTRACTS, INITIAL_MAPPING_WORKBOOK_SHA256
-from app.services.data_foundation.queries import export_records, get_date_counts, get_publications, get_records
+from app.services.data_foundation.queries import (
+    export_records,
+    get_current_mapping_status,
+    get_date_counts,
+    get_publications,
+    get_records,
+)
 from app.services.data_foundation.repository import (
     DataFoundationError,
     create_preview_job,
@@ -56,6 +62,23 @@ def _require_feature(*, imports: bool = False) -> None:
     enabled = settings.data_import_enabled if imports else settings.data_queries_enabled
     if not enabled:
         raise HTTPException(status_code=503, detail="data_foundation_v2_disabled")
+
+
+def _require_metadata_feature() -> None:
+    settings = get_settings()
+    if not (settings.data_queries_enabled or settings.data_import_enabled):
+        raise HTTPException(status_code=503, detail="data_foundation_v2_disabled")
+
+
+def _require_matrix_admin(viewer: AuthenticatedViewer) -> None:
+    """National import operations require an explicit matrix assignment."""
+    if viewer.user.platform_role != "ADMIN":
+        raise HTTPException(status_code=403, detail="admin_required")
+    if (
+        str(viewer.identity.get("organizational_scope") or "").strip().lower() != "matrix"
+        or str(viewer.identity.get("role") or "").strip().lower() != "matrix"
+    ):
+        raise HTTPException(status_code=403, detail="matrix_scope_required")
 
 
 def _engine():
@@ -117,7 +140,7 @@ def _as_csv_value(value: object) -> str:
 def list_data_sources(
     _viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
-    _require_feature()
+    _require_metadata_feature()
     try:
         with _engine().connect() as connection:
             rows = connection.exec_driver_sql("""
@@ -132,12 +155,25 @@ def list_data_sources(
     return {"sources": sources}
 
 
+@router.get("/base-mapping/current")
+def current_base_mapping(
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_metadata_feature()
+    try:
+        return get_current_mapping_status(_engine(), identity=viewer.identity)
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
 @router.get("/data-sources/{source_id}/contract")
 def get_source_contract(
     source_id: str,
     _viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
-    _require_feature()
+    _require_metadata_feature()
     contract = _source_contract(source_id)
     try:
         with _engine().connect() as connection:
@@ -180,6 +216,7 @@ async def preview_import(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     contract = _source_contract(source_id)
     if source_id == "base_mapping_official":
@@ -231,6 +268,7 @@ async def preview_initial_mapping_migration(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     contract = CONTRACTS["base_mapping_official"]
     file_name = _safe_upload_name(file.filename)
@@ -288,6 +326,7 @@ def publish_initial_mapping_migration_route(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     if not idempotency_key:
         raise HTTPException(status_code=422, detail="idempotency_key_required")
@@ -314,6 +353,7 @@ def list_name_mapping_candidates(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     settings = get_settings()
     if settings.data_import_staging_directory is None:
         raise HTTPException(status_code=503, detail="import_storage_unavailable")
@@ -339,6 +379,7 @@ def create_name_mapping_decision(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     try:
         return record_name_mapping_decision(
@@ -364,6 +405,7 @@ def validate_import(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     settings = get_settings()
     if settings.data_import_staging_directory is None:
@@ -389,6 +431,7 @@ def publish_import(
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    _require_matrix_admin(admin)
     _same_origin(request)
     if not idempotency_key:
         raise HTTPException(status_code=422, detail="idempotency_key_required")
@@ -417,8 +460,7 @@ def import_status(
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
     _require_feature(imports=True)
-    if viewer.user.platform_role != "ADMIN":
-        raise HTTPException(status_code=403, detail="admin_required")
+    _require_matrix_admin(viewer)
     try:
         return get_job_status(_engine(), job_id, viewer.user.id)
     except DataFoundationError as error:
@@ -534,4 +576,3 @@ def export_data_source(
             "X-Export-Limit": str(limit),
         },
     )
-

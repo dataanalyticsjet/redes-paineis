@@ -254,4 +254,3 @@ def test_review_registry_hashes_match_versioned_python_contracts():
         assert entry["contract"]["sha256"] == contract_sha256(contract).hex()
         assert [column["sourceHeader"] for column in entry["contract"]["columns"]] == list(contract.headers)
         assert all(not column["aliases"] for column in entry["contract"]["columns"])
-

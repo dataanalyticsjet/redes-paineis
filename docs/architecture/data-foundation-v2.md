@@ -2,7 +2,8 @@
 
 **Estado:** proposta para revisão e autorização. Esta documentação e o DDL são apenas artefatos de projeto. Nenhum banco foi acessado, nenhum SQL foi executado e nenhuma tabela, migration, dashboard ou arquivo Excel foi alterado.
 
-**Branch:** `codex/data-foundation-v2`  
+**Branch:** `codex/data-foundation-v2`
+
 **Auditoria:** cinco workbooks oficiais fornecidos em `.../RedesPaineis-DataFoundationV2-Review-2026-10-09/planilhas/`, lidos em modo somente leitura. Os Excels originais ficam fora do Git.
 
 Esta versão substitui o inventário anterior que se baseava em contratos inferidos do código. O DDL completo está em [data-foundation-v2-proposal.sql](../../backend/sql/data-foundation-v2-proposal.sql); consultas `SELECT` de verificação estão em [data-foundation-v2-verification-queries.sql](../../backend/sql/data-foundation-v2-verification-queries.sql). Os rascunhos da Fase 1 são históricos e não descrevem mais o contrato completo.

@@ -601,4 +601,3 @@ def parse_workbook(
             expected_row_no = row_no + 1
 
     return summary
-

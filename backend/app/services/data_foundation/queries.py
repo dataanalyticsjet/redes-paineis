@@ -179,6 +179,48 @@ def _assert_map_available(engine: Engine) -> None:
         raise DataFoundationError("official_mapping_unavailable", 503)
 
 
+def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> dict[str, object]:
+    """Return current map metadata and only the base count visible to this identity."""
+    parameters: dict[str, object] = {}
+    scope = _scope_clause(identity, parameters)
+    with engine.connect() as connection:
+        current = connection.execute(text("""
+            SELECT version.map_version_id, version.version_no, version.version_state,
+                   version.published_at
+            FROM base_mapping_current AS pointer
+            JOIN base_mapping_versions AS version
+              ON version.map_version_id = pointer.map_version_id
+            WHERE pointer.current_key = 'OFFICIAL'
+              AND version.version_state = 'PUBLISHED'
+        """)).mappings().first()
+        if current is None:
+            return {
+                "state": "UNAVAILABLE",
+                "mappingVersionId": None,
+                "version": None,
+                "publishedAt": None,
+                "visibleBaseCount": 0,
+            }
+        count_filter = "current_entry.map_version_id = :map_version_id"
+        if scope:
+            count_filter += f" AND {scope}"
+        count = int(connection.execute(text(f"""
+            SELECT COUNT(*)
+            FROM base_mapping_entries AS current_entry
+            WHERE {count_filter}
+        """), {
+            **parameters,
+            "map_version_id": current["map_version_id"],
+        }).scalar_one())
+    return {
+        "state": str(current["version_state"]),
+        "mappingVersionId": str(uuid.UUID(bytes=bytes(current["map_version_id"]))),
+        "version": int(current["version_no"]),
+        "publishedAt": current["published_at"],
+        "visibleBaseCount": count,
+    }
+
+
 def get_records(
     engine: Engine,
     *,
@@ -307,7 +349,6 @@ def get_publications(
 ) -> dict[str, object]:
     if source_id not in FACT_TABLES:
         raise DataFoundationError("data_source_not_found", 404)
-    _assert_map_available(engine)
     table = FACT_TABLES[source_id]
     parameters: dict[str, object] = {"source_id": source_id}
     scope = _scope_clause(identity, parameters)
@@ -360,4 +401,3 @@ def get_publications(
             for row in result
         ]
     return {"sourceId": source_id, "publications": publications, "total": total, "limit": limit, "offset": offset}
-

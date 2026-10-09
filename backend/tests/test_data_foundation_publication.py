@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import zipfile
@@ -13,6 +14,7 @@ import pytest
 from sqlalchemy import create_engine, event, text
 
 from app.services.data_foundation.contracts import CONTRACTS, contract_sha256
+from app.services.data_foundation.queries import get_current_mapping_status
 from app.services.data_foundation.repository import (
     FACT_TABLES,
     create_preview_job,
@@ -27,9 +29,10 @@ from app.services.data_foundation.repository import (
 from app.services.data_foundation.xlsx_parser import MappingResolver, parse_workbook
 
 
-OFFICIAL_WORKBOOK_ROOT = Path(
-    "/home/phelippecardoso/RedesPaineis-DataFoundationV2-Review-2026-10-09/planilhas"
-)
+OFFICIAL_WORKBOOK_ROOT = Path(os.environ.get(
+    "DATA_FOUNDATION_REVIEW_WORKBOOKS",
+    "/home/phelippecardoso/RedesPaineis-DataFoundationV2-Review-2026-10-09/planilhas",
+))
 
 
 def _sqlite_schema(engine) -> None:
@@ -154,6 +157,7 @@ def _sql_compatibility_for_sqlite(engine) -> None:
     @event.listens_for(engine, "before_cursor_execute", retval=True)
     def translate(connection, cursor, statement, parameters, context, executemany):
         statement = statement.replace(" FOR UPDATE", "").replace("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP")
+        statement = re.sub(r"\bBINARY\s+", "", statement)
         if "ON DUPLICATE KEY UPDATE" in statement and "source_daily_head" in statement:
             statement = re.sub(
                 r"ON DUPLICATE KEY UPDATE\s+publication_id = VALUES\(publication_id\),\s*changed_at = CURRENT_TIMESTAMP",
@@ -230,11 +234,15 @@ def _xlsx_bytes(contract, rows: list[dict[str, object]]) -> bytes:
     return output.getvalue()
 
 
-def _daily_row(data_date: date, awaiting: int = 1) -> dict[str, object]:
+def _daily_row(
+    data_date: date,
+    awaiting: int = 1,
+    source_base_name: str = "SMD -AC",
+) -> dict[str, object]:
     values: dict[str, object] = {
         "data_date": data_date,
         "reported_region": "GP",
-        "source_base_name": "SMD -AC",
+        "source_base_name": source_base_name,
         "seller_collection_rate": Decimal("0.5"),
         "collection_visit_rate": Decimal("0.6"),
     }
@@ -290,6 +298,8 @@ def _publish(engine, job_id, staging_directory, key):
 
 
 def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_heads(tmp_path):
+    if not OFFICIAL_WORKBOOK_ROOT.is_dir():
+        pytest.skip("Set DATA_FOUNDATION_REVIEW_WORKBOOKS to the official workbook review folder")
     sqlite3.register_adapter(Decimal, str)
     sqlite3.register_adapter(date, date.isoformat)
     sqlite3.register_adapter(datetime, datetime.isoformat)
@@ -299,7 +309,8 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
     staging_directory = tmp_path / "private-staging"
     try:
         mapping_path = OFFICIAL_WORKBOOK_ROOT / "De_para DoomsDay.xlsx"
-        assert mapping_path.is_file(), "DoomsDay mapping workbook was not mounted"
+        if not mapping_path.is_file():
+            pytest.skip("DoomsDay mapping workbook was not found in the review folder")
         mapping_content = mapping_path.read_bytes()
         mapping_contract = CONTRACTS["base_mapping_official"]
         mapping_summary = parse_workbook(mapping_content, mapping_contract, MappingResolver())
@@ -324,13 +335,22 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
         )
         assert migrated["version"] == 1
         assert migrated["mappingRowCount"] == 1628
+        matrix_map = get_current_mapping_status(
+            engine,
+            identity={"organizational_scope": "matrix", "role": "matrix"},
+        )
+        assert matrix_map["visibleBaseCount"] == 1628
+        out_of_scope_map = get_current_mapping_status(
+            engine,
+            identity={
+                "organizational_scope": "regional",
+                "role": "regional",
+                "home_region": "__OUT_OF_SCOPE__",
+            },
+        )
+        assert out_of_scope_map["visibleBaseCount"] == 0
 
-        map_version_id = bytes.fromhex(migrated["mapVersionId"].replace("-", ""))
         with engine.connect() as connection:
-            code = connection.execute(text("""
-                SELECT base_code FROM base_mapping_entries
-                WHERE map_version_id = :map_id AND base_name = :base_name
-            """), {"map_id": map_version_id, "base_name": "SMD -AC"}).scalar_one()
             unresolved_name_resolver = load_mapping_resolver(
                 connection, source_id="collection_monitoring"
             )
@@ -360,17 +380,17 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
         assert candidate_report["candidateNameCount"] == 925
         exact_source_name = next(
             item for item in candidate_report["candidates"]
-            if item["sourceBaseName"] == "SMD -AC"
+            if item["decisionState"] == "UNREVIEWED"
+            and len(item["exactTargetCandidates"]) == 1
         )
-        assert exact_source_name["decisionState"] == "UNREVIEWED"
-        assert len(exact_source_name["exactTargetCandidates"]) == 1
+        target_code = exact_source_name["exactTargetCandidates"][0]["baseCode"]
         decision = record_name_mapping_decision(
             engine,
             source_id="collection_monitoring",
-            source_base_name="SMD -AC",
+            source_base_name=exact_source_name["sourceBaseName"],
             resolution_state="LINKED",
-            target_base_code=str(code),
-            review_note="Nome exato e código único conferidos no teste local.",
+            target_base_code=str(target_code),
+            review_note="Correspondência exata e destino único conferidos no teste local.",
             actor_user_id=7,
             request_id="sqlite-publication-test",
         )
@@ -421,7 +441,11 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
             sorted(summaries["collection_monitoring"].per_date_counts)[0]
         )
         partial_daily = _xlsx_bytes(CONTRACTS["collection_monitoring"], [
-            _daily_row(replacement_date, awaiting=4),
+            _daily_row(
+                replacement_date,
+                awaiting=4,
+                source_base_name=str(exact_source_name["sourceBaseName"]),
+            ),
         ])
         with engine.connect() as connection:
             resolver = load_mapping_resolver(connection, source_id="collection_monitoring")

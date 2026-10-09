@@ -1,6 +1,7 @@
 "use client";
 
 import { AssistantHome } from "../home/assistant-home";
+import { DataFoundationAdmin } from "../data-foundation/data-foundation-admin";
 import { dashboardCards, type DashboardPanel } from "./dashboard-catalog";
 import { DashboardActionBand } from "./dashboard-action-band";
 import { UserControl } from "../users/user-control";
@@ -238,7 +239,7 @@ const MONITORING_STATUS_LABELS: Record<string, string> = {
   "problematicos nao registrados": "Problemáticos Não Registrados",
 };
 
-type DashboardView = "home" | DashboardPanel;
+type DashboardView = "home" | "data-foundation" | DashboardPanel;
 
 const SOURCE_ID_BY_VIEW: Partial<Record<DashboardView, DashboardSourceId>> = {
   monitoramento: "monitoring",
@@ -5568,6 +5569,7 @@ export function DashboardApp() {
           <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
           <div className="presentation-header-actions">
             {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <>
+              <button className="presentation-user-control-button" type="button" onClick={() => { setView("data-foundation"); setShowUserControl(false); }}><Database size={18} /> {t("Central de Dados")}</button>
               <button className="presentation-user-control-button" type="button" onClick={() => { setResponsibilityRefreshPending(false); setResponsibilitySourceDialogOpen(true); }}><FileSpreadsheet size={18} /> {t("De-para oficial")}</button>
               <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button>
             </> : null}
@@ -5692,6 +5694,11 @@ export function DashboardApp() {
             setView(nextView);
             setShowUserControl(false);
           }} />
+        ) : view === "data-foundation" ? (
+          viewerIdentity.platform_role === "ADMIN" ? <DataFoundationAdmin
+            t={t}
+            canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
+          /> : null
         ) : pendingLastMilePanel ? (
           <PendingLastMileDashboard
             title={pendingLastMilePanel.title}

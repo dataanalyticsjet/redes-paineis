@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
+from types import SimpleNamespace
 
 from datetime import date
 
+from app.api.data_foundation import _require_matrix_admin, _require_metadata_feature
 from app.services.data_foundation.queries import _query_plan, get_date_counts
 from app.services.data_foundation.repository import DataFoundationError
 
@@ -42,6 +45,49 @@ def test_national_scope_requires_explicit_matrix_assignment():
         _query_plan("no_movement", {"platform_role": "ADMIN", "organizational_scope": "regional"})
 
 
+def test_national_import_admin_requires_both_admin_role_and_matrix_scope():
+    regional_admin = SimpleNamespace(
+        user=SimpleNamespace(platform_role="ADMIN"),
+        identity={"organizational_scope": "regional", "role": "regional"},
+    )
+    with pytest.raises(HTTPException) as regional_error:
+        _require_matrix_admin(regional_admin)
+    assert regional_error.value.status_code == 403
+    assert regional_error.value.detail == "matrix_scope_required"
+
+    matrix_user = SimpleNamespace(
+        user=SimpleNamespace(platform_role="USER"),
+        identity={"organizational_scope": "matrix", "role": "matrix"},
+    )
+    with pytest.raises(HTTPException) as user_error:
+        _require_matrix_admin(matrix_user)
+    assert user_error.value.status_code == 403
+    assert user_error.value.detail == "admin_required"
+
+    matrix_admin = SimpleNamespace(
+        user=SimpleNamespace(platform_role="ADMIN"),
+        identity={"organizational_scope": "matrix", "role": "matrix"},
+    )
+    _require_matrix_admin(matrix_admin)
+
+
+def test_v2_metadata_is_available_for_import_review_without_enabling_queries(monkeypatch):
+    monkeypatch.setattr(
+        "app.api.data_foundation.get_settings",
+        lambda: SimpleNamespace(data_queries_enabled=False, data_import_enabled=False),
+    )
+    with pytest.raises(HTTPException) as disabled_error:
+        _require_metadata_feature()
+    assert disabled_error.value.status_code == 503
+    assert disabled_error.value.detail == "data_foundation_v2_disabled"
+
+    monkeypatch.setattr(
+        "app.api.data_foundation.get_settings",
+        lambda: SimpleNamespace(data_queries_enabled=False, data_import_enabled=True),
+    )
+    _require_metadata_feature()
+
+
 def test_historical_publication_query_pins_version_but_keeps_current_scope():
     plan = _query_plan(
         "collection_rate",
@@ -64,4 +110,3 @@ def test_date_count_rejects_reversed_date_range_before_database_access():
             date_from=date(2026, 10, 10),
             date_to=date(2026, 10, 9),
         )
-
