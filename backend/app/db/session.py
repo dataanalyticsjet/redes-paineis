@@ -36,6 +36,64 @@ def create_database_engine(settings: Settings | None = None) -> Engine:
     return create_engine(url, pool_pre_ping=True)
 
 
+def create_data_database_engine(settings: Settings | None = None) -> Engine:
+    """Build the separate data engine without opening a connection."""
+    config = settings or get_settings()
+    required = {
+        "DATA_DB_HOST": config.data_db_host,
+        "DATA_DB_NAME": config.data_db_name,
+        "DATA_DB_USER": config.data_db_user,
+        "DATA_DB_PASSWORD": config.data_db_password,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError("Data Foundation database settings are incomplete: " + ", ".join(missing))
+    if config.data_db_name != "redes_paineis_dados":
+        raise RuntimeError("DATA_DB_NAME must be redes_paineis_dados")
+    url = URL.create(
+        drivername="mysql+pymysql",
+        username=config.data_db_user,
+        password=config.data_db_password,
+        host=config.data_db_host,
+        port=config.data_db_port,
+        database=config.data_db_name,
+    )
+    return create_engine(url, pool_pre_ping=True, pool_recycle=1800)
+
+
+@lru_cache(maxsize=4)
+def _cached_data_database_engine(
+    host: str,
+    port: int,
+    name: str,
+    user: str,
+    password: str,
+) -> Engine:
+    config = Settings(
+        app_env="development",
+        data_db_host=host,
+        data_db_port=port,
+        data_db_name=name,
+        data_db_user=user,
+        data_db_password=password,
+    )
+    return create_data_database_engine(config)
+
+
+def get_data_database_engine(settings: Settings | None = None) -> Engine:
+    config = settings or get_settings()
+    required = (config.data_db_host, config.data_db_name, config.data_db_user, config.data_db_password)
+    if not all(required):
+        raise RuntimeError("data_store_unavailable")
+    return _cached_data_database_engine(
+        str(config.data_db_host),
+        config.data_db_port,
+        str(config.data_db_name),
+        str(config.data_db_user),
+        str(config.data_db_password),
+    )
+
+
 def create_session_factory(
     engine: Engine | None = None,
 ) -> sessionmaker[Session]:

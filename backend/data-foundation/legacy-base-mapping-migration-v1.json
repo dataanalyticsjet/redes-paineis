@@ -1,0 +1,48 @@
+{
+  "status": "REVIEW_ONLY",
+  "purpose": "Preparar a cópia oficial candidata do de-para como versão imutável, sem executar a carga.",
+  "legacySource": "De_para DoomsDay.xlsx fornecido na pasta de revisão; a equivalência com a versão vigente publicada na plataforma ainda requer confirmação do operador.",
+  "expectedBaseCount": 1628,
+  "initialTargetVersion": 1,
+  "targetDatabase": "redes_paineis_dados",
+  "targetTables": [
+    "base_mapping_versions",
+    "base_mapping_entries",
+    "base_mapping_current",
+    "import_jobs",
+    "data_audit_events"
+  ],
+  "sheetCandidate": "Ativas",
+  "headerCandidate": [
+    "Regional",
+    "UF",
+    "Região RM",
+    "Responsável Rm",
+    "Código da base",
+    "Nome da base",
+    "Descrição"
+  ],
+  "sourceWorkbookAvailableInReviewFolder": true,
+  "sourceWorkbookName": "De_para DoomsDay.xlsx",
+  "sourceSha256": "6d07265a1b9e9a612c86979f3a8a6bbf64b04566623b2293558735b523b1dbba",
+  "preflight": {
+    "sheet": "Ativas",
+    "headersConfirmedInOrder": true,
+    "inputRows": 1628,
+    "validRows": 1628,
+    "invalidRows": 0,
+    "distinctCodes": 1628,
+    "duplicateCodes": 0,
+    "blankRegionalNames": 0,
+    "status": "PASS_REVIEW_ONLY"
+  },
+  "rules": [
+    "A migração inicial exige exatamente 1.628 linhas válidas e códigos únicos.",
+    "Na prévia manual futura, guardar bytes originais em staging privado e conferir que o SHA-256 coincide com o hash auditado.",
+    "Publicar como versão 1 somente se ainda não existir ponteiro nem versão do de-para no banco novo.",
+    "Não atualizar nem apagar a versão do de-para atualmente publicada na plataforma.",
+    "Não preencher zeros, normalizar códigos, usar aproximação por nome, nem aprovar decisões de nomes automaticamente.",
+    "A identidade deste arquivo como cópia exata do de-para ainda vigente deve ser confirmada pelo operador.",
+    "Fonte e contrato começam PENDING/DISCOVERED; a publicação requer ativação e aprovação manuais."
+  ]
+}

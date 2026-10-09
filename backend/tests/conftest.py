@@ -79,12 +79,16 @@ def bind_disposable_user_database(
     try:
         yield
     finally:
+        get_settings.cache_clear()
         app.dependency_overrides.clear()
         app.dependency_overrides.update(previous_overrides)
 
 
 @pytest.fixture
-def create_user_session(user_test_session_factory: sessionmaker[Session]):
+def create_user_session(
+    user_test_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+):
     def create(
         *,
         name: str = "Test Viewer",
@@ -97,6 +101,8 @@ def create_user_session(user_test_session_factory: sessionmaker[Session]):
         active: bool = True,
         identity_suffix: str = "one",
     ) -> tuple[str, PlatformUser]:
+        monkeypatch.setenv("FEISHU_SESSION_SECRET", "isolated-test-session-secret-at-least-32-chars")
+        get_settings.cache_clear()
         with user_test_session_factory() as db:
             user = db.scalar(
                 select(PlatformUser).where(

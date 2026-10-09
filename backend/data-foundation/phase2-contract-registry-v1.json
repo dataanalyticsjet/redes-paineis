@@ -1,0 +1,1474 @@
+{
+  "status": "REVIEW_ONLY",
+  "contracts": [
+    {
+      "source": {
+        "sourceId": "collection_monitoring",
+        "displayName": "Monitoramento de Coleta",
+        "description": "Workbook oficial de Monitoramento de Coleta; contrato inicial pendente de aprovação.",
+        "sourceState": "PENDING",
+        "historyPolicy": "DAILY_REPLACE_DATES"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "5ea0f599bf3b202450f740a0122784fb0e0817675857efa0e45e8606752f48e4",
+        "state": "DISCOVERED",
+        "expectedSheet": "sheet0",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Uma linha por linha física do arquivo; cada data presente substitui sua partição integral.",
+        "expectedSampleRows": 3877,
+        "columns": [
+          {
+            "key": "data_date",
+            "ordinal": 1,
+            "sourceHeader": "Data",
+            "semanticRole": "data_date",
+            "dataType": "DATE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "excelSerialRequired": true,
+              "dateNumberFormatRequired": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "reported_region",
+            "ordinal": 2,
+            "sourceHeader": "Regional Origem",
+            "semanticRole": "reported_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 64,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_name",
+            "ordinal": 3,
+            "sourceHeader": "PDD de saida",
+            "semanticRole": "source_base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 191,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "seller_collection_rate",
+            "ordinal": 4,
+            "sourceHeader": "Taxa de coleta do vendedor",
+            "semanticRole": "seller_collection_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "collection_visit_rate",
+            "ordinal": 5,
+            "sourceHeader": "Taxa de Visita de Coleta",
+            "semanticRole": "collection_visit_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "expected_dropoff_collection",
+            "ordinal": 6,
+            "sourceHeader": "Coleta Prevista Drop-off",
+            "semanticRole": "expected_dropoff_collection",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "expected_pickup_collection",
+            "ordinal": 7,
+            "sourceHeader": "Coleta Prevista Pick-up",
+            "semanticRole": "expected_pickup_collection",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "awaiting_collection_dropoff",
+            "ordinal": 8,
+            "sourceHeader": "Aguardando Coleta Drop-off",
+            "semanticRole": "awaiting_collection_dropoff",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "awaiting_collection_pickup",
+            "ordinal": 9,
+            "sourceHeader": "Aguardando Coleta Pick-up",
+            "semanticRole": "awaiting_collection_pickup",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collected_current",
+            "ordinal": 10,
+            "sourceHeader": "Status atual – Coletado",
+            "semanticRole": "collected_current",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "received_at_base_current",
+            "ordinal": 11,
+            "sourceHeader": "Status atual – Recebido na base",
+            "semanticRole": "received_at_base_current",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "dispatched_by_base",
+            "ordinal": 12,
+            "sourceHeader": "Expedida pela Base",
+            "semanticRole": "dispatched_by_base",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "in_transit_from_base",
+            "ordinal": 13,
+            "sourceHeader": "Status atual – Em trânsito a partir da base",
+            "semanticRole": "in_transit_from_base",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "branch_outbound_transit_center",
+            "ordinal": 14,
+            "sourceHeader": "网点发件在途(中心)",
+            "semanticRole": "branch_outbound_transit_center",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "branch_outbound_transit_sorting",
+            "ordinal": 15,
+            "sourceHeader": "网点发件在途(集散)",
+            "semanticRole": "branch_outbound_transit_sorting",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "arrived_at_sorting_center",
+            "ordinal": 16,
+            "sourceHeader": "Chegada ao Centro de Triagem",
+            "semanticRole": "arrived_at_sorting_center",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "dispatched_by_sorting_center",
+            "ordinal": 17,
+            "sourceHeader": "Expedido pelo Centro de Triagem",
+            "semanticRole": "dispatched_by_sorting_center",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "sorting_outbound_transit",
+            "ordinal": 18,
+            "sourceHeader": "集散发件在途",
+            "semanticRole": "sorting_outbound_transit",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "arrived_at_sc",
+            "ordinal": 19,
+            "sourceHeader": "Status atual – Chegou ao SC",
+            "semanticRole": "arrived_at_sc",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "package_created_by_base",
+            "ordinal": 20,
+            "sourceHeader": "Pacote Criado pela Base",
+            "semanticRole": "package_created_by_base",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "processed_problem_items",
+            "ordinal": 21,
+            "sourceHeader": "已处理问题件",
+            "semanticRole": "processed_problem_items",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "unprocessed_problem_items",
+            "ordinal": 22,
+            "sourceHeader": "未处理问题件",
+            "semanticRole": "unprocessed_problem_items",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          }
+        ]
+      }
+    },
+    {
+      "source": {
+        "sourceId": "collection_rate",
+        "displayName": "Taxa de Coleta",
+        "description": "Workbook oficial de Taxa de Coleta; contrato inicial pendente de aprovação.",
+        "sourceState": "PENDING",
+        "historyPolicy": "DAILY_REPLACE_DATES"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "1e8427868ca7f2afd62f7e31e617eee0fcf0debba8fae5c80ee73c9ba19552aa",
+        "state": "DISCOVERED",
+        "expectedSheet": "sheet0",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Uma linha por linha física; deadline_at determina a data diária substituída.",
+        "expectedSampleRows": 3269,
+        "columns": [
+          {
+            "key": "deadline_at",
+            "ordinal": 1,
+            "sourceHeader": "Horário de término do prazo de coleta",
+            "semanticRole": "deadline_at",
+            "dataType": "DATETIME",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "excelSerialRequired": true,
+              "dateNumberFormatRequired": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "reported_region",
+            "ordinal": 2,
+            "sourceHeader": "Nome da regional",
+            "semanticRole": "reported_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 64,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_name",
+            "ordinal": 3,
+            "sourceHeader": "Nome da base de coleta",
+            "semanticRole": "source_base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 191,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "order_origin",
+            "ordinal": 4,
+            "sourceHeader": "Origem do Pedido",
+            "semanticRole": "order_origin",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 96
+            },
+            "aliases": []
+          },
+          {
+            "key": "product_type",
+            "ordinal": 5,
+            "sourceHeader": "Tipo de produto",
+            "semanticRole": "product_type",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64
+            },
+            "aliases": []
+          },
+          {
+            "key": "order_quantity",
+            "ordinal": 6,
+            "sourceHeader": "Quantidade de pedidos",
+            "semanticRole": "order_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "quantity_to_collect",
+            "ordinal": 7,
+            "sourceHeader": "Qtd a coletar",
+            "semanticRole": "quantity_to_collect",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "cancelled_quantity",
+            "ordinal": 8,
+            "sourceHeader": "Qtd cancelada",
+            "semanticRole": "cancelled_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collection_rate",
+            "ordinal": 9,
+            "sourceHeader": "Taxa de coleta",
+            "semanticRole": "collection_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "collected_quantity",
+            "ordinal": 10,
+            "sourceHeader": "揽收量",
+            "semanticRole": "collected_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "not_collected_quantity",
+            "ordinal": 11,
+            "sourceHeader": "未揽收量",
+            "semanticRole": "not_collected_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "not_collected_on_time_quantity",
+            "ordinal": 12,
+            "sourceHeader": "Qtd não coletada no prazo",
+            "semanticRole": "not_collected_on_time_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collected_on_time_quantity",
+            "ordinal": 13,
+            "sourceHeader": "Qtd coletada no prazo",
+            "semanticRole": "collected_on_time_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collection_on_time_rate",
+            "ordinal": 14,
+            "sourceHeader": "Taxa de coleta no prazo",
+            "semanticRole": "collection_on_time_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "collected_plus_attempts_quantity",
+            "ordinal": 15,
+            "sourceHeader": "Pedidos coletados + Tentativas de coleta",
+            "semanticRole": "collected_plus_attempts_quantity",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collection_rate_with_attempts",
+            "ordinal": 16,
+            "sourceHeader": "Taxa de coleta com tentativas de coleta",
+            "semanticRole": "collection_rate_with_attempts",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "average_collection_delay_hours",
+            "ordinal": 17,
+            "sourceHeader": "Prazo médio demorado para coleta(h)",
+            "semanticRole": "average_collection_delay_hours",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "processed_problem_items",
+            "ordinal": 18,
+            "sourceHeader": "已做问题件的量",
+            "semanticRole": "processed_problem_items",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "unprocessed_problem_items",
+            "ordinal": 19,
+            "sourceHeader": "未做问题件的量",
+            "semanticRole": "unprocessed_problem_items",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "seller_collection_rate",
+            "ordinal": 20,
+            "sourceHeader": "Taxa de coleta do vendedor",
+            "semanticRole": "seller_collection_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "expected_merchant_visits",
+            "ordinal": 21,
+            "sourceHeader": "应上门商家量",
+            "semanticRole": "expected_merchant_visits",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "merchants_not_visited",
+            "ordinal": 22,
+            "sourceHeader": "未上门商家量",
+            "semanticRole": "merchants_not_visited",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          }
+        ]
+      }
+    },
+    {
+      "source": {
+        "sourceId": "jt_monitoring",
+        "displayName": "Monitoramento J&T",
+        "description": "Workbook oficial de Monitoramento J&T; contrato inicial pendente de aprovação.",
+        "sourceState": "PENDING",
+        "historyPolicy": "DAILY_REPLACE_DATES"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "d644f1aa5a0b21b302bf19babb489165f20eb87803e6412e5f64443acde14e1a",
+        "state": "DISCOVERED",
+        "expectedSheet": "sheet1",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Uma linha por linha física; duplicatas da origem são preservadas.",
+        "expectedSampleRows": 159666,
+        "columns": [
+          {
+            "key": "data_date",
+            "ordinal": 1,
+            "sourceHeader": "Data",
+            "semanticRole": "data_date",
+            "dataType": "DATE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "excelSerialRequired": true,
+              "dateNumberFormatRequired": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "reported_region",
+            "ordinal": 2,
+            "sourceHeader": "Regional Origem",
+            "semanticRole": "reported_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 64,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_name",
+            "ordinal": 3,
+            "sourceHeader": "PDD de saida",
+            "semanticRole": "source_base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 191,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "customer_name",
+            "ordinal": 4,
+            "sourceHeader": "Cliente",
+            "semanticRole": "customer_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "store_name",
+            "ordinal": 5,
+            "sourceHeader": "Loja",
+            "semanticRole": "store_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "seller_id",
+            "ordinal": 6,
+            "sourceHeader": "Id Seller/remetente",
+            "semanticRole": "seller_id",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64
+            },
+            "aliases": []
+          },
+          {
+            "key": "assigned_driver",
+            "ordinal": 7,
+            "sourceHeader": "Motorista Designado",
+            "semanticRole": "assigned_driver",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "order_origin",
+            "ordinal": 8,
+            "sourceHeader": "Origem do Pedido",
+            "semanticRole": "order_origin",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 96
+            },
+            "aliases": []
+          },
+          {
+            "key": "awaiting_collection",
+            "ordinal": 9,
+            "sourceHeader": "Status atual – Aguardando coleta",
+            "semanticRole": "awaiting_collection",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "received_at_dropoff",
+            "ordinal": 10,
+            "sourceHeader": "Status atual – Recebido no Drop-off",
+            "semanticRole": "received_at_dropoff",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "collected",
+            "ordinal": 11,
+            "sourceHeader": "Status atual – Coletado",
+            "semanticRole": "collected",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "received",
+            "ordinal": 12,
+            "sourceHeader": "Status atual – Recebido",
+            "semanticRole": "received",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "received_at_base",
+            "ordinal": 13,
+            "sourceHeader": "Status atual – Recebido na base",
+            "semanticRole": "received_at_base",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "in_base_dispatch_flow",
+            "ordinal": 14,
+            "sourceHeader": "当前状态-网点发件流程中",
+            "semanticRole": "in_base_dispatch_flow",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "arrived_at_sc",
+            "ordinal": 15,
+            "sourceHeader": "Status atual – Chegou ao SC",
+            "semanticRole": "arrived_at_sc",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          }
+        ]
+      }
+    },
+    {
+      "source": {
+        "sourceId": "no_movement",
+        "displayName": "Sem Movimentação",
+        "description": "Workbook oficial de Sem Movimentação; contrato/snapshot pendente de aprovação.",
+        "sourceState": "PENDING",
+        "historyPolicy": "SNAPSHOT_REPLACE_ALL"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "52ecb4852bdd89e1df7a7e2f458ef7a3eeadd0e772eb4de08ba857b201f5ef22",
+        "state": "DISCOVERED",
+        "expectedSheet": "sheet0",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Snapshot integral; os códigos da base devem ser únicos. O arquivo não informa a data do snapshot.",
+        "expectedSampleRows": 151,
+        "columns": [
+          {
+            "key": "reported_region",
+            "ordinal": 1,
+            "sourceHeader": "Regional responsável",
+            "semanticRole": "reported_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_code",
+            "ordinal": 2,
+            "sourceHeader": "Código da unidade responsável",
+            "semanticRole": "source_base_code",
+            "dataType": "BASE_CODE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64,
+              "numericCodeAllowed": true,
+              "preserveExactText": true,
+              "fillLeadingZeros": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_name",
+            "ordinal": 3,
+            "sourceHeader": "Nome da unidade responsável",
+            "semanticRole": "source_base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_orders",
+            "ordinal": 4,
+            "sourceHeader": "Total de pedidos sem movimentação",
+            "semanticRole": "stopped_orders",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "orders_in_transit",
+            "ordinal": 5,
+            "sourceHeader": "Qtd pedidos em trânsito",
+            "semanticRole": "orders_in_transit",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_1_day",
+            "ordinal": 6,
+            "sourceHeader": "Sem mov. há mais de 1 dia",
+            "semanticRole": "stopped_over_1_day",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_2_days",
+            "ordinal": 7,
+            "sourceHeader": "Sem mov. há mais de 2 dias",
+            "semanticRole": "stopped_over_2_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_3_days",
+            "ordinal": 8,
+            "sourceHeader": "Sem mov. há mais de 3 dias",
+            "semanticRole": "stopped_over_3_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_4_days",
+            "ordinal": 9,
+            "sourceHeader": "Sem mov. há mais de 4 dias",
+            "semanticRole": "stopped_over_4_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_5_days",
+            "ordinal": 10,
+            "sourceHeader": "Sem mov. há mais de 5 dias",
+            "semanticRole": "stopped_over_5_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_6_days",
+            "ordinal": 11,
+            "sourceHeader": "Sem mov. há mais de 6 dias",
+            "semanticRole": "stopped_over_6_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_7_days",
+            "ordinal": 12,
+            "sourceHeader": "Sem mov. há mais de 7 dias",
+            "semanticRole": "stopped_over_7_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_10_days",
+            "ordinal": 13,
+            "sourceHeader": "Sem mov. há mais de 10 dias",
+            "semanticRole": "stopped_over_10_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_14_days",
+            "ordinal": 14,
+            "sourceHeader": "Sem mov. há mais de 14 dias",
+            "semanticRole": "stopped_over_14_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_over_30_days",
+            "ordinal": 15,
+            "sourceHeader": "Sem mov. há mais de 30 dias",
+            "semanticRole": "stopped_over_30_days",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "last_operation_at",
+            "ordinal": 16,
+            "sourceHeader": "Horário da última operação",
+            "semanticRole": "last_operation_at",
+            "dataType": "DATETIME",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "excelSerialRequired": true,
+              "dateNumberFormatRequired": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_14_plus_days_rate",
+            "ordinal": 17,
+            "sourceHeader": "Taxa de sem mov 14+dias",
+            "semanticRole": "stopped_14_plus_days_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "stopped_30_plus_days_rate",
+            "ordinal": 18,
+            "sourceHeader": "Taxa de sem mov 30+dias",
+            "semanticRole": "stopped_30_plus_days_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          }
+        ]
+      }
+    },
+    {
+      "source": {
+        "sourceId": "pdd_collection_failure",
+        "displayName": "Falha na Coleta PDD",
+        "description": "Workbook oficial de Falha na Coleta PDD; contrato inicial pendente de aprovação.",
+        "sourceState": "PENDING",
+        "historyPolicy": "DAILY_REPLACE_DATES"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "cf3af3e4cbc95a0882759bb774da711965be45661871f7eaee6504dea1a8234c",
+        "state": "DISCOVERED",
+        "expectedSheet": "sheet0",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Uma linha por linha física; cada data presente substitui sua partição integral.",
+        "expectedSampleRows": 1617,
+        "columns": [
+          {
+            "key": "data_date",
+            "ordinal": 1,
+            "sourceHeader": "Data considerada",
+            "semanticRole": "data_date",
+            "dataType": "DATE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "excelSerialRequired": true,
+              "dateNumberFormatRequired": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_code",
+            "ordinal": 2,
+            "sourceHeader": "Código da base",
+            "semanticRole": "source_base_code",
+            "dataType": "BASE_CODE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64,
+              "numericCodeAllowed": true,
+              "preserveExactText": true,
+              "fillLeadingZeros": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_base_name",
+            "ordinal": 3,
+            "sourceHeader": "Nome da base",
+            "semanticRole": "source_base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "source_region_code",
+            "ordinal": 4,
+            "sourceHeader": "Código da Regional",
+            "semanticRole": "source_region_code",
+            "dataType": "BASE_CODE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64,
+              "numericCodeAllowed": true,
+              "preserveExactText": true,
+              "fillLeadingZeros": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "reported_region",
+            "ordinal": 5,
+            "sourceHeader": "Nome da regional",
+            "semanticRole": "reported_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64
+            },
+            "aliases": []
+          },
+          {
+            "key": "orders_to_scan",
+            "ordinal": 6,
+            "sourceHeader": "Qtd pedidos a bipar",
+            "semanticRole": "orders_to_scan",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "orders_unscanned_at_receipt",
+            "ordinal": 7,
+            "sourceHeader": "Qtd pedidos não bipados no recebimento",
+            "semanticRole": "orders_unscanned_at_receipt",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "rate_unscanned_at_receipt",
+            "ordinal": 8,
+            "sourceHeader": "Taxa de pedidos não bipados no recebimento",
+            "semanticRole": "rate_unscanned_at_receipt",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "orders_unscanned_for_delivery",
+            "ordinal": 9,
+            "sourceHeader": "Qtd de pedidos não bipados na saída para entrega",
+            "semanticRole": "orders_unscanned_for_delivery",
+            "dataType": "INTEGER",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "aliases": []
+          },
+          {
+            "key": "rate_unscanned_for_delivery",
+            "ordinal": 10,
+            "sourceHeader": "Taxa de pedidos não bipados na saída para entrega",
+            "semanticRole": "rate_unscanned_for_delivery",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "overall_unscanned_rate",
+            "ordinal": 11,
+            "sourceHeader": "Taxa geral de falta de bipagem",
+            "semanticRole": "overall_unscanned_rate",
+            "dataType": "DECIMAL",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "precision": 38,
+              "scale": 24,
+              "rateRangeEnforced": false
+            },
+            "aliases": []
+          }
+        ]
+      }
+    },
+    {
+      "source": {
+        "sourceId": "base_mapping_official",
+        "displayName": "De-para oficial de bases",
+        "description": "De_para DoomsDay.xlsx passou na pré-validação estrutural; confirmar que representa a versão vigente publicada antes de qualquer carga.",
+        "sourceState": "PENDING",
+        "historyPolicy": "PENDING",
+        "workbookName": "De_para DoomsDay.xlsx",
+        "workbookSha256": "6d07265a1b9e9a612c86979f3a8a6bbf64b04566623b2293558735b523b1dbba"
+      },
+      "contract": {
+        "version": 1,
+        "sha256": "a848287df801ce4468bbcf1040c86e52167fc5135b5e777354688c669ba0e999",
+        "state": "DISCOVERED",
+        "expectedSheet": "Ativas",
+        "headerRow": 1,
+        "expectedExtension": "xlsx",
+        "grainDescription": "Migração inicial imutável da versão vigente, preservando as 1.628 bases originais.",
+        "expectedSampleRows": 1628,
+        "columns": [
+          {
+            "key": "regional_name",
+            "ordinal": 1,
+            "sourceHeader": "Regional",
+            "semanticRole": "regional_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 64,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "uf_code",
+            "ordinal": 2,
+            "sourceHeader": "UF",
+            "semanticRole": "uf_code",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 8,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "rm_region",
+            "ordinal": 3,
+            "sourceHeader": "Região RM",
+            "semanticRole": "rm_region",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 96,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "rm_responsible",
+            "ordinal": 4,
+            "sourceHeader": "Responsável Rm",
+            "semanticRole": "rm_responsible",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 160,
+              "blankAllowed": true
+            },
+            "aliases": []
+          },
+          {
+            "key": "base_code",
+            "ordinal": 5,
+            "sourceHeader": "Código da base",
+            "semanticRole": "base_code",
+            "dataType": "BASE_CODE",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 64,
+              "numericCodeAllowed": true,
+              "preserveExactText": true,
+              "fillLeadingZeros": false
+            },
+            "aliases": []
+          },
+          {
+            "key": "base_name",
+            "ordinal": 6,
+            "sourceHeader": "Nome da base",
+            "semanticRole": "base_name",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": false,
+            "validationRules": {
+              "maxLength": 191
+            },
+            "aliases": []
+          },
+          {
+            "key": "base_description",
+            "ordinal": 7,
+            "sourceHeader": "Descrição",
+            "semanticRole": "base_description",
+            "dataType": "TEXT",
+            "required": true,
+            "nullable": true,
+            "validationRules": {
+              "maxLength": 500,
+              "blankAllowed": true
+            },
+            "aliases": []
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -38,3 +38,33 @@ def test_data_sources_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -
     settings = Settings(_env_file=None, app_env="development")
 
     assert settings.data_sources_enabled is False
+
+
+def test_data_foundation_uses_dedicated_database_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "DATA_DB_HOST", "DATA_DB_NAME", "DATA_DB_USER", "DATA_DB_PASSWORD",
+        "DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DB_HOST", "auth-db.example.test")
+    monkeypatch.setenv("DB_NAME", "redes_paineis")
+    monkeypatch.setenv("DB_USER", "auth_user")
+    monkeypatch.setenv("DB_PASSWORD", "auth_secret")
+
+    with pytest.raises(ValidationError, match="DATA_DB_HOST"):
+        Settings(_env_file=None, data_queries_enabled=True)
+
+
+def test_data_foundation_imports_require_an_external_private_staging_path(tmp_path: Path) -> None:
+    base = {
+        "data_import_enabled": True,
+        "data_db_host": "localhost",
+        "data_db_name": "redes_paineis_dados",
+        "data_db_user": "foundation_user",
+        "data_db_password": "test-only-secret",
+    }
+    with pytest.raises(ValidationError, match="DATA_IMPORT_STAGING_DIRECTORY is required"):
+        Settings(_env_file=None, **base)
+
+    settings = Settings(_env_file=None, **base, data_import_staging_directory=tmp_path / "private-staging")
+    assert settings.data_import_staging_directory == tmp_path / "private-staging"

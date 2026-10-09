@@ -7,6 +7,7 @@ from starlette.requests import Request
 from app.api.auth import router as auth_router
 from app.api.admin_users import router as admin_users_router
 from app.api.data_sources import router as data_sources_router
+from app.api.data_foundation import router as data_foundation_router
 from app.api.health import router as health_router
 from app.api.workbooks import router as workbooks_router
 from app.core.config import get_settings
@@ -45,4 +46,5 @@ app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api/auth")
 app.include_router(admin_users_router, prefix="/api")
 app.include_router(data_sources_router, prefix="/api")
+app.include_router(data_foundation_router, prefix="/api")
 app.include_router(workbooks_router, prefix="/api")

@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     db_user: str | None = None
     db_password: str | None = None
 
+    # The data foundation has a separate identity and is never allowed to
+    # inherit DB_* credentials used by the platform user/authentication store.
+    data_db_host: str | None = None
+    data_db_port: int = 3306
+    data_db_name: str | None = None
+    data_db_user: str | None = None
+    data_db_password: str | None = None
+    data_queries_enabled: bool = False
+    data_import_enabled: bool = False
+    data_import_staging_directory: Path | None = None
+
     frontend_base_url: AnyHttpUrl = "http://127.0.0.1:3001"
     data_directory: Path = DEFAULT_DATA_DIRECTORY
     upload_username: str | None = None
@@ -64,6 +75,31 @@ class Settings(BaseSettings):
         if not directory.is_absolute() or directory.resolve().is_relative_to(PROJECT_ROOT.resolve()):
             raise ValueError("DATA_DIRECTORY must be an absolute path outside the project in production")
         return values
+
+    @model_validator(mode="after")
+    def validate_data_foundation_configuration(self) -> "Settings":
+        if not (self.data_queries_enabled or self.data_import_enabled):
+            return self
+
+        required = {
+            "DATA_DB_HOST": self.data_db_host,
+            "DATA_DB_NAME": self.data_db_name,
+            "DATA_DB_USER": self.data_db_user,
+            "DATA_DB_PASSWORD": self.data_db_password,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError("Data Foundation database settings are incomplete: " + ", ".join(missing))
+        if self.data_db_name != "redes_paineis_dados":
+            raise ValueError("DATA_DB_NAME must be redes_paineis_dados")
+
+        if self.data_import_enabled:
+            if self.data_import_staging_directory is None:
+                raise ValueError("DATA_IMPORT_STAGING_DIRECTORY is required when imports are enabled")
+            directory = self.data_import_staging_directory.expanduser()
+            if not directory.is_absolute() or directory.resolve().is_relative_to(PROJECT_ROOT.resolve()):
+                raise ValueError("DATA_IMPORT_STAGING_DIRECTORY must be absolute and outside the project")
+        return self
 
     @property
     def corporate_domain_allowlist(self) -> frozenset[str]:
