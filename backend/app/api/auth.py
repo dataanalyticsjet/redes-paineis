@@ -5,9 +5,12 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.session import database_session
+from app.db.session import database_session, get_db_session
+from app.models import PlatformUserFeishuProfile
 from app.api.dependencies import AuthenticatedViewer, get_current_viewer
 from app.services.feishu_auth import (
     SESSION_COOKIE,
@@ -27,6 +30,8 @@ from app.services.feishu_auth import (
     resolve_authorized_viewer,
     revoke_local_session,
 )
+from app.services.feishu_contacts import FeishuContactsError, fetch_feishu_organizational_profile
+from app.services.feishu_profiles import persist_feishu_sync_failure, persist_successful_feishu_profile
 from app.services.user_access import UserAccessError, identity_for_user, provision_feishu_user
 
 logger = logging.getLogger(__name__)
@@ -187,6 +192,7 @@ async def feishu_callback(request: Request) -> Response:
         with database_session(settings) as db:
             user_record = provision_feishu_user(db, identity)
             session_identity = identity_for_user(db, user_record)
+            session_identity["avatar_url"] = identity.get("avatar_url")
             session_identity["_owner_subject"] = identity.get("_owner_subject")
     except UserAccessError as error:
         logger.warning("Feishu account provisioning failed (category=%s)", error.code)
@@ -197,6 +203,50 @@ async def feishu_callback(request: Request) -> Response:
     except Exception as error:
         logger.error("Feishu account provisioning failed (error_type=%s)", type(error).__name__)
         return _login_error(request, "user_store_unavailable")
+
+    # Organizational profile refresh is informational and must never block
+    # an otherwise valid login or modify platform authorization.
+    user_id = int(session_identity["user_id"])
+    try:
+        organizational_profile = await fetch_feishu_organizational_profile(
+            str(identity.get("_open_id") or ""),
+            settings,
+            fallback_union_id=str(user.get("union_id") or "") or None,
+            fallback_avatar_url=identity.get("avatar_url"),
+        )
+        with database_session(settings) as db:
+            persist_successful_feishu_profile(
+                db,
+                user_id,
+                organizational_profile,
+                fallback_union_id=str(user.get("union_id") or "") or None,
+                fallback_avatar_url=identity.get("avatar_url"),
+            )
+        logger.info("Feishu organizational profile synchronized")
+    except FeishuContactsError as error:
+        logger.warning("Feishu organizational profile sync unavailable (category=%s)", error.category)
+        try:
+            with database_session(settings) as db:
+                persist_feishu_sync_failure(
+                    db,
+                    user_id,
+                    fallback_union_id=str(user.get("union_id") or "") or None,
+                    fallback_avatar_url=identity.get("avatar_url"),
+                )
+        except Exception:
+            logger.warning("Feishu organizational profile sync status could not be persisted")
+    except Exception as error:
+        logger.warning("Feishu organizational profile sync failed (error_type=%s)", type(error).__name__)
+        try:
+            with database_session(settings) as db:
+                persist_feishu_sync_failure(
+                    db,
+                    user_id,
+                    fallback_union_id=str(user.get("union_id") or "") or None,
+                    fallback_avatar_url=identity.get("avatar_url"),
+                )
+        except Exception:
+            logger.warning("Feishu organizational profile sync status could not be persisted")
 
     try:
         session_token = create_local_session(session_identity, settings)
@@ -219,28 +269,46 @@ async def feishu_callback(request: Request) -> Response:
 
 
 @router.get("/me")
-async def current_user(viewer: AuthenticatedViewer = Depends(get_current_viewer)) -> Response:
+async def current_user(
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+    db: Session = Depends(get_db_session),
+) -> Response:
     identity = viewer.identity
+    try:
+        profile = db.get(PlatformUserFeishuProfile, viewer.user.id)
+    except SQLAlchemyError as error:
+        db.rollback()
+        profile = None
+        logger.warning(
+            "Feishu optional profile store unavailable (error_type=%s)",
+            type(error).__name__,
+        )
     logger.info("Feishu local session recognized")
+    public_identity = {
+        key: identity.get(key)
+        for key in (
+            "username",
+            "avatar_url",
+            "role",
+            "region",
+            "base",
+            "platform_role",
+            "organizational_scope",
+            "home_region",
+            "home_base",
+            "additional_regions",
+            "effective_regions",
+            "is_active",
+        )
+    }
+    if profile and profile.avatar_url:
+        public_identity["avatar_url"] = profile.avatar_url
     return JSONResponse(
         {
             "authenticated": True,
-            **{
-                key: identity.get(key)
-                for key in (
-                    "username",
-                    "role",
-                    "region",
-                    "base",
-                    "platform_role",
-                    "organizational_scope",
-                    "home_region",
-                    "home_base",
-                    "additional_regions",
-                    "effective_regions",
-                    "is_active",
-                )
-            },
+            **public_identity,
+            "organizational_region_code": profile.organizational_region_code if profile else None,
+            "region_resolution_status": profile.region_resolution_status if profile else "UNKNOWN",
         },
         headers={"Cache-Control": "no-store"},
     )

@@ -71,7 +71,7 @@ def _require_metadata_feature() -> None:
 
 
 def _require_matrix_admin(viewer: AuthenticatedViewer) -> None:
-    """National import operations require an explicit matrix assignment."""
+    """V2 data exposure and national import operations require ADMIN/matrix."""
     if viewer.user.platform_role != "ADMIN":
         raise HTTPException(status_code=403, detail="admin_required")
     if (
@@ -138,8 +138,9 @@ def _as_csv_value(value: object) -> str:
 
 @router.get("/data-sources")
 def list_data_sources(
-    _viewer: AuthenticatedViewer = Depends(get_current_viewer),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_metadata_feature()
     try:
         with _engine().connect() as connection:
@@ -159,6 +160,7 @@ def list_data_sources(
 def current_base_mapping(
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_metadata_feature()
     try:
         return get_current_mapping_status(_engine(), identity=viewer.identity)
@@ -171,8 +173,9 @@ def current_base_mapping(
 @router.get("/data-sources/{source_id}/contract")
 def get_source_contract(
     source_id: str,
-    _viewer: AuthenticatedViewer = Depends(get_current_viewer),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_metadata_feature()
     contract = _source_contract(source_id)
     try:
@@ -339,6 +342,7 @@ def publish_initial_mapping_migration_route(
             job_id=job_id,
             actor_user_id=admin.user.id,
             staging_directory=settings.data_import_staging_directory,
+            idempotency_key=idempotency_key,
             request_id=_request_id(request),
         )
     except (DataFoundationError, WorkbookValidationError) as error:
@@ -352,8 +356,8 @@ def list_name_mapping_candidates(
     job_id: str,
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
-    _require_feature(imports=True)
     _require_matrix_admin(admin)
+    _require_feature(imports=True)
     settings = get_settings()
     if settings.data_import_staging_directory is None:
         raise HTTPException(status_code=503, detail="import_storage_unavailable")
@@ -459,8 +463,8 @@ def import_status(
     job_id: str,
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
-    _require_feature(imports=True)
     _require_matrix_admin(viewer)
+    _require_feature(imports=True)
     try:
         return get_job_status(_engine(), job_id, viewer.user.id)
     except DataFoundationError as error:
@@ -479,6 +483,7 @@ def data_source_dates(
     publication_id: str | None = Query(default=None, max_length=36),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_feature()
     try:
         return get_date_counts(
@@ -499,6 +504,7 @@ def data_source_publications(
     offset: int = Query(default=0, ge=0, le=10_000_000),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_feature()
     try:
         return get_publications(
@@ -523,6 +529,7 @@ def data_source_records(
     offset: int = Query(default=0, ge=0, le=10_000_000),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
+    _require_matrix_admin(viewer)
     _require_feature()
     try:
         return get_records(
@@ -548,6 +555,7 @@ def export_data_source(
     offset: int = Query(default=0, ge=0, le=10_000_000),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> StreamingResponse:
+    _require_matrix_admin(viewer)
     _require_feature()
     try:
         headers, records = export_records(

@@ -8,7 +8,8 @@ Este documento descreve o estado após o corte estrutural local. Não foi feito 
 | --- | --- | --- |
 | Frontend `/` | TanStack Start + Vite + Nitro/Node | Build server-side gera `.output/server/index.mjs`; navegação dos dashboards ainda usa o estado React da home. |
 | `GET /api/health` | FastAPI | Não consulta banco. |
-| `/api/auth/*` | FastAPI | OAuth Feishu v2, state de uso único, allowlist/domínio e cookie HttpOnly. Sessão/state em memória. Login foi validado localmente em execução anterior, não repetido neste corte. |
+| /api/auth/* | FastAPI + MySQL DB_* | OAuth Feishu v2, state de uso único, allowlist/domínio e cookie HttpOnly. Usuários e permissões são lidos no schema de autenticação; perfil Feishu organizacional fica em platform_user_feishu_profiles. Sessão/state em memória. |
+| /api/v2/* | FastAPI + MySQL DATA_DB_* | Consultas, contratos e publicações da Data Foundation no schema separado redes_paineis_dados; as flags controlam importação e consulta. |
 | `/api/workbook` | FastAPI | Processamento do Excel permanece no frontend; JSON e Excel original são versionados em disco local. Escopo é aplicado antes de devolver dados. |
 | `/api/data-sources/*` | FastAPI | Preview/import/remove no backend local e armazenamento em `DATA_DIRECTORY`. |
 | `/api/upload-auth` | FastAPI | Chamado pelo upload clássico no frontend para validar as credenciais server-side antes de gravar via `/api/workbook`; mantido nesta versão. |
@@ -19,11 +20,19 @@ Este documento descreve o estado após o corte estrutural local. Não foi feito 
 1. Aprovar domínio HTTPS e callback Feishu de produção; cadastrar o callback no aplicativo.
 2. Definir store compartilhada e durável para OAuth state e sessões revogáveis; hoje ambas ficam em memória e reinício encerra sessões.
 3. Escolher e provisionar um `DATA_DIRECTORY` absoluto fora do checkout, com permissões, backup e retenção. A configuração de produção recusa inicialização sem essa pasta explícita; workbooks/fontes sobrevivem ao restart da API enquanto o diretório persistente for mantido.
-4. Decidir se e quando usar MySQL. SQLAlchemy/PyMySQL estão preparados, mas o startup não conecta e nenhuma tabela/schema existe neste fluxo.
+4. Validar, sem acessar produção nesta auditoria, os destinos e privilégios dos dois bancos: DB_* para autenticação e DATA_DB_* para V2. Os schemas e tabelas são provisionados manualmente; o aplicativo não cria nem migra tabelas. Confirmar que platform_user_feishu_profiles corresponde ao ORM antes do deploy.
 5. Definir autenticação de upload compatível com operação e segurança corporativa; atualmente são credenciais de servidor separadas.
 6. Revisar Nginx/systemd, limites de upload, proxy headers, TLS, CORS, logs, permissões de diretório, monitoramento e recuperação. FastAPI deve ficar em um worker nesta primeira versão.
 7. Fazer verificação visual e funcional em navegador no ambiente alvo após o runtime local ser iniciado sem conflito de porta.
 8. Separar gradualmente o componente atual de painéis, que ainda é extenso; não alterar cálculos/filtros durante essa decomposição.
+
+## Sessões em memória e operação temporária
+
+O backend mantém em memória, por processo, sessões e tentativas OAuth. Os tokens de sessão e valores state são indexados por HMAC, o state é comparado ao cookie do navegador, consumido uma única vez e expira; sessões expiram pelo TTL e o logout revoga a entrada local. Reinício invalida todas as sessões e tentativas pendentes.
+
+Um único worker/processo pode ser usado temporariamente em desenvolvimento e homologação controlada. Em produção isso implica novo login após cada reinício, indisponibilidade de sessão durante reinícios e risco de falha OAuth quando requisições do mesmo fluxo forem atendidas por processos diferentes. Não escalar horizontalmente nem executar múltiplos workers com o armazenamento atual.
+
+Antes de produção, aprovar um armazenamento compartilhado e durável. A proposta é persistir somente hashes HMAC de tokens e states, associar sessão a usuário e horários de emissão/expiração/revogação, consumir state atomicamente uma única vez e invalidar sessão no logout, expiração ou bloqueio do usuário. Pode ser uma tabela transacional no MySQL de autenticação, após revisão e provisionamento manual do schema, ou um serviço Redis já aprovado com TTL e revogação; esta auditoria não cria tabela nem instala infraestrutura. Manter cookie HttpOnly/Secure em HTTPS, SameSite=Lax, state aleatório e vinculado ao cookie, expiração curta do state e verificação do usuário/permissões no backend em cada requisição.
 
 ## Regras de segurança preservadas
 

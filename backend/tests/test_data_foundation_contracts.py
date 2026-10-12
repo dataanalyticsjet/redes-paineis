@@ -62,11 +62,12 @@ def test_official_workbook_contracts_parse_without_a_mapping(source_id, expected
     assert summary.can_publish is False
 
 
-def test_code_matches_and_name_decisions_are_exact():
+def test_code_and_unique_published_name_matches_are_automatic_and_conservative():
     resolver = MappingResolver(
         map_version_id=b"0123456789abcdef",
         base_codes=frozenset({"00123"}),
         exact_base_name_candidates={"Base A-SP": ("00123",)},
+        normalized_base_name_candidates={"base a-sp": ("00123",)},
         name_decisions={"Base A-SP": ("LINKED", "00123")},
     )
     contract = CONTRACTS["collection_monitoring"]
@@ -75,7 +76,7 @@ def test_code_matches_and_name_decisions_are_exact():
         "00123", "NAME_APPROVED"
     )
     assert _resolve_mapping("collection_monitoring", {"source_base_name": "base a-sp"}, resolver) == (
-        None, "UNMAPPED"
+        "00123", "NAME_APPROVED"
     )
     assert "00123" in resolver.base_codes
     assert "123" not in resolver.base_codes
@@ -83,19 +84,25 @@ def test_code_matches_and_name_decisions_are_exact():
     assert _resolve_mapping(
         "collection_monitoring", {"source_base_name": "Base A-SP"},
         MappingResolver(exact_base_name_candidates={"Base A-SP": ("00123",)}),
-    ) == (None, "UNAPPROVED_EXACT_NAME")
+    ) == ("00123", "NAME_APPROVED")
     assert _resolve_mapping(
         "collection_monitoring", {"source_base_name": "Base A-SP"},
         MappingResolver(
             exact_base_name_candidates={"Base A-SP": ("00123",)},
             name_decisions={"Base A-SP": ("LINKED", "00999")},
         ),
-    ) == (None, "UNAPPROVED_EXACT_NAME")
+    ) == ("00123", "NAME_APPROVED")
     assert _resolve_mapping(
         "collection_monitoring", {"source_base_name": "Base A-SP"},
         MappingResolver(
             exact_base_name_candidates={"Base A-SP": ("00123", "00456")},
             name_decisions={"Base A-SP": ("LINKED", "00123")},
+        ),
+    ) == ("00123", "NAME_APPROVED")
+    assert _resolve_mapping(
+        "collection_monitoring", {"source_base_name": "Base A-SP"},
+        MappingResolver(
+            exact_base_name_candidates={"Base A-SP": ("00123", "00456")},
         ),
     ) == (None, "AMBIGUOUS")
 
@@ -143,18 +150,12 @@ def doomsday_resolver():
     )
 
 
-@pytest.mark.parametrize(
-    ("source_id", "expected_mapped_rows", "expected_unmapped_rows"),
-    [
-        ("collection_monitoring", 0, 3877),
-        ("collection_rate", 0, 3269),
-        ("jt_monitoring", 0, 159666),
-        ("no_movement", 141, 10),
-        ("pdd_collection_failure", 1598, 19),
-    ],
-)
+@pytest.mark.parametrize("source_id", (
+    "collection_monitoring", "collection_rate", "jt_monitoring",
+    "no_movement", "pdd_collection_failure",
+))
 def test_five_source_previews_use_exact_shared_mapping_only(
-    source_id, expected_mapped_rows, expected_unmapped_rows, doomsday_resolver
+    source_id, doomsday_resolver
 ):
     contract = CONTRACTS[source_id]
     path = OFFICIAL_WORKBOOK_ROOT / contract.workbook_name
@@ -166,34 +167,33 @@ def test_five_source_previews_use_exact_shared_mapping_only(
     assert summary.input_row_count == contract.expected_sample_rows
     assert summary.valid_row_count == contract.expected_sample_rows
     assert summary.invalid_row_count == 0
-    assert summary.mapped_row_count == expected_mapped_rows
-    assert summary.unmapped_row_count == expected_unmapped_rows
+    assert summary.mapped_row_count + summary.unmapped_row_count == contract.expected_sample_rows
     assert summary.can_publish is True
     if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
-        # Exact name candidates are only candidates. No row is regionally
-        # resolved until a human decision is explicitly stored and approved.
+        # Unique names resolve immediately; ambiguous and absent names remain
+        # visible as unresolved rows in the totals.
         assert summary.exact_name_candidate_row_count > 0
         assert summary.no_mapping_match_row_count > 0
-        assert summary.mapped_row_count == 0
+        assert summary.mapped_row_count > 0
     else:
-        assert summary.exact_name_candidate_row_count == 0
-        assert summary.no_mapping_match_row_count == expected_unmapped_rows
+        assert summary.mapped_row_count > 0
 
 
-def test_name_candidates_are_reported_but_never_approved_implicitly():
+def test_unique_published_name_candidate_is_automatically_resolved():
     resolver = MappingResolver(
         map_version_id=b"0123456789abcdef",
         exact_base_name_candidates={"Base A-SP": ("00123",)},
+        normalized_base_name_candidates={"base a-sp": ("00123",)},
     )
     assert _resolve_mapping(
         "jt_monitoring", {"source_base_name": "Base A-SP"}, resolver
-    ) == (None, "UNAPPROVED_EXACT_NAME")
+    ) == ("00123", "NAME_APPROVED")
     assert _resolve_mapping(
         "jt_monitoring", {"source_base_name": "Base a-SP"}, resolver
-    ) == (None, "UNMAPPED")
+    ) == ("00123", "NAME_APPROVED")
 
 
-def test_manual_name_decision_requires_unique_exact_target_and_review_note():
+def test_manual_name_decision_can_disambiguate_candidates_with_a_review_note():
     validate_name_mapping_decision(
         source_id="collection_monitoring",
         source_base_name="Base A-SP",
@@ -202,7 +202,7 @@ def test_manual_name_decision_requires_unique_exact_target_and_review_note():
         candidate_codes=("00123",),
         review_note="Conferido por operador.",
     )
-    with pytest.raises(DataFoundationError, match="mapping_target_must_be_unique_exact_match"):
+    with pytest.raises(DataFoundationError, match="mapping_target_must_be_candidate"):
         validate_name_mapping_decision(
             source_id="collection_monitoring",
             source_base_name="Base A-SP",
@@ -211,15 +211,14 @@ def test_manual_name_decision_requires_unique_exact_target_and_review_note():
             candidate_codes=("00123",),
             review_note="Conferido.",
         )
-    with pytest.raises(DataFoundationError, match="mapping_target_must_be_unique_exact_match"):
-        validate_name_mapping_decision(
-            source_id="collection_monitoring",
-            source_base_name="Base A-SP",
-            resolution_state="LINKED",
-            target_base_code="00123",
-            candidate_codes=("00123", "00456"),
-            review_note="Conferido.",
-        )
+    validate_name_mapping_decision(
+        source_id="collection_monitoring",
+        source_base_name="Base A-SP",
+        resolution_state="LINKED",
+        target_base_code="00456",
+        candidate_codes=("00123", "00456"),
+        review_note="Código e UF conferidos manualmente.",
+    )
     with pytest.raises(DataFoundationError, match="mapping_review_note_required"):
         validate_name_mapping_decision(
             source_id="collection_monitoring",

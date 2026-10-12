@@ -233,6 +233,7 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
     assert identity.json() == {
         "authenticated": True,
         "username": "Demo Viewer",
+        "avatar_url": None,
         "role": "regional",
         "region": "SPS",
         "base": None,
@@ -243,6 +244,8 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
         "additional_regions": [],
         "effective_regions": ["SPS"],
         "is_active": True,
+        "organizational_region_code": None,
+        "region_resolution_status": "UNKNOWN",
     }
 
     logout = client.post("/api/auth/logout")
@@ -285,6 +288,152 @@ def test_callback_uses_direct_oauth_query_parameters(
     assert callback.status_code == 302
     assert callback.headers["location"] == "http://127.0.0.1:3000/"
     assert client.get("/api/auth/me").status_code == 200
+
+
+def test_authenticated_profile_exposes_only_valid_feishu_avatar_url(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_feishu_user(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "email": "allowed@example.test",
+                "tenant_key": "tenant-test",
+                "open_id": "private-open-id",
+                "union_id": "private-union-id",
+                "name": "PHELIPPE LUCIANO CARDOSO",
+                "avatar_middle": "https://s3-imfile.feishucdn.com/avatar-240.png",
+                "avatar_big": "https://s3-imfile.feishucdn.com/avatar-640.png",
+            },
+        },
+    )
+    state, _ = begin_login(client)
+    callback = client.get(
+        f"/api/auth/feishu/callback?code=oauth-code&state={state}",
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 302
+    profile = client.get("/api/auth/me")
+
+    assert profile.status_code == 200
+    assert profile.json()["avatar_url"] == "https://s3-imfile.feishucdn.com/avatar-640.png"
+    assert profile.json()["username"] == "PHELIPPE LUCIANO CARDOSO"
+    assert "open_id" not in profile.json()
+    assert "union_id" not in profile.json()
+    assert "email" not in profile.json()
+    assert "access_token" not in profile.json()
+    assert "department_paths" not in profile.json()
+    assert profile.json()["organizational_region_code"] is None
+    assert profile.json()["region_resolution_status"] == "UNKNOWN"
+
+
+def test_authenticated_profile_exposes_resolved_organizational_region_without_private_paths(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.feishu_contacts import FeishuOrganizationalProfile
+
+    patch_feishu_user(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "email": "allowed@example.test",
+                "tenant_key": "tenant-test",
+                "open_id": "private-open-id",
+                "union_id": "private-union-id",
+            },
+        },
+    )
+
+    async def resolved_profile(*_args: object, **_kwargs: object):
+        return FeishuOrganizationalProfile(
+            union_id="private-union-id",
+            avatar_url=None,
+            department_paths=[["od-3d75c10ce15130e199fc3b42e4e86a04"]],
+        )
+
+    monkeypatch.setattr("app.api.auth.fetch_feishu_organizational_profile", resolved_profile)
+    state, _ = begin_login(client)
+    assert client.get(
+        f"/api/auth/feishu/callback?code=oauth-code&state={state}",
+        follow_redirects=False,
+    ).status_code == 302
+
+    profile = client.get("/api/auth/me").json()
+    assert profile["organizational_region_code"] == "SPN"
+    assert profile["region_resolution_status"] == "RESOLVED"
+    assert "department_paths" not in profile
+    assert "union_id" not in profile
+    assert "open_id" not in profile
+
+
+def test_contacts_failure_does_not_block_login(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    user_test_session_factory,
+) -> None:
+    from app.services.feishu_contacts import FeishuContactsError
+
+    patch_feishu_user(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "email": "allowed@example.test",
+                "tenant_key": "tenant-test",
+                "open_id": "private-open-id",
+            },
+        },
+    )
+
+    async def unavailable(*_args: object, **_kwargs: object):
+        raise FeishuContactsError("contacts_permission_denied", 403)
+
+    monkeypatch.setattr("app.api.auth.fetch_feishu_organizational_profile", unavailable)
+    state, _ = begin_login(client)
+    callback = client.get(
+        f"/api/auth/feishu/callback?code=oauth-code&state={state}",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 302
+    profile = client.get("/api/auth/me").json()
+    assert profile["region_resolution_status"] == "SYNC_FAILED"
+
+    from sqlalchemy import select
+
+    from app.models import PlatformUser
+
+    with user_test_session_factory() as db:
+        provisioned = db.scalar(
+            select(PlatformUser).where(
+                PlatformUser.tenant_key == "tenant-test",
+                PlatformUser.open_id == "private-open-id",
+            )
+        )
+        assert provisioned is not None
+        assert provisioned.platform_role == "USER"
+        assert provisioned.organizational_scope == "regional"
+        assert provisioned.home_region == "SPS"
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        ({"avatar_big": "http://s3-imfile.feishucdn.com/avatar.png"}, None),
+        ({"avatar_big": "https://example.test/avatar.png"}, None),
+        ({"avatar_big": "https://s3-imfile.feishucdn.com/avatar.png"}, "https://s3-imfile.feishucdn.com/avatar.png"),
+        ({"avatar_big": "invalid", "avatar_middle": "https://s3-imfile.feishucdn.com/middle.png"}, "https://s3-imfile.feishucdn.com/middle.png"),
+    ],
+)
+def test_feishu_avatar_selection_rejects_untrusted_urls(
+    profile: dict[str, str],
+    expected: str | None,
+) -> None:
+    assert feishu_auth._feishu_avatar_url(profile) == expected
 
 
 def test_callback_uses_v2_token_exchange_without_pkce_and_logs_no_oauth_values(
@@ -521,3 +670,48 @@ def test_production_cookie_is_secure_even_behind_http_proxy(
 
     assert _cookie_options(request, 60)["secure"] is True
     get_settings.cache_clear()
+
+def test_auth_me_survives_failure_of_optional_profile_store(
+    client: TestClient,
+    create_user_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.orm import Session
+
+    from app.models import PlatformUserFeishuProfile
+
+    token, user = create_user_session(
+        platform_role="USER",
+        organizational_scope="regional",
+        home_region="SPS",
+        identity_suffix="optional-profile-store",
+    )
+    client.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    original_get = Session.get
+
+    def fail_only_optional_profile(
+        session: Session,
+        entity,
+        ident,
+        **kwargs: object,
+    ):
+        if entity is PlatformUserFeishuProfile:
+            raise SQLAlchemyError("private database diagnostic")
+        return original_get(session, entity, ident, **kwargs)
+
+    monkeypatch.setattr(Session, "get", fail_only_optional_profile)
+    response = client.get("/api/auth/me")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authenticated"] is True
+    assert body["platform_role"] == "USER"
+    assert body["organizational_scope"] == "regional"
+    assert body["home_region"] == "SPS"
+    assert body["organizational_region_code"] is None
+    assert body["region_resolution_status"] == "UNKNOWN"
+    assert "private database diagnostic" not in response.text
+    assert "department_paths" not in body
+    assert "union_id" not in body
+    assert user.platform_role == "USER"

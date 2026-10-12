@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent, type KeyboardEvent } from "react";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
-import { dashboardCards, dashboardCategories, type DashboardCategory, type DashboardPanel } from "../dashboards/dashboard-catalog";
+import { dashboardCategories, type DashboardCategory, type DashboardPanel } from "../dashboards/dashboard-catalog";
+import { dashboardCardsForCategory } from "../dashboards/dashboard-availability";
 export { dashboardCards, dashboardCategories } from "../dashboards/dashboard-catalog";
 export type { DashboardCategory, DashboardPanel } from "../dashboards/dashboard-catalog";
 import {
@@ -51,11 +52,13 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
   const [customDashboards, setCustomDashboards] = useState<CustomDashboard[]>([]);
   const [activeCategory, setActiveCategory] = useState<DashboardCategory>("first-mile");
   const [sharePreview, setSharePreview] = useState<FeishuSharePreview | null>(null);
-  const visibleDashboardCards = dashboardCards.filter((card) => card.category === activeCategory);
+  const assistantChatEnabled = false;
+  const visibleDashboardCards = dashboardCardsForCategory(activeCategory);
   const visibleCustomDashboards = customDashboards.filter((dashboard) => dashboard.category === activeCategory);
 
   function sendMessage(event?: FormEvent<HTMLFormElement>, suggestion?: string) {
     event?.preventDefault();
+    if (!assistantChatEnabled) return;
     const content = (suggestion ?? draft).trim();
     if (!content) return;
     setMessages((current) => {
@@ -71,6 +74,10 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (!assistantChatEnabled) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       sendMessage();
@@ -78,6 +85,7 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
   }
 
   function addDashboardContext(id: DashboardPanel, title: string) {
+    if (!assistantChatEnabled) return;
     setContexts((current) => current.some((item) => item.id === `dashboard-${id}`)
       ? current
       : [...current, { id: `dashboard-${id}`, kind: "dashboard", label: title }]);
@@ -87,6 +95,7 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
 
   function addInformationContext(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!assistantChatEnabled) return;
     const value = informationDraft.trim();
     if (!value) return;
     setContexts((current) => [...current, { id: `information-${Date.now()}`, kind: "information", label: value }]);
@@ -123,13 +132,17 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
 
   return (
     <main className="presentation-home" aria-label={t("Central de painéis")}>
-      <section className="presentation-chat" aria-labelledby="presentation-chat-title">
+      <section className="presentation-chat" aria-labelledby="presentation-chat-title" aria-describedby="presentation-chat-development-note" data-chat-state={assistantChatEnabled ? "enabled" : "development"}>
         <div className="presentation-chat-heading">
           <span className="presentation-chat-eyebrow"><ChartNoAxesCombined size={17} /><i aria-hidden="true" /> {t("Central operacional")}</span>
           <h1 id="presentation-chat-title">{t("Como posso ajudar?")}</h1>
-          <p>{t("Explore os painéis e encontre os indicadores da operação. Ou pergunte o que deseja acompanhar.")}</p>
+          <p>{t("Explore os painéis e encontre os indicadores da operação.")}</p>
         </div>
         <div className="presentation-chat-history" aria-live="polite" aria-label={t("Mensagens")}>
+          <div className="presentation-development-notice" id="presentation-chat-development-note" role="status" aria-live="polite">
+            <strong>{t("Em desenvolvimento")}</strong>
+            <p>{t("Nosso assistente de IA estará disponível em breve.")}</p>
+          </div>
           {messages.length ? (
             <div className="presentation-message-list">
               {messages.map((message) => (
@@ -145,8 +158,9 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
                           <button
                             type="button"
                             className="presentation-message-share"
-                            disabled={!canShareResponse}
-                            title={t(canShareResponse ? "Enviar para Feishu" : "Esta resposta ainda não contém uma análise para compartilhar.")}
+                            disabled={!assistantChatEnabled || !canShareResponse}
+                            aria-describedby="presentation-chat-development-note"
+                            title={t(assistantChatEnabled && canShareResponse ? "Enviar para Feishu" : "Em desenvolvimento")}
                             onClick={() => setSharePreview({
                               title: t("Resposta do assistente"),
                               filters: [],
@@ -167,7 +181,7 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
             <div className="presentation-suggestions">
               <span>{t("Sugestões para começar")}</span>
               {suggestions.map(({ text, icon: Icon, tone }) => (
-                <button type="button" key={text} onClick={() => sendMessage(undefined, t(text))}>
+                <button type="button" key={text} onClick={() => sendMessage(undefined, t(text))} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note" title={t("Em desenvolvimento")}>
                   <span className={`presentation-suggestion-icon ${tone}`}><Icon size={23} /></span>
                   <span className="presentation-suggestion-text">{t(text)}</span>
                   <ArrowRight className="presentation-suggestion-arrow" size={18} />
@@ -176,20 +190,20 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
             </div>
           )}
         </div>
-        <form className="presentation-composer-shell" onSubmit={(event) => sendMessage(event)}>
+        <form className="presentation-composer-shell" onSubmit={(event) => { event.preventDefault(); if (assistantChatEnabled) sendMessage(event); }}>
           {contexts.length ? (
             <div className="presentation-context-list" aria-label={t("Contexto da pergunta")}>
               {contexts.map((item) => (
                 <span className="presentation-context-chip" key={item.id} title={item.kind === "dashboard" ? t(item.label) : item.label}>
                   <span>{t(item.kind === "dashboard" ? "Painel: {name}" : "Informação: {name}", { name: item.kind === "dashboard" ? t(item.label) : item.label })}</span>
-                  <button type="button" aria-label={t("Remover contexto {name}", { name: item.kind === "dashboard" ? t(item.label) : item.label })} onClick={() => setContexts((current) => current.filter((context) => context.id !== item.id))}><X size={13} /></button>
+                  <button type="button" aria-label={t("Remover contexto {name}", { name: item.kind === "dashboard" ? t(item.label) : item.label })} onClick={() => { if (assistantChatEnabled) setContexts((current) => current.filter((context) => context.id !== item.id)); }} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note"><X size={13} /></button>
                 </span>
               ))}
             </div>
           ) : null}
           <div className="presentation-composer">
             <div className="presentation-composer-menu-wrap">
-              <button className="presentation-add-context" type="button" aria-label={t("Adicionar contexto à pergunta")} aria-expanded={composerMenuOpen} onClick={() => { setComposerMenuOpen((open) => !open); setDashboardPickerOpen(false); }}>
+              <button className="presentation-add-context" type="button" aria-label={t("Adicionar contexto à pergunta")} aria-expanded={composerMenuOpen} onClick={() => { if (!assistantChatEnabled) return; setComposerMenuOpen((open) => !open); setDashboardPickerOpen(false); }} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note">
                 <Plus size={20} />
               </button>
               {composerMenuOpen ? (
@@ -199,24 +213,24 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
                       <strong>{t("Adicionar painel como contexto")}</strong>
                       <div className="presentation-context-category-list">
                         {dashboardCategories.map(({ id: category, label }) => {
-                          const categoryCards = dashboardCards.filter((card) => card.category === category);
+                          const categoryCards = dashboardCardsForCategory(category);
                           return (
                             <section className="presentation-context-category" key={category} aria-label={label}>
                               <span>{label}</span>
                               {categoryCards.length ? categoryCards.map(({ id, title, icon: Icon }) => (
-                                <button type="button" key={id} onClick={() => addDashboardContext(id, title)}><Icon size={16} /><span>{t(title)}</span><Plus size={14} /></button>
+                                <button type="button" key={id} onClick={() => addDashboardContext(id, title)} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note"><Icon size={16} /><span>{t(title)}</span><Plus size={14} /></button>
                               )) : <p>{t("Nenhum dashboard de Last Mile configurado.")}</p>}
                             </section>
                           );
                         })}
                       </div>
-                      <button className="presentation-context-menu-back" type="button" onClick={() => setDashboardPickerOpen(false)}>{t("Voltar")}</button>
+                      <button className="presentation-context-menu-back" type="button" onClick={() => setDashboardPickerOpen(false)} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note">{t("Voltar")}</button>
                     </>
                   ) : (
                     <>
                       <strong>{t("Adicionar contexto")}</strong>
-                      <button type="button" onClick={() => setDashboardPickerOpen(true)}><ChartNoAxesCombined size={16} /><span>{t("Adicionar dashboard")}</span><ArrowUpRight size={14} /></button>
-                      <button type="button" onClick={() => { setComposerMenuOpen(false); setInformationDialogOpen(true); }}><Plus size={16} /><span>{t("Adicionar informação")}</span><ArrowUpRight size={14} /></button>
+                      <button type="button" onClick={() => setDashboardPickerOpen(true)} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note"><ChartNoAxesCombined size={16} /><span>{t("Adicionar dashboard")}</span><ArrowUpRight size={14} /></button>
+                      <button type="button" onClick={() => { if (!assistantChatEnabled) return; setComposerMenuOpen(false); setInformationDialogOpen(true); }} disabled={!assistantChatEnabled} aria-describedby="presentation-chat-development-note"><Plus size={16} /><span>{t("Adicionar informação")}</span><ArrowUpRight size={14} /></button>
                     </>
                   )}
                 </div>
@@ -227,13 +241,15 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
               id="presentation-chat-message"
               rows={1}
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => { if (assistantChatEnabled) setDraft(event.target.value); }}
               onKeyDown={handleComposerKeyDown}
               placeholder={t("Pergunte sobre os indicadores…")}
+              disabled={!assistantChatEnabled}
+              aria-describedby="presentation-chat-development-note"
             />
-            <button className="presentation-send-button" type="submit" aria-label={t("Enviar mensagem")} disabled={!draft.trim()}><Send size={17} /></button>
+            <button className="presentation-send-button" type="submit" aria-label={t("Enviar mensagem")} disabled={!assistantChatEnabled || !draft.trim()} aria-describedby="presentation-chat-development-note" title={t("Em desenvolvimento")}><Send size={17} /></button>
           </div>
-          <small>{t("O botão + adiciona contexto à pergunta. Nada é enviado a um assistente nesta etapa.")}</small>
+          <small>{t("Os recursos do assistente estão temporariamente desabilitados.")}</small>
         </form>
       </section>
 
@@ -245,18 +261,30 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
           </div>
           <span className="presentation-dashboard-count">{visibleDashboardCards.length}</span>
         </div>
-        <div className="presentation-dashboard-categories" role="group" aria-label={t("Categoria dos dashboards")}>
-          {dashboardCategories.map(({ id, label }) => (
-            <button
-              className={activeCategory === id ? "active" : ""}
-              type="button"
-              key={id}
-              aria-pressed={activeCategory === id}
-              onClick={() => setActiveCategory(id)}
-            >{label}</button>
-          ))}
+        <div className="presentation-dashboard-toolbar">
+          <div className="presentation-dashboard-categories" role="group" aria-label={t("Categoria dos dashboards")}>
+            {dashboardCategories.map(({ id, label }) => (
+              <button
+                className={activeCategory === id ? "active" : ""}
+                type="button"
+                key={id}
+                aria-pressed={activeCategory === id}
+                onClick={() => setActiveCategory(id)}
+              >{label}</button>
+            ))}
+          </div>
+          {activeCategory === "first-mile" ? (
+            <button className="presentation-dashboard-add-inline" type="button" onClick={() => setAddDashboardDialogOpen(true)}>
+              <Plus size={14} /> {t("Adicionar dashboard")}
+            </button>
+          ) : null}
         </div>
-        <div className="presentation-dashboard-list">
+        <div
+          className="presentation-dashboard-list"
+          data-category={activeCategory}
+          tabIndex={activeCategory === "last-mile" ? 0 : undefined}
+          aria-label={t("Painéis disponíveis")}
+        >
           {visibleDashboardCards.map(({ id, title, description, icon: Icon, tone }) => (
             <button className="presentation-dashboard-card" type="button" key={id} onClick={() => onSelect(id)}>
               <span className={`presentation-dashboard-icon ${tone}`}><Icon size={21} /></span>
@@ -273,14 +301,6 @@ export function AssistantHome({ onSelect, t }: { onSelect: (view: DashboardPanel
               <span className="presentation-dashboard-open"><span className="presentation-dashboard-action-label"><ArrowUpRight size={16} />{t("Abrir painel")}</span><span className="presentation-dashboard-arrow"><ArrowRight size={17} /></span></span>
             </button>
           ))}
-          {activeCategory === "first-mile" ? (
-            <button className="presentation-dashboard-card presentation-add-dashboard-card" type="button" onClick={() => setAddDashboardDialogOpen(true)}>
-              <span className="presentation-add-dashboard-mark"><Plus size={26} /></span>
-              <strong>{t("Adicionar dashboard")}</strong>
-              <small>{t("Incluir um link nesta sessão.")}</small>
-              <span className="presentation-dashboard-open"><span className="presentation-dashboard-action-label">{t("Ação local")}</span><span className="presentation-dashboard-arrow"><ArrowRight size={17} /></span></span>
-            </button>
-          ) : null}
         </div>
         {activeCategory === "last-mile" && visibleDashboardCards.length === 0 ? (
           <div className="presentation-dashboard-empty" role="status">{t("Nenhum dashboard de Last Mile configurado.")}</div>

@@ -16,6 +16,11 @@ from typing import Callable, Iterator
 from xml.etree import ElementTree as ET
 
 from app.services.data_foundation.contracts import ContractColumn, SourceContract
+from app.services.data_foundation.mapping_resolution import (
+    CODE_RESOLUTION_SOURCES,
+    normalize_mapping_name,
+    resolve_name_candidates,
+)
 
 
 MAX_UNCOMPRESSED_WORKBOOK_BYTES = 512 * 1024 * 1024
@@ -42,7 +47,9 @@ class MappingResolver:
     map_version_id: bytes | None = None
     base_codes: frozenset[str] = frozenset()
     exact_base_name_candidates: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    normalized_base_name_candidates: dict[str, tuple[str, ...]] = field(default_factory=dict)
     name_decisions: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    normalized_name_decisions: dict[str, tuple[str, str | None]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,7 @@ class PreviewSummary:
     mapped_row_count: int = 0
     unmapped_row_count: int = 0
     exact_name_candidate_row_count: int = 0
+    normalized_name_candidate_row_count: int = 0
     no_mapping_match_row_count: int = 0
     missing_identifier_row_count: int = 0
     ambiguous_row_count: int = 0
@@ -96,6 +104,7 @@ class PreviewSummary:
             "mappedRowCount": self.mapped_row_count,
             "unmappedRowCount": self.unmapped_row_count,
             "exactNameCandidateRowCount": self.exact_name_candidate_row_count,
+            "normalizedNameCandidateRowCount": self.normalized_name_candidate_row_count,
             "noMappingMatchRowCount": self.no_mapping_match_row_count,
             "missingIdentifierRowCount": self.missing_identifier_row_count,
             "ambiguousRowCount": self.ambiguous_row_count,
@@ -406,41 +415,31 @@ def _resolve_mapping(
 ) -> tuple[str | None, str]:
     if source_id == "base_mapping_official":
         return None, "MAP_ENTRY"
-    if source_id in {"no_movement", "pdd_collection_failure"}:
+    if source_id in CODE_RESOLUTION_SOURCES:
         code = row.get("source_base_code")
-        if code is None:
-            return None, "UNMAPPED"
-        code_text = str(code)
-        if code_text in resolver.base_codes:
+        code_text = str(code).strip() if code is not None else ""
+        if code_text and code_text in resolver.base_codes:
             return code_text, "CODE_MATCH"
-        return None, "UNMAPPED"
+        if code_text:
+            # A supplied but unknown official code is authoritative; do not
+            # silently replace it with a name-based candidate.
+            return None, "UNMAPPED"
 
     base_name = row.get("source_base_name")
     if not isinstance(base_name, str) or not base_name.strip():
         return None, "MISSING_IDENTIFIER"
     candidates = resolver.exact_base_name_candidates.get(base_name, ())
+    normalized_candidates = resolver.normalized_base_name_candidates.get(
+        normalize_mapping_name(base_name), ()
+    ) if not candidates else ()
     decision = resolver.name_decisions.get(base_name)
-    if decision:
-        state, target_code = decision
-        if state == "LINKED":
-            if len(candidates) == 1 and target_code == candidates[0]:
-                return target_code, "NAME_APPROVED"
-            if len(candidates) > 1:
-                return None, "AMBIGUOUS"
-            if candidates:
-                return None, "UNAPPROVED_EXACT_NAME"
-        if state == "AMBIGUOUS":
-            return None, "AMBIGUOUS"
-        if state == "REJECTED":
-            return None, "REJECTED"
-        if candidates:
-            return None, "UNAPPROVED_EXACT_NAME"
-        return None, "UNMAPPED"
-    if len(candidates) == 1:
-        return None, "UNAPPROVED_EXACT_NAME"
-    if len(candidates) > 1:
-        return None, "AMBIGUOUS"
-    return None, "UNMAPPED"
+    if decision is None and not candidates:
+        decision = resolver.normalized_name_decisions.get(normalize_mapping_name(base_name))
+    return resolve_name_candidates(
+        exact_candidates=candidates,
+        normalized_candidates=normalized_candidates,
+        decision=decision,
+    )
 
 
 def parse_workbook(
@@ -562,15 +561,12 @@ def parse_workbook(
             summary.valid_row_count += 1
             source_code = values.get("source_base_code")
             source_name = values.get("source_base_name")
-            if contract.source_id in {"no_movement", "pdd_collection_failure"}:
-                if source_code is not None and str(source_code) not in mapping.base_codes:
-                    summary.no_mapping_match_row_count += 1
-            elif contract.source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
-                if isinstance(source_name, str):
-                    if source_name in mapping.exact_base_name_candidates:
-                        summary.exact_name_candidate_row_count += 1
-                    else:
-                        summary.no_mapping_match_row_count += 1
+            has_source_code = source_code is not None and bool(str(source_code).strip())
+            if isinstance(source_name, str) and source_name.strip():
+                if source_name in mapping.exact_base_name_candidates:
+                    summary.exact_name_candidate_row_count += 1
+                elif normalize_mapping_name(source_name) in mapping.normalized_base_name_candidates:
+                    summary.normalized_name_candidate_row_count += 1
             keyed_date = _date_key(values)
             if keyed_date:
                 date_key = keyed_date.isoformat()
@@ -578,6 +574,9 @@ def parse_workbook(
             resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping)
             if resolved_code is not None:
                 summary.mapped_row_count += 1
+            elif resolution == "UNMAPPED" and (has_source_code or (isinstance(source_name, str) and source_name.strip())):
+                summary.no_mapping_match_row_count += 1
+                summary.unmapped_row_count += 1
             elif resolution == "MAP_ENTRY":
                 pass
             elif resolution == "MISSING_IDENTIFIER":

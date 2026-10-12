@@ -25,6 +25,13 @@ CALLBACK_PATH = "/api/auth/feishu/callback"
 STATE_TTL_SECONDS = 600
 SESSION_TTL_SECONDS = 8 * 60 * 60
 
+_FEISHU_AVATAR_HOSTS = (
+    "feishu.cn",
+    "larksuite.com",
+    "feishucdn.com",
+    "larksuitecdn.com",
+)
+
 
 @dataclass(frozen=True)
 class OAuthAttempt:
@@ -45,6 +52,37 @@ class FeishuAuthError(Exception):
         super().__init__(code)
         self.code = code
         self.http_status = http_status
+
+
+def _feishu_avatar_url(user: dict[str, Any]) -> str | None:
+    """Return only HTTPS avatar URLs supplied by the authenticated Feishu profile."""
+    for field in ("avatar_big", "avatar_middle", "avatar_url", "avatar_thumb"):
+        value = user.get(field)
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if not candidate or len(candidate) > 2048:
+            continue
+        try:
+            parsed = urlsplit(candidate)
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            port = parsed.port
+        except ValueError:
+            continue
+        if (
+            parsed.scheme.lower() != "https"
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is not None
+            or not any(
+                hostname == allowed_host or hostname.endswith(f".{allowed_host}")
+                for allowed_host in _FEISHU_AVATAR_HOSTS
+            )
+        ):
+            continue
+        return candidate
+    return None
 
 
 _store_lock = threading.Lock()
@@ -392,6 +430,7 @@ def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[
 
     return {
         "username": display_name or email,
+        "avatar_url": _feishu_avatar_url(user),
         "role": resolved_role,
         "region": resolved_region,
         "base": resolved_base,

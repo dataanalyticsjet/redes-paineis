@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, JSON, String, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    FetchedValue,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    func,
+)
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -21,7 +33,11 @@ class Region(Base):
 class PlatformUser(Base):
     __tablename__ = "platform_users"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True).with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     tenant_key: Mapped[str] = mapped_column(String(128), nullable=False)
     open_id: Mapped[str] = mapped_column(String(128), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -81,3 +97,55 @@ class UserAccessAudit(Base):
     regions_added: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     regions_removed: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
+
+
+class PlatformUserFeishuProfile(Base):
+    """Informational Feishu organization profile stored outside authorization fields."""
+
+    __tablename__ = "platform_user_feishu_profiles"
+    __table_args__ = (
+        Index("ix_platform_user_feishu_profiles_union_id", "union_id"),
+        Index(
+            "ix_platform_user_feishu_profiles_organizational_region_code",
+            "organizational_region_code",
+        ),
+    )
+
+    # Matches the manually provisioned MySQL table while retaining
+    # SQLite-compatible identifiers for isolated tests.
+    user_id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True).with_variant(Integer, "sqlite"),
+        ForeignKey("platform_users.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    union_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    department_paths: Mapped[list[list[str]] | None] = mapped_column(JSON, nullable=True)
+    organizational_region_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    region_resolution_status: Mapped[str] = mapped_column(
+        Enum(
+            "RESOLVED", "UNKNOWN", "AMBIGUOUS", "SYNC_FAILED",
+            name="feishu_region_resolution_status",
+            native_enum=True,
+        ),
+        nullable=False,
+        default="UNKNOWN",
+        server_default="UNKNOWN",
+    )
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(
+        mysql.DATETIME(fsp=6).with_variant(DateTime(), "sqlite"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+        server_onupdate=FetchedValue(),
+    )

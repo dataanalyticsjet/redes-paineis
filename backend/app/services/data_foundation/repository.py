@@ -16,6 +16,12 @@ from app.services.data_foundation.contracts import (
     SourceContract,
     contract_sha256,
 )
+from app.services.data_foundation.mapping_resolution import (
+    CODE_RESOLUTION_SOURCES,
+    NAME_MAPPED_SOURCES,
+    normalize_mapping_name,
+    resolve_name_candidates,
+)
 from app.services.data_foundation.xlsx_parser import (
     MappingResolver,
     PreviewSummary,
@@ -35,8 +41,12 @@ FACT_TABLES = {
 DAILY_SOURCES = frozenset({
     "collection_monitoring", "collection_rate", "jt_monitoring", "pdd_collection_failure",
 })
-NAME_MAPPED_SOURCES = frozenset({"collection_monitoring", "collection_rate", "jt_monitoring"})
 FACT_BATCH_SIZE = 1000
+_NAME_MAPPING_RESOLUTIONS = frozenset({"NAME_APPROVED", "UNMAPPED", "MISSING_IDENTIFIER", "AMBIGUOUS"})
+_CODE_MAPPING_RESOLUTIONS = frozenset({"CODE_MATCH", "UNMAPPED"})
+_UNAPPROVED_MAPPING_RESOLUTIONS = frozenset({
+    "UNAPPROVED_EXACT_NAME", "UNAPPROVED_NORMALIZED_NAME", "REJECTED",
+})
 
 
 class DataFoundationError(RuntimeError):
@@ -90,10 +100,13 @@ def load_mapping_resolver(
     """), {"map_version_id": version_id})
     codes: set[str] = set()
     exact_names: dict[str, list[str]] = {}
+    normalized_names: dict[str, set[str]] = {}
     for code, name in mapping_rows:
         code_text = str(code)
+        name_text = str(name)
         codes.add(code_text)
-        exact_names.setdefault(str(name), []).append(code_text)
+        exact_names.setdefault(name_text, []).append(code_text)
+        normalized_names.setdefault(normalize_mapping_name(name_text), set()).add(code_text)
     decisions: dict[str, tuple[str, str | None]] = {}
     if source_id in NAME_MAPPED_SOURCES:
         for name, state, target in connection.execute(text("""
@@ -102,13 +115,25 @@ def load_mapping_resolver(
             WHERE map_version_id = :map_version_id AND source_id = :source_id
         """), {"map_version_id": version_id, "source_id": source_id}):
             decisions[str(name)] = (str(state), str(target) if target is not None else None)
+    normalized_decision_groups: dict[str, list[tuple[str, tuple[str, str | None]]]] = {}
+    for name, decision in decisions.items():
+        normalized_decision_groups.setdefault(normalize_mapping_name(name), []).append((name, decision))
+    normalized_decisions = {
+        key: group[0][1]
+        for key, group in normalized_decision_groups.items()
+        if len(group) == 1
+    }
     return MappingResolver(
         map_version_id=version_id,
         base_codes=frozenset(codes),
         exact_base_name_candidates={
             name: tuple(candidate_codes) for name, candidate_codes in exact_names.items()
         },
+        normalized_base_name_candidates={
+            name: tuple(sorted(candidate_codes)) for name, candidate_codes in normalized_names.items()
+        },
         name_decisions=decisions,
+        normalized_name_decisions=normalized_decisions,
     )
 
 
@@ -119,7 +144,7 @@ def get_name_mapping_candidates(
     actor_user_id: int,
     staging_directory: Path,
 ) -> dict[str, object]:
-    """List exact name candidates from one validated upload without approving them."""
+    """List exact and conservative normalized candidates without approving them."""
     with engine.connect() as connection:
         job = load_import_job(connection, job_id)
         if job["submitted_by_user_id"] != actor_user_id:
@@ -165,7 +190,26 @@ def get_name_mapping_candidates(
     candidates = []
     for source_name in sorted(counts):
         target_codes = resolver.exact_base_name_candidates.get(source_name, ())
+        normalized_target_codes = (
+            resolver.normalized_base_name_candidates.get(normalize_mapping_name(source_name), ())
+            if not target_codes else ()
+        )
         decision = resolver.name_decisions.get(source_name)
+        if decision is None and not target_codes:
+            decision = resolver.normalized_name_decisions.get(normalize_mapping_name(source_name))
+        resolved_code, resolution = resolve_name_candidates(
+            exact_candidates=target_codes,
+            normalized_candidates=normalized_target_codes,
+            decision=decision,
+        )
+        if resolved_code is not None and decision and decision[0] == "LINKED":
+            decision_state = "LINKED"
+        elif resolved_code is not None:
+            decision_state = "AUTO_MATCH"
+        elif decision is not None:
+            decision_state = decision[0]
+        else:
+            decision_state = "UNREVIEWED"
         candidates.append({
             "sourceBaseName": source_name,
             "sourceRowCount": counts[source_name],
@@ -179,16 +223,33 @@ def get_name_mapping_candidates(
                 for code in target_codes
                 if code in mapping_by_code
             ],
-            "decisionState": decision[0] if decision else "UNREVIEWED",
-            "approvedTargetBaseCode": decision[1] if decision else None,
+            "normalizedTargetCandidates": [
+                {
+                    "baseCode": code,
+                    "baseName": str(mapping_by_code[code]["base_name"]),
+                    "region": mapping_by_code[code]["regional_name"],
+                    "uf": mapping_by_code[code]["uf_code"],
+                }
+                for code in normalized_target_codes
+                if code in mapping_by_code
+            ],
+            "matchMethod": "EXACT" if target_codes else "NORMALIZED" if normalized_target_codes else "NONE",
+            "decisionState": decision_state,
+            "approvedTargetBaseCode": resolved_code if resolution == "NAME_APPROVED" else None,
         })
     return {
         "jobId": job_id,
         "sourceId": source_id,
         "mappingVersionId": str(uuid.UUID(bytes=map_version_id)),
         "candidates": candidates,
-        "candidateNameCount": sum(bool(item["exactTargetCandidates"]) for item in candidates),
-        "unmatchedNameCount": sum(not item["exactTargetCandidates"] for item in candidates),
+        "candidateNameCount": sum(
+            bool(item["exactTargetCandidates"] or item["normalizedTargetCandidates"])
+            for item in candidates
+        ),
+        "unmatchedNameCount": sum(
+            not item["exactTargetCandidates"] and not item["normalizedTargetCandidates"]
+            for item in candidates
+        ),
     }
 
 
@@ -210,8 +271,8 @@ def validate_name_mapping_decision(
     if resolution_state not in {"LINKED", "AMBIGUOUS", "REJECTED"}:
         raise DataFoundationError("mapping_resolution_state_invalid", 422)
     if resolution_state == "LINKED":
-        if len(candidate_codes) != 1 or target_base_code != candidate_codes[0]:
-            raise DataFoundationError("mapping_target_must_be_unique_exact_match", 422)
+        if not target_base_code or target_base_code not in candidate_codes:
+            raise DataFoundationError("mapping_target_must_be_candidate", 422)
     elif target_base_code is not None:
         raise DataFoundationError("mapping_target_not_allowed_for_unlinked_decision", 422)
 
@@ -236,6 +297,10 @@ def record_name_mapping_decision(
             connection, source_id=source_id, map_version_id=map_version_id
         )
         candidate_codes = resolver.exact_base_name_candidates.get(source_base_name, ())
+        if not candidate_codes:
+            candidate_codes = resolver.normalized_base_name_candidates.get(
+                normalize_mapping_name(source_base_name), ()
+            )
         validate_name_mapping_decision(
             source_id=source_id,
             source_base_name=source_base_name,
@@ -474,16 +539,40 @@ def _fact_row(
     map_version_id: bytes,
     row: ValidImportRow,
 ) -> dict[str, object]:
+    mapping_resolution = _persisted_mapping_resolution(source_id, row.mapping_resolution)
     values: dict[str, object] = {
         "source_id": source_id,
         "publication_id": publication_id,
         "map_version_id": map_version_id,
         "source_row_no": row.source_row_no,
-        "resolved_base_code": row.resolved_base_code,
-        "mapping_resolution": row.mapping_resolution,
+        "resolved_base_code": (
+            row.resolved_base_code
+            if source_id not in CODE_RESOLUTION_SOURCES or row.mapping_resolution == "CODE_MATCH"
+            else None
+        ),
+        "mapping_resolution": mapping_resolution,
     }
     values.update(row.values)
     return values
+
+
+def _persisted_mapping_resolution(source_id: str, resolution: str) -> str:
+    """Translate parser-only states to the source table's existing ENUM values."""
+    if source_id in NAME_MAPPED_SOURCES and source_id not in CODE_RESOLUTION_SOURCES:
+        if resolution in _NAME_MAPPING_RESOLUTIONS:
+            return resolution
+        if resolution in _UNAPPROVED_MAPPING_RESOLUTIONS:
+            # Preserve the original name and row, but never imply an approved link.
+            return "UNMAPPED"
+    elif source_id in CODE_RESOLUTION_SOURCES:
+        if resolution == "CODE_MATCH":
+            return resolution
+        if resolution in (_NAME_MAPPING_RESOLUTIONS | _UNAPPROVED_MAPPING_RESOLUTIONS | _CODE_MAPPING_RESOLUTIONS):
+            # Code-only fact ENUMs stay unchanged; approved name decisions are
+            # reapplied at read time from base_mapping_name_decisions.
+            return "UNMAPPED"
+
+    raise DataFoundationError("mapping_resolution_not_persistable", 409)
 
 
 def _insert_fact_batches(
@@ -761,18 +850,82 @@ def publish_initial_mapping_migration(
     job_id: str,
     actor_user_id: int,
     staging_directory: Path,
+    idempotency_key: str,
     request_id: str | None,
 ) -> dict[str, object]:
     """Publish the untouched legacy 1,628-row map as immutable version 1."""
+    if not idempotency_key or len(idempotency_key) < 8 or len(idempotency_key) > 128:
+        raise DataFoundationError("idempotency_key_invalid", 422)
     contract = CONTRACTS["base_mapping_official"]
     expected_count = 1628
     binary_job_id = _uuid_bytes(job_id)
+    idempotency_key_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
     with engine.begin() as connection:
         job = load_import_job(connection, job_id, lock=True)
-        if job["source_id"] != "base_mapping_official" or job["job_state"] != "VALIDATED":
+        if job["source_id"] != "base_mapping_official":
             raise DataFoundationError("mapping_migration_job_not_validated", 409)
         if int(job["contract_version"]) != contract.version:
             raise DataFoundationError("source_contract_version_unsupported", 409)
+
+        existing_version = connection.execute(text("""
+            SELECT map_version_id, version_no, contract_version, version_state,
+                   file_sha256, mapping_row_count
+            FROM base_mapping_versions
+            WHERE source_id = 'base_mapping_official' AND source_job_id = :job_id
+            FOR UPDATE
+        """), {"job_id": binary_job_id}).mappings().first()
+        if job["job_state"] == "PUBLISHED":
+            if existing_version is None:
+                raise DataFoundationError("mapping_migration_state_inconsistent", 409)
+            map_version_id = bytes(existing_version["map_version_id"])
+            entry_count = int(connection.execute(text("""
+                SELECT COUNT(*) FROM base_mapping_entries
+                WHERE map_version_id = :map_version_id
+            """), {"map_version_id": map_version_id}).scalar_one())
+            current_version = connection.execute(text("""
+                SELECT version.version_state
+                FROM base_mapping_current AS current_map
+                JOIN base_mapping_versions AS version
+                  ON version.map_version_id = current_map.map_version_id
+                WHERE current_map.current_key = 'OFFICIAL'
+            """)).scalar_one_or_none()
+            audit_context_value = connection.execute(text("""
+                SELECT event_context
+                FROM data_audit_events
+                WHERE action_code = 'LEGACY_MAPPING_MIGRATED'
+                  AND object_type = 'base_mapping_version'
+                  AND object_id = :map_version_id
+                ORDER BY audit_id DESC
+                LIMIT 1
+            """), {"map_version_id": map_version_id}).scalar_one_or_none()
+            if isinstance(audit_context_value, bytes):
+                audit_context_value = audit_context_value.decode("utf-8")
+            if isinstance(audit_context_value, str):
+                try:
+                    audit_context_value = json.loads(audit_context_value)
+                except json.JSONDecodeError:
+                    audit_context_value = None
+            if (
+                int(existing_version["version_no"]) != 1
+                or int(existing_version["contract_version"]) != contract.version
+                or existing_version["version_state"] != "PUBLISHED"
+                or int(existing_version["mapping_row_count"]) != expected_count
+                or bytes(existing_version["file_sha256"]) != bytes(job["file_sha256"])
+                or bytes(job["file_sha256"]).hex() != INITIAL_MAPPING_WORKBOOK_SHA256
+                or entry_count != expected_count
+                or current_version != "PUBLISHED"
+                or not isinstance(audit_context_value, dict)
+                or audit_context_value.get("idempotencyKeySha256") != idempotency_key_hash
+            ):
+                raise DataFoundationError("mapping_migration_idempotency_conflict", 409)
+            return {
+                "mapVersionId": str(uuid.UUID(bytes=map_version_id)),
+                "version": 1,
+                "mappingRowCount": expected_count,
+                "reused": True,
+            }
+        if job["job_state"] != "VALIDATED":
+            raise DataFoundationError("mapping_migration_job_not_validated", 409)
 
         registration = connection.execute(text("""
             SELECT registry.source_state, contract.contract_state,
@@ -857,10 +1010,21 @@ def publish_initial_mapping_migration(
                 batch.clear()
 
         final_check = parse_workbook(content, contract, on_valid_row=add_entry)
-        if final_check.valid_row_count != expected_count or final_check.invalid_row_count:
+        if (
+            final_check.input_row_count != expected_count
+            or final_check.valid_row_count != expected_count
+            or final_check.invalid_row_count
+            or final_check.duplicate_base_code_count
+        ):
             raise DataFoundationError("mapping_migration_validation_changed", 409)
         if batch:
             connection.execute(statement, batch)
+        inserted_count = connection.execute(text("""
+            SELECT COUNT(*) FROM base_mapping_entries
+            WHERE map_version_id = :map_version_id
+        """), {"map_version_id": map_version_id}).scalar_one()
+        if int(inserted_count) != expected_count:
+            raise DataFoundationError("mapping_entry_count_mismatch", 409)
         connection.execute(text("""
             UPDATE base_mapping_versions
             SET version_state = 'PUBLISHED'
@@ -882,9 +1046,19 @@ def publish_initial_mapping_migration(
             object_type="base_mapping_version",
             object_id=map_version_id,
             request_id=request_id,
-            safe_context={"version": 1, "mappingRows": expected_count, "originalPreserved": True},
+            safe_context={
+                "version": 1,
+                "mappingRows": expected_count,
+                "originalPreserved": True,
+                "idempotencyKeySha256": idempotency_key_hash,
+            },
         )
-        return {"mapVersionId": str(uuid.UUID(bytes=map_version_id)), "version": 1, "mappingRowCount": expected_count}
+        return {
+            "mapVersionId": str(uuid.UUID(bytes=map_version_id)),
+            "version": 1,
+            "mappingRowCount": expected_count,
+            "reused": False,
+        }
 
 
 def get_job_status(engine: Engine, job_id: str, actor_user_id: int) -> dict[str, object]:

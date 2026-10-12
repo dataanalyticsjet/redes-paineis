@@ -9,7 +9,7 @@ import type { DataSourcePreview, ManualDataSource } from "../../lib/data-sources
 export type DataSourceUiState = "NO_SOURCE" | "LOADING" | "PREVIEW" | "VALID" | "INVALID" | "IMPORTING" | "ACTIVE" | "ERROR";
 
 export interface DataSourceSummary {
-  sourceType: "DEMONSTRATION" | "MANUAL_UPLOAD" | "AUTOMATIC_SOURCE";
+  sourceType: "DEMONSTRATION" | "MANUAL_UPLOAD" | "AUTOMATIC_SOURCE" | "DATA_FOUNDATION_V2";
   fileName: string;
   fileSizeBytes?: number;
   contentType?: string;
@@ -103,7 +103,9 @@ export function DataSourceDialog({
   const sourceTypeLabel = currentSource?.sourceType === "MANUAL_UPLOAD"
     ? "Fonte manual"
     : currentSource?.sourceType === "AUTOMATIC_SOURCE"
-        ? "Fonte automática"
+      ? "Fonte automática"
+      : currentSource?.sourceType === "DATA_FOUNDATION_V2"
+        ? "Data Foundation V2"
         : "Dados simulados";
 
   const summarizeDates = (dates: string[]) => {

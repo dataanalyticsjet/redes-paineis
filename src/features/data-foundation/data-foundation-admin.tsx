@@ -46,6 +46,7 @@ type Preview = {
   mappedRowCount: number;
   unmappedRowCount: number;
   exactNameCandidateRowCount: number;
+  normalizedNameCandidateRowCount?: number;
   noMappingMatchRowCount: number;
   missingIdentifierRowCount: number;
   ambiguousRowCount: number;
@@ -62,9 +63,17 @@ type NameCandidate = {
   sourceBaseName: string;
   sourceRowCount: number;
   exactTargetCandidates: CandidateTarget[];
-  decisionState: "UNREVIEWED" | "LINKED" | "AMBIGUOUS" | "REJECTED";
+  normalizedTargetCandidates: CandidateTarget[];
+  matchMethod: "EXACT" | "NORMALIZED" | "NONE";
+  decisionState: "AUTO_MATCH" | "UNREVIEWED" | "LINKED" | "AMBIGUOUS" | "REJECTED";
   approvedTargetBaseCode: string | null;
 };
+
+function reviewTargets(candidate: NameCandidate): CandidateTarget[] {
+  return candidate.exactTargetCandidates.length
+    ? candidate.exactTargetCandidates
+    : candidate.normalizedTargetCandidates;
+}
 
 type MappingStatus = {
   state: string;
@@ -87,7 +96,7 @@ const API_ERROR_LABELS: Record<string, string> = {
   import_job_not_found: "Esta importação não pertence ao usuário atual.",
   name_mapping_not_supported_for_source: "Nome exato não suportado nesta fonte.",
   mapping_review_note_required: "A decisão de revisão exige uma justificativa.",
-  mapping_target_must_be_unique_exact_match: "O destino só pode ser aprovado quando houver uma única correspondência exata.",
+  mapping_target_must_be_candidate: "O destino escolhido precisa corresponder a uma base candidata no de-para vigente.",
   legacy_mapping_source_hash_not_reviewed: "O hash do arquivo não corresponde à cópia oficial revisada.",
   legacy_mapping_1628_rows_required: "O de-para precisa conter exatamente 1.628 linhas válidas.",
   base_mapping_migration_already_initialized: "A migração inicial do de-para já foi concluída.",
@@ -185,7 +194,10 @@ export function DataFoundationAdmin({
   }, []);
 
   useEffect(() => {
-    void loadMetadata();
+    const frame = window.requestAnimationFrame(() => {
+      void loadMetadata();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [loadMetadata]);
 
   const contract = contracts[selectedSource];
@@ -250,12 +262,14 @@ export function DataFoundationAdmin({
     }
   }
 
-  async function saveDecision(candidate: NameCandidate, state: "LINKED" | "AMBIGUOUS" | "REJECTED") {
+  async function saveDecision(candidate: NameCandidate, state: "LINKED" | "AMBIGUOUS" | "REJECTED", targetBaseCode?: string) {
     if (!preview || !reviewNote.trim()) {
       setError("Informe a justificativa da revisão antes de registrar a decisão.");
       return;
     }
-    const target = candidate.exactTargetCandidates.length === 1 ? candidate.exactTargetCandidates[0] : null;
+    const targets = reviewTargets(candidate);
+    const target = targets.find((item) => item.baseCode === targetBaseCode)
+      ?? (targets.length === 1 ? targets[0] : null);
     if (state === "LINKED" && !target) return;
     setBusy(true);
     setError(null);
@@ -320,7 +334,11 @@ export function DataFoundationAdmin({
     setError(null);
     setNotice(null);
     try {
-      const headers = { "Idempotency-Key": crypto.randomUUID() };
+      const headers = {
+        "Idempotency-Key": mappingPublish
+          ? `base-mapping-initial:${preview.jobId}`
+          : crypto.randomUUID(),
+      };
       const path = mappingPublish
         ? `/api/v2/base-mapping/initial-migration/${encodeURIComponent(preview.jobId)}/publish`
         : `/api/v2/imports/${encodeURIComponent(preview.jobId)}/publish`;
@@ -441,7 +459,7 @@ export function DataFoundationAdmin({
                   </form>
                 </section>
 
-                {preview && !isMappingPreview ? <PreviewPanel preview={preview} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state) => void saveDecision(candidate, state)} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
+                {preview && !isMappingPreview ? <PreviewPanel preview={preview} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state, targetCode) => void saveDecision(candidate, state, targetCode)} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
               </>
             ) : null}
           </div>
@@ -494,12 +512,13 @@ function PreviewPanel({
   onCandidateQuery: (value: string) => void;
   onReviewNote: (value: string) => void;
   onAcknowledge: (value: boolean) => void;
-  onDecision: (candidate: NameCandidate, state: "LINKED" | "AMBIGUOUS" | "REJECTED") => void;
+  onDecision: (candidate: NameCandidate, state: "LINKED" | "AMBIGUOUS" | "REJECTED", targetBaseCode?: string) => void;
   onRevalidate: () => void;
   onPublish: () => void;
   canPublish: boolean;
   t: DashboardTranslator;
 }) {
+  const [selectedTargetCodes, setSelectedTargetCodes] = useState<Record<string, string>>({});
   const isBaseMapping = preview.sourceId === INITIAL_MAPPING_SOURCE;
   const coverage = isBaseMapping
     ? Math.round((preview.validRowCount - preview.duplicateBaseCodeCount) / (preview.expectedBaseCount || 1628) * 100)
@@ -522,12 +541,45 @@ function PreviewPanel({
       <div className="data-foundation-coverage"><div><span>{t(isBaseMapping ? "Códigos únicos do de-para" : "Cobertura do de-para")}</span><strong>{coverage}%</strong></div><progress max={100} value={coverage} /><small>{isBaseMapping
         ? `${formatCount(preview.validRowCount - preview.duplicateBaseCodeCount)} / ${formatCount(preview.expectedBaseCount || 1628)} ${t("códigos esperados")}`
         : `${formatCount(preview.mappedRowCount)} / ${formatCount(preview.validRowCount)} ${t("linhas válidas com base associada")}`}</small></div>
-      {preview.duplicateCount || preview.exactNameCandidateRowCount || preview.noMappingMatchRowCount || preview.missingIdentifierRowCount || preview.ambiguousRowCount ? <div className="data-foundation-extra-counts"><span>{t("Duplicatas preservadas")}: <strong>{formatCount(preview.duplicateCount)}</strong></span><span>{t("Candidatas por nome exato")}: <strong>{formatCount(preview.exactNameCandidateRowCount)}</strong></span><span>{t("Sem correspondência")}: <strong>{formatCount(preview.noMappingMatchRowCount)}</strong></span><span>{t("Identificador ausente")}: <strong>{formatCount(preview.missingIdentifierRowCount)}</strong></span><span>{t("Ambíguas")}: <strong>{formatCount(preview.ambiguousRowCount)}</strong></span></div> : null}
+      {preview.duplicateCount || preview.exactNameCandidateRowCount || preview.normalizedNameCandidateRowCount || preview.noMappingMatchRowCount || preview.missingIdentifierRowCount || preview.ambiguousRowCount ? <div className="data-foundation-extra-counts"><span>{t("Duplicatas preservadas")}: <strong>{formatCount(preview.duplicateCount)}</strong></span><span>{t("Candidatas por nome exato")}: <strong>{formatCount(preview.exactNameCandidateRowCount)}</strong></span><span>{t("Candidatas por nome normalizado")}: <strong>{formatCount(preview.normalizedNameCandidateRowCount ?? 0)}</strong></span><span>{t("Sem correspondência")}: <strong>{formatCount(preview.noMappingMatchRowCount)}</strong></span><span>{t("Identificador ausente")}: <strong>{formatCount(preview.missingIdentifierRowCount)}</strong></span><span>{t("Ambíguas")}: <strong>{formatCount(preview.ambiguousRowCount)}</strong></span></div> : null}
       {Object.keys(preview.perDateCounts).length ? <details className="data-foundation-details"><summary>{t("Contagem por data")}</summary><div className="data-foundation-date-counts">{Object.entries(preview.perDateCounts).map(([date, count]) => <span key={date}>{date}<strong>{formatCount(count)}</strong></span>)}</div></details> : null}
       {preview.errors.length || Object.keys(preview.errorCounts).length ? <div className="data-foundation-validation-errors"><h3><AlertTriangle size={16} /> {t("Erros de validação")}</h3><p>{t("{count} linhas inválidas", { count: formatCount(preview.invalidRowCount) })}</p>{Object.entries(preview.errorCounts).map(([code, count]) => <span key={code}>{t(code)} · {formatCount(count)}</span>)}<ul>{preview.errors.map((error, index) => <li key={`${error.rowNumber}-${error.code}-${index}`}>{t("Linha {row}", { row: error.rowNumber })}{error.column ? ` · ${error.column}` : ""} · {t(error.code)}</li>)}</ul></div> : null}
       {mappingReviewDirty ? <div className="data-foundation-alert is-disabled"><AlertTriangle size={17} />{t("Há decisões de nome novas. Revalide o arquivo para atualizar a cobertura antes de publicar.")}</div> : null}
-      {candidates.length ? <div className="data-foundation-name-review"><div><h3>{t("Revisão de nomes exatos")}</h3><p>{t("A associação nunca é automática. Um nome só pode ser ligado quando encontra um único destino exato no de-para.")}</p></div><label>{t("Justificativa da revisão")}<input value={reviewNote} onChange={(event) => onReviewNote(event.target.value)} maxLength={500} placeholder={t("Descreva o que foi conferido")}/></label><label className="data-foundation-search">{t("Buscar nome do arquivo")}<input value={candidateQuery} onChange={(event) => onCandidateQuery(event.target.value)} /></label><div className="data-foundation-candidate-list">{visibleCandidates.map((candidate) => { const unique = candidate.exactTargetCandidates.length === 1 ? candidate.exactTargetCandidates[0] : null; return <article key={candidate.sourceBaseName}><div><strong>{candidate.sourceBaseName || t("(nome vazio)")}</strong><small>{formatCount(candidate.sourceRowCount)} {t("linhas")} · {candidate.exactTargetCandidates.length ? t("{count} destinos exatos", { count: candidate.exactTargetCandidates.length }) : t("Sem destino exato")} · {t(candidate.decisionState)}</small>{unique ? <small>{unique.baseName} · {unique.region ?? "—"} · {unique.uf ?? "—"} · {unique.baseCode}</small> : null}</div>{candidate.decisionState === "UNREVIEWED" ? <div className="data-foundation-candidate-actions">{unique ? <button type="button" onClick={() => onDecision(candidate, "LINKED")} disabled={!canImport || busy || !reviewNote.trim()}>{t("Aprovar destino único")}</button> : <button type="button" onClick={() => onDecision(candidate, candidate.exactTargetCandidates.length ? "AMBIGUOUS" : "REJECTED")} disabled={!canImport || busy || !reviewNote.trim()}>{candidate.exactTargetCandidates.length ? t("Marcar ambíguo") : t("Rejeitar sem correspondência")}</button>}</div> : null}</article>; })}{visibleCandidates.length === 0 ? <p>{t("Nenhum nome corresponde à busca.")}</p> : null}{visibleCandidates.length === 50 ? <small>{t("Mostrando até 50 resultados. Refine a busca para localizar outros nomes.")}</small> : null}</div></div> : null}
-      {preview.unmappedRowCount > 0 ? <label className="data-foundation-unmapped-confirm"><input type="checkbox" checked={acknowledgeUnmapped} onChange={(event) => onAcknowledge(event.target.checked)} />{t("Entendo que as linhas sem mapeamento ficarão fora das consultas regionais até a revisão do de-para.")}</label> : null}
+      {candidates.length ? (
+        <div className="data-foundation-name-review">
+          <div>
+            <h3>{t("Correspondências no de-para oficial")}</h3>
+            <p>{t("Nomes com correspondência única são associados automaticamente pelo mapa publicado. A revisão manual fica para nomes ambíguos ou exceções justificadas.")}</p>
+          </div>
+          {candidates.some((candidate) => candidate.decisionState === "UNREVIEWED" && reviewTargets(candidate).length > 1) ? <label>{t("Justificativa da revisão manual")}<input value={reviewNote} onChange={(event) => onReviewNote(event.target.value)} maxLength={500} placeholder={t("Descreva o que foi conferido")}/></label> : null}
+          <label className="data-foundation-search">{t("Buscar nome do arquivo")}<input value={candidateQuery} onChange={(event) => onCandidateQuery(event.target.value)} /></label>
+          <div className="data-foundation-candidate-list">
+            {visibleCandidates.map((candidate) => {
+              const targets = reviewTargets(candidate);
+              const unique = targets.length === 1 ? targets[0] : null;
+              const isNormalized = candidate.matchMethod === "NORMALIZED";
+              const stateLabel = candidate.decisionState === "AUTO_MATCH" ? t("Correspondência automática") : t(candidate.decisionState);
+              return <article key={candidate.sourceBaseName}>
+                <div>
+                  <strong>{candidate.sourceBaseName || t("(nome vazio)")}</strong>
+                  <small>{formatCount(candidate.sourceRowCount)} {t("linhas")} · {targets.length ? isNormalized ? t("{count} destinos normalizados", { count: targets.length }) : t("{count} destinos exatos", { count: targets.length }) : t("Sem destino exato ou normalizado")} · {stateLabel}</small>
+                  {unique ? <small>{unique.baseName} · {unique.region ?? "—"} · {unique.uf ?? "—"} · {unique.baseCode}</small> : null}
+                </div>
+                {candidate.decisionState === "UNREVIEWED" && targets.length > 1 ? <div className="data-foundation-candidate-actions">
+                  <select aria-label={t("Destino oficial para {name}", { name: candidate.sourceBaseName })} value={selectedTargetCodes[candidate.sourceBaseName] ?? ""} onChange={(event) => setSelectedTargetCodes((current) => ({ ...current, [candidate.sourceBaseName]: event.target.value }))}>
+                    <option value="">{t("Escolha o destino após conferência")}</option>
+                    {targets.map((target) => <option key={target.baseCode} value={target.baseCode}>{target.baseName} · {target.region ?? "—"} · {target.uf ?? "—"} · {target.baseCode}</option>)}
+                  </select>
+                  <button type="button" onClick={() => onDecision(candidate, "LINKED", selectedTargetCodes[candidate.sourceBaseName])} disabled={!canImport || busy || !reviewNote.trim() || !selectedTargetCodes[candidate.sourceBaseName]}>{t("Registrar vínculo revisado")}</button>
+                </div> : null}
+              </article>;
+            })}
+            {visibleCandidates.length === 0 ? <p>{t("Nenhum nome corresponde à busca.")}</p> : null}
+            {visibleCandidates.length === 50 ? <small>{t("Mostrando até 50 resultados. Refine a busca para localizar outros nomes.")}</small> : null}
+          </div>
+        </div>
+      ) : null}
+      {preview.unmappedRowCount > 0 ? <label className="data-foundation-unmapped-confirm"><input type="checkbox" checked={acknowledgeUnmapped} onChange={(event) => onAcknowledge(event.target.checked)} />{t("As linhas sem correspondência permanecem nos totais globais e aparecem em Sem regional.")}</label> : null}
       <div className="data-foundation-preview-actions"><button type="button" onClick={onRevalidate} disabled={!canImport || busy}>{t("Revalidar")}</button><button type="button" onClick={onPublish} disabled={!canPublish}><Check size={16} />{t("Confirmar publicação")}</button></div>
     </section>
   );

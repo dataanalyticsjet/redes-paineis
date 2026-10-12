@@ -63,6 +63,23 @@ def bind_disposable_user_database(
 
     app.dependency_overrides[get_db_session] = db_dependency
     monkeypatch.setattr("app.api.auth.database_session", callback_database_session)
+
+    async def fake_feishu_contacts_profile(
+        _open_id: str,
+        _settings: Any,
+        *,
+        fallback_union_id: str | None = None,
+        fallback_avatar_url: str | None = None,
+    ):
+        from app.services.feishu_contacts import FeishuOrganizationalProfile
+
+        return FeishuOrganizationalProfile(
+            union_id=fallback_union_id,
+            avatar_url=fallback_avatar_url,
+            department_paths=[],
+        )
+
+    monkeypatch.setattr("app.api.auth.fetch_feishu_organizational_profile", fake_feishu_contacts_profile)
     # Workbook endpoints exercised by these tests must never write to the
     # machine's configured DATA_DIRECTORY.
     from app.services.local_workbooks import data_root as resolve_data_root

@@ -39,7 +39,7 @@ if settings.app_env == "development":
         allow_origins=[str(settings.frontend_base_url).rstrip("/")],
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
 
 app.include_router(health_router, prefix="/api")

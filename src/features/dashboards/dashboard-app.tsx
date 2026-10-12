@@ -3,6 +3,7 @@
 import { AssistantHome } from "../home/assistant-home";
 import { DataFoundationAdmin } from "../data-foundation/data-foundation-admin";
 import { dashboardCards, type DashboardPanel } from "./dashboard-catalog";
+import { DASHBOARD_V2_SOURCE_BY_PANEL, loadDashboardSourceAvailability } from "./dashboard-availability.ts";
 import { DashboardActionBand } from "./dashboard-action-band";
 import { UserControl } from "../users/user-control";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
@@ -10,6 +11,8 @@ import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-s
 import { ResponsibilitySourceDialog } from "../data-sources/responsibility-source-dialog";
 import { PresentationLogin } from "../auth/presentation-login";
 import { apiFetch, apiUrl } from "../../lib/api-url.ts";
+import { formatCollaboratorName } from "../../lib/profile-name.ts";
+import { organizationalRegionLabel, type OrganizationalRegionStatus } from "../../lib/organizational-region.ts";
 import {
   Activity,
   ArrowLeft,
@@ -26,14 +29,17 @@ import {
   Layers3,
   LogOut,
   MapPin,
+  Moon,
   PackageCheck,
   RotateCcw,
   Search,
   ShieldCheck,
   Sparkles,
+  Sun,
   Target,
   TrendingUp,
   Upload,
+  UserRound,
   UsersRound,
   X,
 } from "lucide-react";
@@ -80,6 +86,11 @@ import {
   type DashboardTranslator,
 } from "../../lib/i18n";
 import type { ParsedWorkbook, WorkbookRow } from "../../lib/workbook";
+import {
+  filterRowsByReferenceBaseNames,
+  normalizeReferenceBaseName,
+  REFERENCE_BASE_TEST_NAMES,
+} from "../../lib/data-foundation/reference-base-test";
 import { getMonitoringSource } from "../../lib/data-sources/monitoring";
 import { getMovementSource } from "../../lib/data-sources/movement";
 import { getTaxaSource } from "../../lib/data-sources/taxa";
@@ -107,6 +118,13 @@ import {
   taxaRate,
 } from "../../lib/taxa-summary";
 import {
+  filterTaxaV2CardRecords,
+  mapTaxaV2CardRecords,
+  summarizeTaxaV2Cards,
+  taxaV2FilterOptions,
+  type TaxaV2DimensionFilters,
+} from "../../lib/taxa-v2-cards.ts";
+import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
   monitoringCollectionRate,
@@ -122,6 +140,40 @@ import { aggregateTaxaRmPoc } from "../../lib/taxa-rm-poc";
 import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loader";
 import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
 import {
+  canReadMonitoringV2,
+  loadPublishedMonitoringWorkbook,
+  MonitoringV2LoadError,
+  yesterdayInSaoPaulo,
+} from "../../lib/data-foundation/monitoring";
+import type { DashboardAvailabilityState } from "../../lib/data-foundation/dashboard-availability.ts";
+import {
+  COLLECTION_RATE_V2_COLUMNS,
+  CollectionRateV2LoadError,
+  loadPublishedCollectionRate,
+  type CollectionRateV2Record,
+} from "../../lib/data-foundation/collection-rate";
+import {
+  loadCurrentNoMovementSnapshot,
+  NO_MOVEMENT_V2_COLUMNS,
+  NoMovementV2LoadError,
+  type NoMovementV2Record,
+} from "../../lib/data-foundation/no-movement";
+import {
+  loadPublishedPddCollectionFailure,
+  PDD_COLLECTION_FAILURE_V2_COLUMNS,
+  PddCollectionFailureV2LoadError,
+  type PddCollectionFailureV2Record,
+} from "../../lib/data-foundation/pdd-collection-failure";
+import {
+  JT_MONITORING_V2_COLUMNS,
+  JT_MONITORING_V2_MAX_PREVIEW_ROWS,
+
+  JtMonitoringV2LoadError,
+  jtMonitoringV2RowIdentity,
+  loadJtMonitoringPage,
+  type JtMonitoringV2Record,
+} from "../../lib/data-foundation/jt-monitoring";
+import {
   buildResponsibilityData,
   matchesResponsibility,
   monitoringResponsibilityForBase,
@@ -130,8 +182,10 @@ import {
   rmAreaForBase,
   responsibilityForBase,
   responsibilityOptions,
+
   UNASSIGNED_RGM,
   UNASSIGNED_RM,
+  UNASSIGNED_RM_AREA,
   type ResponsibilityData,
 } from "../../lib/responsibility";
 import {
@@ -173,6 +227,8 @@ const SELLER_REGIONAL_RATE_TARGET = 0.98;
 const MONITORING_METRIC_OPTIONS = ["Previsto a coletar", "Aguardando coleta", "Coletado"] as const;
 type MonitoringMetric = (typeof MONITORING_METRIC_OPTIONS)[number];
 const DASHBOARD_LANGUAGE_STORAGE_KEY = "jt-dashboard-language";
+const DASHBOARD_THEME_STORAGE_KEY = "jt-dashboard-theme";
+type DashboardTheme = "light" | "dark";
 const LOCAL_DASHBOARD_DEMO_MODE = (import.meta as ImportMeta & {
   env: { DEV: boolean; VITE_DASHBOARD_DEMO_MODE?: string };
 }).env.DEV && (import.meta as ImportMeta & {
@@ -301,7 +357,7 @@ const FEISHU_AUTH_ERROR_MESSAGES: Record<string, string> = {
   feishu_session_failed: "A conta foi validada, mas não foi possível criar a sessão local.",
   feishu_state_invalid: "O estado do login Feishu expirou ou não corresponde a este navegador. Inicie novamente.",
   feishu_storage_not_ready: "O banco local de autenticação não está pronto. Aplique o SQL local aprovado e tente novamente.",
-  feishu_callback_mismatch: "O callback não corresponde a este endereço local. Abra a plataforma em http://127.0.0.1:3000.",
+  feishu_callback_mismatch: "O endereço usado para iniciar o login não corresponde ao callback cadastrado. Abra a plataforma em http://127.0.0.1:3001 e mantenha o callback local em http://127.0.0.1:8001/api/auth/feishu/callback.",
   feishu_local_only: "O login Feishu deste ambiente está disponível somente no desenvolvimento local.",
   feishu_auth_failed: "Não foi possível concluir o login Feishu. Tente novamente.",
 };
@@ -326,7 +382,7 @@ interface LoadedData {
   fileName: string;
   fileSizeBytes?: number;
   contentType?: string;
-  sourceType: "DEMONSTRATION" | "MANUAL_UPLOAD" | "AUTOMATIC_SOURCE";
+  sourceType: "DEMONSTRATION" | "MANUAL_UPLOAD" | "AUTOMATIC_SOURCE" | "DATA_FOUNDATION_V2";
   dates: string[];
   bases: string[];
   regions: string[];
@@ -626,16 +682,39 @@ interface SellerPerformanceData {
 
 interface ViewerIdentity {
   username: string;
+  avatar_url?: string | null;
   role: "matrix" | "regional";
   region: string | null;
   base: string | null;
   platform_role?: "USER" | "ADMIN";
   organizational_scope?: "matrix" | "regional" | "base";
   home_region?: string | null;
+  organizational_region_code?: string | null;
+  region_resolution_status?: OrganizationalRegionStatus;
   home_base?: string | null;
   additional_regions?: string[];
   effective_regions?: string[] | null;
   is_active?: boolean;
+}
+
+function sameViewerIdentity(left: ViewerIdentity | null, right: ViewerIdentity): boolean {
+  if (!left) return false;
+  const sameArray = (a: string[] | null | undefined, b: string[] | null | undefined) =>
+    (a ?? []).length === (b ?? []).length && (a ?? []).every((value, index) => value === (b ?? [])[index]);
+  return left.username === right.username &&
+    left.avatar_url === right.avatar_url &&
+    left.role === right.role &&
+    left.region === right.region &&
+    left.base === right.base &&
+    left.platform_role === right.platform_role &&
+    left.organizational_scope === right.organizational_scope &&
+    left.home_region === right.home_region &&
+    left.organizational_region_code === right.organizational_region_code &&
+    left.region_resolution_status === right.region_resolution_status &&
+    left.home_base === right.home_base &&
+    left.is_active === right.is_active &&
+    sameArray(left.effective_regions, right.effective_regions) &&
+    sameArray(left.additional_regions, right.additional_regions);
 }
 
 interface StatusSummary {
@@ -982,7 +1061,7 @@ function formatConsolidatedPeriod(start: string, end: string): string {
 }
 
 function labelForSelection(
-  selected: Set<string>,
+  selected: ReadonlySet<string>,
   options: string[],
   singular: string,
   plural: string,
@@ -1915,7 +1994,7 @@ function SellerReportTableRows({
 interface MultiSelectProps {
   label: string;
   options: string[];
-  selected: Set<string>;
+  selected: ReadonlySet<string>;
   onChange: (value: Set<string>) => void;
   allLabel: string;
   singular: string;
@@ -1924,6 +2003,9 @@ interface MultiSelectProps {
   resetSearchOnOpen?: boolean;
   colorOptions?: string[];
   getOptionLabel?: (option: string) => string;
+  disabled?: boolean;
+  disabledLabel?: string;
+  disabledReason?: string;
   t: DashboardTranslator;
 }
 
@@ -1939,11 +2021,14 @@ function MultiSelect({
   resetSearchOnOpen = false,
   colorOptions,
   getOptionLabel = (option) => option,
+  disabled = false,
+  disabledLabel,
+  disabledReason,
   t,
 }: MultiSelectProps) {
   const [query, setQuery] = useState("");
   const allSelected = allOptionsAreSelected(options, selected);
-  const selectedLabel = allSelected
+  const selectedLabel = disabled && disabledLabel ? disabledLabel : allSelected
     ? allLabel
     : selected.size === 1
       ? getOptionLabel([...selected][0])
@@ -1966,11 +2051,17 @@ function MultiSelect({
       <span className="filter-label">{label}</span>
       <details
         className="multi-select"
+        aria-disabled={disabled || undefined}
+        title={disabled ? disabledReason : undefined}
+        style={disabled ? { opacity: 0.65, cursor: "not-allowed" } : undefined}
         onToggle={resetSearchOnOpen ? (event) => {
           if (event.currentTarget.open) setQuery("");
         } : undefined}
       >
-        <summary>
+        <summary
+          aria-disabled={disabled || undefined}
+          onClick={disabled ? (event) => event.preventDefault() : undefined}
+        >
           <span>{selectedLabel}</span>
           <ChevronDown size={16} aria-hidden="true" />
         </summary>
@@ -2043,10 +2134,18 @@ interface EmptyDashboardPanelProps {
   title?: string;
   description?: string;
   sourceLabel?: string;
+  emptyTitle?: string;
+  emptyDescription?: string;
+  loadingDescription?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  onPeriodStartChange?: (value: string) => void;
+  onPeriodEndChange?: (value: string) => void;
+  onRetry?: () => void;
   t: DashboardTranslator;
 }
 
-function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSource, t, inputId = "monitoring-upload", eyebrow, title, description, sourceLabel }: EmptyDashboardPanelProps) {
+function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSource, t, inputId = "monitoring-upload", eyebrow, title, description, sourceLabel, emptyTitle, emptyDescription, loadingDescription, periodStart, periodEnd, onPeriodStartChange, onPeriodEndChange, onRetry }: EmptyDashboardPanelProps) {
   const [dragging, setDragging] = useState(false);
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -2079,7 +2178,29 @@ function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSou
         <div className="inline-alert error" role="alert">
           <CircleAlert size={18} />
           <span>{t(error)}</span>
+          {onRetry ? <button type="button" onClick={onRetry}>{t("Tentar novamente")}</button> : null}
         </div>
+      ) : null}
+
+      {periodStart !== undefined && periodEnd !== undefined && onPeriodStartChange && onPeriodEndChange ? (
+        <section className="filters-card monitoring-empty-period" aria-label={t("Selecionar período dos dados")}>
+          <div className="filter-grid monitoring-filter-grid">
+            <div className="filter-field date-field">
+              <label className="filter-label" htmlFor="empty-date-start">{t("Data inicial")}</label>
+              <div className="date-input-wrap">
+                <CalendarDays size={16} />
+                <input id="empty-date-start" type="date" value={periodStart} onChange={(event) => onPeriodStartChange(event.target.value)} />
+              </div>
+            </div>
+            <div className="filter-field date-field">
+              <label className="filter-label" htmlFor="empty-date-end">{t("Data final")}</label>
+              <div className="date-input-wrap">
+                <CalendarDays size={16} />
+                <input id="empty-date-end" type="date" value={periodEnd} onChange={(event) => onPeriodEndChange(event.target.value)} />
+              </div>
+            </div>
+          </div>
+        </section>
       ) : null}
 
       <div
@@ -2099,8 +2220,8 @@ function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSou
         </div>
         <div>
           <span className="card-eyebrow">{t(sourceLabel ?? "ARQUIVO DE MONITORAMENTO")}</span>
-        <h2>{t(loading ? "Buscando última atualização..." : onAddSource ? "Nenhuma fonte de dados carregada." : "Publique o arquivo Excel")}</h2>
-        <p>{t(onAddSource ? "Adicione uma planilha para alimentar este painel. Os dados serão pré-visualizados antes da confirmação." : "Arraste a planilha para cá ou selecione o arquivo baixado. Depois de publicar, todos veem a mesma atualização pelo link.")}</p>
+        <h2>{t(loading ? "Buscando última atualização..." : emptyTitle ?? (onAddSource ? "Nenhuma fonte de dados carregada." : "Publique o arquivo Excel"))}</h2>
+        <p>{t(loading && loadingDescription ? loadingDescription : emptyDescription ?? (onAddSource ? "Adicione uma planilha para alimentar este painel. Os dados serão pré-visualizados antes da confirmação." : "Arraste a planilha para cá ou selecione o arquivo baixado. Depois de publicar, todos veem a mesma atualização pelo link."))}</p>
       </div>
       {canManageUpload ? onAddSource ? (
         <button className="primary-upload-button" type="button" onClick={onAddSource} disabled={loading}>
@@ -2158,14 +2279,34 @@ function PendingLastMileDashboard({ title, onOpenSource, canManageSource, t }: {
   );
 }
 
+function monitoringResponsibilityForRow(
+  data: ResponsibilityData | null,
+  row: WorkbookRow,
+  base: string,
+  regionalOrigin: string,
+) {
+  if (row.__publicationId !== undefined || row.__mappingResolution !== undefined) {
+    return {
+      rm: String(row.__effectiveRm ?? UNASSIGNED_RM),
+      rgm: String(row.__effectiveRgm ?? UNASSIGNED_RGM),
+      rmArea: String(row.__effectiveRmArea ?? UNASSIGNED_RM_AREA),
+      source: row.__mappingApproved === true ? "de-para" as const : "não encontrado" as const,
+    };
+  }
+  return monitoringResponsibilityForBase(data, base, regionalOrigin);
+}
+
 function matchesMonitoringResponsibility(
   data: ResponsibilityData | null,
   base: string,
   regionalOrigin: string,
   selectedRms: ReadonlySet<string>,
   selectedRgms: ReadonlySet<string>,
+  row?: WorkbookRow,
 ): boolean {
-  const { rm, rgm } = monitoringResponsibilityForBase(data, base, regionalOrigin);
+  const { rm, rgm } = row
+    ? monitoringResponsibilityForRow(data, row, base, regionalOrigin)
+    : monitoringResponsibilityForBase(data, base, regionalOrigin);
   return selectedRms.has(rm) && selectedRgms.has(rgm);
 }
 
@@ -2175,7 +2316,7 @@ function monitoringResponsibilityOptionsForData(data: LoadedData, responsibility
   if (data.parsed.baseColumn) {
     for (const row of data.parsed.rows) {
       const base = rowBase(row, data.parsed.baseColumn);
-      const assignment = monitoringResponsibilityForBase(responsibility, base, rowRegion(row, data.parsed.regionColumn));
+      const assignment = monitoringResponsibilityForRow(responsibility, row, base, rowRegion(row, data.parsed.regionColumn));
       rms.add(assignment.rm);
       rgms.add(assignment.rgm);
     }
@@ -2198,7 +2339,7 @@ function monitoringBasesForSelection(
   return Array.from(new Set(data.parsed.rows.filter((row) => {
     const base = rowBase(row, data.parsed.baseColumn as string);
     const region = rowRegion(row, data.parsed.regionColumn);
-    return basesInSourceRegions.has(base) && matchesMonitoringResponsibility(responsibility, base, region, selectedRms, selectedRgms);
+    return basesInSourceRegions.has(base) && matchesMonitoringResponsibility(responsibility, base, region, selectedRms, selectedRgms, row);
   }).map((row) => rowBase(row, data.parsed.baseColumn as string))))
     .sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
 }
@@ -2222,6 +2363,136 @@ function LanguageSwitcher({ language, onChange, t }: {
           {option.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+function UserProfileMenu({ identity, isAdmin, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
+  identity: ViewerIdentity;
+  isAdmin: boolean;
+  theme: DashboardTheme;
+  onToggleTheme: () => void;
+  onOpenDataSources: () => void;
+  onOpenUserControl: () => void;
+  onSignOut: () => void;
+  t: DashboardTranslator;
+}) {
+  const [open, setOpen] = useState(false);
+  const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const rawName = identity.username.trim() || t("Colaborador");
+  const fullName = formatCollaboratorName(rawName);
+  const avatarUrl = identity.avatar_url?.trim() || null;
+  const avatarLoadFailed = Boolean(avatarUrl && failedAvatarUrl === avatarUrl);
+  const displayName = fullName.split(/\s+/)[0] || t("Colaborador");
+  const region = organizationalRegionLabel(
+    identity.organizational_region_code,
+    identity.region_resolution_status,
+    t("Regional não identificada"),
+  );
+  const nameParts = fullName.split(/\s+/).filter(Boolean);
+  const initials = nameParts.length > 1
+    ? `${Array.from(nameParts[0])[0] ?? ""}${Array.from(nameParts.at(-1) ?? "")[0] ?? ""}`
+    : Array.from(nameParts[0] ?? "").slice(0, 2).join("");
+
+  const renderAvatar = (size: 18 | 22) => avatarUrl && !avatarLoadFailed
+    ? <img src={avatarUrl} alt="" aria-hidden="true" referrerPolicy="no-referrer" onError={() => setFailedAvatarUrl(avatarUrl)} />
+    : initials || <UserRound size={size} />;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeWhenOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleMenuKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        triggerRef.current?.focus();
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const availableItems = itemRefs.current.filter((item): item is HTMLButtonElement => Boolean(item));
+      if (!availableItems.length) return;
+      event.preventDefault();
+      const currentIndex = availableItems.indexOf(document.activeElement as HTMLButtonElement);
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? availableItems.length - 1
+          : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + availableItems.length) % availableItems.length;
+      availableItems[nextIndex]?.focus();
+    };
+    document.addEventListener("pointerdown", closeWhenOutside, true);
+    document.addEventListener("keydown", handleMenuKeys);
+    return () => {
+      document.removeEventListener("pointerdown", closeWhenOutside, true);
+      document.removeEventListener("keydown", handleMenuKeys);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) itemRefs.current[0]?.focus();
+  }, [open]);
+
+  const closeAndRun = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div
+      className="profile-menu"
+      ref={rootRef}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!nextTarget || !rootRef.current?.contains(nextTarget)) setOpen(false);
+      }}
+    >
+      <button
+        className="profile-menu-trigger"
+        type="button"
+        ref={triggerRef}
+        aria-label={`${t("Menu do usuário")}: ${fullName}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls="profile-menu-options"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="profile-avatar" aria-hidden="true">{renderAvatar(18)}</span>
+        <span className="profile-trigger-copy">
+          <strong>{displayName}</strong>
+          <small>{region}</small>
+        </span>
+        <ChevronDown className={`profile-menu-chevron${open ? " is-open" : ""}`} size={16} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="profile-menu-popover" id="profile-menu-options" role="menu" aria-label={t("Perfil do colaborador")}>
+          <div className="profile-menu-identity">
+            <span className="profile-avatar profile-avatar-large" aria-hidden="true">{renderAvatar(22)}</span>
+            <span><strong>{fullName}</strong><small>{region}</small></span>
+          </div>
+          <div className="profile-menu-separator" role="separator" />
+          {isAdmin ? <>
+            <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenDataSources)}>
+              <Database size={16} aria-hidden="true" /> {t("Fontes de dados")}
+            </button>
+            <button ref={(element) => { itemRefs.current[1] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenUserControl)}>
+              <UsersRound size={16} aria-hidden="true" /> {t("Controle de usuários")}
+            </button>
+            <div className="profile-menu-separator" role="separator" />
+          </> : null}
+          <button ref={(element) => { itemRefs.current[isAdmin ? 2 : 0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onToggleTheme)}>
+            {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
+            {t(theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro")}
+          </button>
+          <button className="profile-menu-signout" ref={(element) => { itemRefs.current[isAdmin ? 3 : 1] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onSignOut)}>
+            <LogOut size={16} aria-hidden="true" /> {t("Sair")}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2323,14 +2594,92 @@ function EmptyChart({ message }: { message: string }) {
   );
 }
 
+function DashboardUnderDevelopment({
+  title,
+  description,
+  sourceId,
+  availability,
+  t,
+}: {
+  title: string;
+  description: string;
+  sourceId: string;
+  availability: DashboardAvailabilityState;
+  t: DashboardTranslator;
+}) {
+  const data = availability.status === "ready" || availability.status === "unpublished"
+    ? availability.data
+    : null;
+  const statusText = availability.status === "loading"
+    ? t("Verificando publicação vigente…")
+    : availability.status === "restricted"
+      ? t("Consulta às fontes V2 exclusiva para ADMIN/matrix.")
+      : availability.status === "unavailable"
+        ? t("Fonte indisponível no momento.")
+        : availability.status === "unpublished" || data?.status === "unpublished"
+          ? t("Nenhuma publicação vigente")
+          : availability.status === "ready" && data?.status === "available"
+            ? data.rowCount === 0 ? t("Publicação vigente sem registros") : t("Dados disponíveis")
+            : t("Aguardando consulta da fonte");
+  const statusIsError = availability.status === "unavailable";
+
+  return (
+    <div className="dashboard-under-development" data-testid="dashboard-under-development">
+      <section className="dashboard-intro">
+        <div>
+          <div className="eyebrow"><Activity size={15} /> {t("First Mile")}</div>
+          <h1>{t(title)}</h1>
+          <p>{t(description)}</p>
+        </div>
+      </section>
+      <section className="dashboard-development-message" aria-labelledby="dashboard-development-title">
+        <span className="dashboard-development-icon" aria-hidden="true"><Layers3 size={23} /></span>
+        <h2 id="dashboard-development-title">{t("Painel em desenvolvimento")}</h2>
+        <p>{t("Os indicadores e as fórmulas deste painel estão em revisão. A conexão com a fonte de dados permanece ativa.")}</p>
+      </section>
+      <section
+        className={`dashboard-source-availability${statusIsError ? " unavailable" : ""}`}
+        aria-label={t("Status da fonte de dados")}
+        role={statusIsError ? "alert" : "status"}
+        aria-live="polite"
+        data-source-id={sourceId}
+        data-source-status={availability.status}
+      >
+        <div className="dashboard-source-availability-heading">
+          <Database size={17} aria-hidden="true" />
+          <strong>{t("Fonte de dados")}</strong>
+          <code>{sourceId}</code>
+        </div>
+        <div className="dashboard-source-availability-details">
+          <span><strong>{t("Status:")}</strong> {statusText}</span>
+          {data?.status === "available" ? (
+            <>
+              <span><strong>{t("Última publicação:")}</strong> {data.publishedAt ? formatDateTime(data.publishedAt) : "—"}</span>
+              <span><strong>{t("Linhas na publicação mais recente:")}</strong> {data.rowCount === null ? "—" : formatNumber(data.rowCount)}</span>
+              {data.periodStart || data.periodEnd ? (
+                <span><strong>{t("Período publicado:")}</strong> {data.periodStart ?? "—"} a {data.periodEnd ?? "—"}</span>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function DashboardApp() {
   const [language, setLanguage] = useState<DashboardLanguage>("pt");
+  const [theme, setTheme] = useState<DashboardTheme>("light");
+  const themeRef = useRef<DashboardTheme>("light");
+  const themeInitializedRef = useRef(false);
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
   const [viewerChecked, setViewerChecked] = useState(false);
   const [viewerAuthError, setViewerAuthError] = useState<string | null>(null);
   const [viewerAuthLoading, setViewerAuthLoading] = useState(false);
   const [view, setView] = useState<DashboardView>("home");
+  const [dashboardAvailability, setDashboardAvailability] = useState<DashboardAvailabilityState>({ status: "idle" });
+  const loadedDashboardDataViewerRef = useRef<string | null>(null);
   const [showUserControl, setShowUserControl] = useState(false);
   const [responsibilitySourceDialogOpen, setResponsibilitySourceDialogOpen] = useState(false);
   const [responsibilityRefreshPending, setResponsibilityRefreshPending] = useState(false);
@@ -2339,7 +2688,32 @@ export function DashboardApp() {
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
   const [dataSourceDialogId, setDataSourceDialogId] = useState<DashboardSourceId | null>(null);
   const [loaded, setLoaded] = useState<LoadedData | null>(null);
+  const [monitoringV2Status, setMonitoringV2Status] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
+  const [monitoringV2Message, setMonitoringV2Message] = useState<string | null>(null);
+  const [monitoringV2PeriodStart, setMonitoringV2PeriodStart] = useState(yesterdayInSaoPaulo);
+  const [monitoringV2PeriodEnd, setMonitoringV2PeriodEnd] = useState(monitoringV2PeriodStart);
+  const [monitoringV2RetryKey, setMonitoringV2RetryKey] = useState(0);
+  const [collectionRateV2State, setCollectionRateV2State] = useState(() => {
+    const yesterday = yesterdayInSaoPaulo();
+    return {
+      status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
+      period: { dateFrom: yesterday, dateTo: yesterday },
+      records: [] as CollectionRateV2Record[],
+      receivedCount: 0,
+      columnCount: COLLECTION_RATE_V2_COLUMNS.length,
+      publicationId: null as string | null,
+      updatedAt: null as string | null,
+      error: null as string | null,
+    };
+  });
+  const [dashboardSourcesReady, setDashboardSourcesReady] = useState(false);
   const [selectedBases, setSelectedBases] = useState<Set<string>>(new Set());
+  const [referenceBaseTestRequested, setReferenceBaseTestRequested] = useState(() => Boolean(
+    import.meta.env.DEV &&
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("monitoringReferenceBaseTest") === "1"
+  ));
+  const [referenceBaseTestSelected, setReferenceBaseTestSelected] = useState<Set<string>>(() => new Set(REFERENCE_BASE_TEST_NAMES));
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
   const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(new Set());
   const [selectedMonitoringMetrics, setSelectedMonitoringMetrics] = useState<Set<MonitoringMetric>>(new Set(MONITORING_METRIC_OPTIONS));
@@ -2357,6 +2731,7 @@ export function DashboardApp() {
   const [taxaSelectedBases, setTaxaSelectedBases] = useState<Set<string>>(new Set());
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
+  const [taxaV2Filters, setTaxaV2Filters] = useState<TaxaV2DimensionFilters>({});
   const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
   const [taxaRmSelection, setTaxaRmSelection] = useState<RmSelection>({ mode: "all" });
   const [taxaDateStart, setTaxaDateStart] = useState("");
@@ -2378,16 +2753,51 @@ export function DashboardApp() {
   const [movementDateEnd, setMovementDateEnd] = useState("");
   const [movementSummaryMetric, setMovementSummaryMetric] = useState("totalStopped");
   const [movementLoading, setMovementLoading] = useState(true);
+  const [noMovementV2State, setNoMovementV2State] = useState(() => ({
+    status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
+    records: [] as NoMovementV2Record[],
+    receivedCount: 0,
+    columnCount: NO_MOVEMENT_V2_COLUMNS.length,
+    publicationId: null as string | null,
+    updatedAt: null as string | null,
+    error: null as string | null,
+  }));
   const [movementTableQuery, setMovementTableQuery] = useState("");
   const [movementPage, setMovementPage] = useState(1);
   const [sellerReferenceLoaded, setSellerReferenceLoaded] = useState<SellerReferenceData | null>(null);
   const [specialSellerLoaded, setSpecialSellerLoaded] = useState<SpecialSellerData | null>(null);
   const [sellerPerformanceLoaded, setSellerPerformanceLoaded] = useState<SellerPerformanceData | null>(null);
+  const [jtMonitoringV2State, setJtMonitoringV2State] = useState(() => {
+    const yesterday = yesterdayInSaoPaulo();
+    return {
+      status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
+      loading: false,
+      period: { dateFrom: yesterday, dateTo: yesterday },
+      records: [] as JtMonitoringV2Record[],
+      totalAvailable: 0,
+      loadedCount: 0,
+      columnCount: JT_MONITORING_V2_COLUMNS.length,
+      publicationId: null as string | null,
+      publicationIds: [] as string[],
+      publishedAt: null as string | null,
+      dateCountsSignature: null as string | null,
+      error: null as string | null,
+    };
+  });
+  const jtMonitoringV2RequestRef = useRef<AbortController | null>(null);
   const [sellerManualSource, setSellerManualSource] = useState<ManualDataSource | null>(null);
   const [sellerDependencyMessage, setSellerDependencyMessage] = useState<string | null>(null);
   const [responsibilityLoaded, setResponsibilityLoaded] = useState<ResponsibilityData | null>(null);
   const [selectedRms, setSelectedRms] = useState<Set<string>>(new Set([UNASSIGNED_RM]));
   const [selectedRgms, setSelectedRgms] = useState<Set<string>>(new Set([UNASSIGNED_RGM]));
+  const monitoringFilterSnapshot = useRef({
+    loaded: null as LoadedData | null,
+    bases: new Set<string>(),
+    regions: new Set<string>(),
+    rms: new Set<string>(),
+    rgms: new Set<string>(),
+    metrics: new Set<MonitoringMetric>(MONITORING_METRIC_OPTIONS),
+  });
   const [sellerLoading, setSellerLoading] = useState(true);
   const [sellerSelectedRegions, setSellerSelectedRegions] = useState<Set<string>>(new Set());
   const [sellerSelectedBases, setSellerSelectedBases] = useState<Set<string>>(new Set());
@@ -2410,6 +2820,20 @@ export function DashboardApp() {
   const [bipagemDateStart, setBipagemDateStart] = useState("");
   const [bipagemDateEnd, setBipagemDateEnd] = useState("");
   const [bipagemLoading, setBipagemLoading] = useState(true);
+  const [pddCollectionFailureV2State, setPddCollectionFailureV2State] = useState(() => {
+    const yesterday = yesterdayInSaoPaulo();
+    return {
+      status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
+      period: { dateFrom: yesterday, dateTo: yesterday },
+      records: [] as PddCollectionFailureV2Record[],
+      receivedCount: 0,
+      columnCount: PDD_COLLECTION_FAILURE_V2_COLUMNS.length,
+      publicationId: null as string | null,
+      publicationIds: [] as string[],
+      updatedAt: null as string | null,
+      error: null as string | null,
+    };
+  });
   const [bipagemTableQuery, setBipagemTableQuery] = useState("");
   const [damageLoaded, setDamageLoaded] = useState<DamageData | null>(null);
   const [damageSelectedRegions, setDamageSelectedRegions] = useState<Set<string>>(new Set());
@@ -2428,7 +2852,84 @@ export function DashboardApp() {
     (source, values) => translateDashboardText(language, source, values),
     [language],
   );
+  const isMatrixAdminViewer = canReadMonitoringV2(viewerIdentity);
+  const isFirstMileUnderReview = Object.hasOwn(DASHBOARD_V2_SOURCE_BY_PANEL, view);
+  const currentDashboardSourceId = isFirstMileUnderReview
+    ? DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel] ?? null
+    : null;
+  const currentDashboardAvailability: DashboardAvailabilityState = !isFirstMileUnderReview || !viewerAuthorization
+    ? { status: "idle" }
+    : !isMatrixAdminViewer
+      ? { status: "restricted", sourceId: currentDashboardSourceId ?? "" }
+      : !currentDashboardSourceId
+        ? { status: "unavailable", sourceId: "" }
+        : dashboardAvailability.status === "ready" || dashboardAvailability.status === "unpublished"
+          ? dashboardAvailability.data.sourceId === currentDashboardSourceId
+            ? dashboardAvailability
+            : { status: "loading", sourceId: currentDashboardSourceId }
+          : dashboardAvailability.status !== "idle" && dashboardAvailability.sourceId === currentDashboardSourceId
+            ? dashboardAvailability
+            : { status: "loading", sourceId: currentDashboardSourceId };
+  const isReferenceBaseTestActive = Boolean(
+    import.meta.env.DEV &&
+    referenceBaseTestRequested &&
+    isMatrixAdminViewer &&
+    view === "monitoramento" &&
+    loaded?.sourceType === "DATA_FOUNDATION_V2" &&
+    loaded.initialStart === "2026-10-05" &&
+    loaded.initialEnd === "2026-10-05" &&
+    monitoringV2Status === "ready"
+  );
   const statusLabel = useCallback((status: string) => monitoringStatusLabel(status, t), [t]);
+
+  useEffect(() => {
+    if (!isFirstMileUnderReview || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
+
+    const sourceId = DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel];
+    if (!sourceId) return undefined;
+
+    let active = true;
+    const controller = new AbortController();
+    const loadingTimer = window.setTimeout(() => {
+      if (active) setDashboardAvailability({ status: "loading", sourceId });
+    }, 0);
+    const authorizationHeaders = new Headers();
+    if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+      authorizationHeaders.set("authorization", viewerAuthorization);
+    }
+    void loadDashboardSourceAvailability(
+      view as DashboardPanel,
+      (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+      controller.signal,
+    ).then((result) => {
+      window.clearTimeout(loadingTimer);
+      if (!active || !result) return;
+      setDashboardAvailability(result.status === "available"
+        ? { status: "ready", data: result }
+        : { status: "unpublished", data: result });
+    }).catch((cause: unknown) => {
+      window.clearTimeout(loadingTimer);
+      if (!active || controller.signal.aborted) return;
+      setDashboardAvailability({ status: cause instanceof Error && cause.message === "restricted" ? "restricted" : "unavailable", sourceId });
+    });
+
+    return () => {
+      active = false;
+      window.clearTimeout(loadingTimer);
+      controller.abort();
+    };
+  }, [isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+
+  useEffect(() => {
+    monitoringFilterSnapshot.current = {
+      loaded,
+      bases: selectedBases,
+      regions: selectedRegions,
+      rms: selectedRms,
+      rgms: selectedRgms,
+      metrics: selectedMonitoringMetrics,
+    };
+  }, [loaded, selectedBases, selectedMonitoringMetrics, selectedRegions, selectedRgms, selectedRms]);
 
   useEffect(() => {
     const savedLanguage = window.localStorage.getItem(DASHBOARD_LANGUAGE_STORAGE_KEY);
@@ -2446,22 +2947,73 @@ export function DashboardApp() {
   }, [language]);
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      let savedTheme: string | null = null;
+      try {
+        savedTheme = window.localStorage.getItem(DASHBOARD_THEME_STORAGE_KEY);
+      } catch {
+        // The in-memory theme toggle remains available when storage is blocked.
+      }
+      const nextTheme: DashboardTheme = savedTheme === "dark" ? "dark" : "light";
+      themeInitializedRef.current = true;
+      themeRef.current = nextTheme;
+      document.documentElement.dataset.theme = nextTheme;
+      setTheme(nextTheme);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    themeRef.current = theme;
+    document.documentElement.dataset.theme = theme;
+    if (themeInitializedRef.current) {
+      try {
+        window.localStorage.setItem(DASHBOARD_THEME_STORAGE_KEY, theme);
+      } catch {
+        // Keep the selected theme for this page even if persistence is unavailable.
+      }
+    }
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    const nextTheme: DashboardTheme = themeRef.current === "dark" ? "light" : "dark";
+    themeRef.current = nextTheme;
+    document.documentElement.dataset.theme = nextTheme;
+    try {
+      window.localStorage.setItem(DASHBOARD_THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      // The theme still changes for the current page.
+    }
+    setTheme(nextTheme);
+  }, []);
+
+  useEffect(() => {
     let active = true;
     const authError = new URLSearchParams(window.location.search).get("authError");
+    const authErrorFrame = authError
+      ? window.requestAnimationFrame(() => {
+          setViewerAuthError(
+            FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed,
+          );
+        })
+      : null;
     void apiFetch("/api/auth/me", { method: "GET", cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) throw new Error("Sessão inválida");
-        if (active && authError) setViewerAuthError(FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed);
         const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
         if (!active) return;
+        setViewerAuthError(null);
         setViewerAuthorization(FEISHU_COOKIE_SESSION);
-        setViewerIdentity(identity);
+        setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
       })
       .catch(() => {})
       .finally(() => {
         if (active) setViewerChecked(true);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      if (authErrorFrame !== null) window.cancelAnimationFrame(authErrorFrame);
+    };
   }, []);
 
   const endViewerSession = useCallback(() => {
@@ -2478,6 +3030,54 @@ export function DashboardApp() {
     setResponsibilityLoaded(null);
     setBipagemLoaded(null);
     setDamageLoaded(null);
+    setDashboardSourcesReady(false);
+    loadedDashboardDataViewerRef.current = null;
+    setDashboardAvailability({ status: "idle" });
+    setMonitoringV2Status("idle");
+    setMonitoringV2Message(null);
+    setCollectionRateV2State((current) => ({
+      ...current,
+      status: "idle",
+      records: [],
+      receivedCount: 0,
+      publicationId: null,
+      updatedAt: null,
+      error: null,
+    }));
+    setNoMovementV2State((current) => ({
+      ...current,
+      status: "idle",
+      records: [],
+      receivedCount: 0,
+      publicationId: null,
+      updatedAt: null,
+      error: null,
+    }));
+    setPddCollectionFailureV2State((current) => ({
+      ...current,
+      status: "idle",
+      records: [],
+      receivedCount: 0,
+      publicationId: null,
+      publicationIds: [],
+      updatedAt: null,
+      error: null,
+    }));
+    jtMonitoringV2RequestRef.current?.abort();
+    jtMonitoringV2RequestRef.current = null;
+    setJtMonitoringV2State((current) => ({
+      ...current,
+      status: "idle",
+      loading: false,
+      records: [],
+      totalAvailable: 0,
+      loadedCount: 0,
+      publicationId: null,
+      publicationIds: [],
+      publishedAt: null,
+      dateCountsSignature: null,
+      error: null,
+    }));
     setView("home");
     setShowUserControl(false);
   }, []);
@@ -2496,7 +3096,9 @@ export function DashboardApp() {
         }
         if (response.ok) {
           const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
-          if (identity.authenticated && identity.is_active !== false) setViewerIdentity(identity);
+          if (identity.authenticated && identity.is_active !== false) {
+            setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
+          }
           else endViewerSession();
         }
       } catch {
@@ -2548,6 +3150,10 @@ export function DashboardApp() {
     setSelectedOrigins(new Set(data.origins));
     setDateStart(data.initialStart);
     setDateEnd(data.initialEnd);
+    if (data.sourceType === "DATA_FOUNDATION_V2") {
+      setMonitoringV2PeriodStart(data.initialStart);
+      setMonitoringV2PeriodEnd(data.initialEnd);
+    }
     setTableQuery("");
     setPage(1);
   }, [loaded, responsibilityLoaded, viewerIdentity]);
@@ -2720,7 +3326,21 @@ export function DashboardApp() {
     let active = true;
 
     async function loadSavedWorkbook() {
-      if (!viewerAuthorization) return;
+      if (!viewerAuthorization || !viewerIdentity) return;
+      if (view === "home" || view === "data-foundation" || isFirstMileUnderReview) {
+        setDashboardSourcesReady(true);
+        setLoading(false);
+        setTaxaLoading(false);
+        setMovementLoading(false);
+        setSellerLoading(false);
+        setBipagemLoading(false);
+        setDamageLoading(false);
+        return;
+      }
+      if (loadedDashboardDataViewerRef.current === viewerIdentity.username) {
+        setDashboardSourcesReady(true);
+        return;
+      }
       const authorizationHeaders = new Headers();
       if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
         authorizationHeaders.set("authorization", viewerAuthorization);
@@ -2732,36 +3352,56 @@ export function DashboardApp() {
       setSellerLoading(true);
       setBipagemLoading(true);
       setDamageLoading(true);
+      setError(null);
+      if (!isMatrixAdminViewer) {
+        setMonitoringV2Status("idle");
+        setMonitoringV2Message(null);
+      }
       try {
         if (LOCAL_DASHBOARD_DEMO_MODE) {
           if (!viewerIdentity) throw new Error("Não foi possível confirmar o escopo de acesso para a demonstração.");
           const demoUpdatedAt = "2026-09-23T12:00:00.000Z";
           const fixtures = DASHBOARD_DEMO_FIXTURES;
           const responsibilityParsed = scopeDemoWorkbook(fixtures.responsibilityList, viewerIdentity);
-          if (responsibilityParsed.rows.length === 0) {
+          if (!isMatrixAdminViewer && responsibilityParsed.rows.length === 0) {
             throw new Error("Não há dados simulados compatíveis com o escopo desta conta.");
           }
-          const responsibility = buildResponsibilityData(responsibilityParsed, DEMO_WORKBOOK_NAME, demoUpdatedAt);
-          let monitoring = buildLoadedData(
-            scopeDemoWorkbook(fixtures.monitoring, viewerIdentity),
-            DEMO_WORKBOOK_NAME,
-            demoUpdatedAt,
-            "DEMONSTRATION",
-          );
-          try {
-            const localSource = (await getMonitoringSource()).source;
-            if (active && localSource) {
-              monitoring = buildLoadedData(
-                localSource.parsed,
-                localSource.fileName,
-                localSource.importedAt,
-                "MANUAL_UPLOAD",
-                localSource.fileSizeBytes,
-                localSource.contentType,
-              );
+          let responsibility: ResponsibilityData | null = buildResponsibilityData(responsibilityParsed, DEMO_WORKBOOK_NAME, demoUpdatedAt);
+          if (isMatrixAdminViewer) {
+            try {
+              const responsibilityResponse = await apiFetch("/api/workbook?kind=responsibilityList", {
+                cache: "no-store",
+                headers: authorizationHeaders,
+              });
+              const responsibilityLoad = await readResponsibilityWorkbookResponse(responsibilityResponse);
+              responsibility = responsibilityLoad.status === "loaded" ? responsibilityLoad.data : null;
+            } catch {
+              responsibility = null;
             }
-          } catch {
-            // The demo fixture remains the safe fallback when the local FastAPI source store is empty or offline.
+          }
+          let monitoring: LoadedData | null = null;
+          if (!isMatrixAdminViewer) {
+            monitoring = buildLoadedData(
+              scopeDemoWorkbook(fixtures.monitoring, viewerIdentity),
+              DEMO_WORKBOOK_NAME,
+              demoUpdatedAt,
+              "DEMONSTRATION",
+            );
+            try {
+              const localSource = (await getMonitoringSource()).source;
+              if (active && localSource) {
+                monitoring = buildLoadedData(
+                  localSource.parsed,
+                  localSource.fileName,
+                  localSource.importedAt,
+                  "MANUAL_UPLOAD",
+                  localSource.fileSizeBytes,
+                  localSource.contentType,
+                );
+              }
+            } catch {
+              // Keep the existing scoped demo behavior for profiles outside ADMIN/matrix.
+            }
           }
           let taxa = buildTaxaLoadedData(
             scopeDemoWorkbook(fixtures.taxa, viewerIdentity),
@@ -2813,11 +3453,12 @@ export function DashboardApp() {
           const damage = buildDamageData(scopeDemoWorkbook(fixtures.damage, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
 
           setResponsibilityLoaded(responsibility);
-          setSelectedRms(new Set([...responsibility.rms, UNASSIGNED_RM]));
-          setSelectedRgms(new Set([...responsibility.rgms, UNASSIGNED_RGM]));
+          setDashboardSourcesReady(true);
+          setSelectedRms(new Set([...(responsibility?.rms ?? []), UNASSIGNED_RM]));
+          setSelectedRgms(new Set([...(responsibility?.rgms ?? []), UNASSIGNED_RGM]));
           setSpecialSellerLoaded(specialSeller);
           setSellerReferenceLoaded(sellerReference);
-          applyLoadedData(monitoring, responsibility);
+          if (monitoring) applyLoadedData(monitoring, responsibility);
           applyTaxaLoadedData(taxa);
           setEpopLoaded(epop);
           setEpopSelectedRegions(initialRegionSelection(epop.regions, viewerIdentity));
@@ -2829,6 +3470,7 @@ export function DashboardApp() {
           applyBipagemLoadedData(bipagem, responsibility);
           applyDamageLoadedData(damage, responsibility);
           setError(null);
+          loadedDashboardDataViewerRef.current = viewerIdentity.username;
           primaryWorkbookLoaded = true;
           return;
         }
@@ -2861,33 +3503,35 @@ export function DashboardApp() {
         // Large workbooks are intentionally requested one at a time. Concurrent
         // streams can exhaust a browser/edge connection and surface as “Load failed”.
         let payload: SavedWorkbookResponse | null = null;
-        try {
-          const manualSource = (await getMonitoringSource()).source;
-          if (manualSource) {
-            payload = {
-              workbook: {
-                fileName: manualSource.fileName,
-                updatedAt: manualSource.importedAt,
-                parsed: manualSource.parsed,
-              },
-            };
-          }
-        } catch {
-          // Older saved workbooks remain a fallback when no local manual source is available.
-        }
-        for (let attempt = 0; attempt < 3 && !payload; attempt += 1) {
+        if (!isMatrixAdminViewer) {
           try {
-            const monitoringResponse = await apiFetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
-            if (!monitoringResponse.ok) throw new Error("Não foi possível carregar a última atualização.");
-            payload = (await monitoringResponse.json()) as SavedWorkbookResponse;
-          } catch (cause) {
-            if (attempt === 2 || (cause instanceof Error && cause.message === "Não foi possível carregar a última atualização.")) {
-              throw new Error("Não foi possível carregar a última atualização. Tente novamente em instantes.");
+            const manualSource = (await getMonitoringSource()).source;
+            if (manualSource) {
+              payload = {
+                workbook: {
+                  fileName: manualSource.fileName,
+                  updatedAt: manualSource.importedAt,
+                  parsed: manualSource.parsed,
+                },
+              };
             }
-            await new Promise<void>((resolve) => window.setTimeout(resolve, 400 * (attempt + 1)));
+          } catch {
+            // Existing dashboard behavior for profiles that do not read V2.
           }
+          for (let attempt = 0; attempt < 3 && !payload; attempt += 1) {
+            try {
+              const monitoringResponse = await apiFetch("/api/workbook?kind=monitoring", { cache: "no-store", headers: authorizationHeaders });
+              if (!monitoringResponse.ok) throw new Error("Não foi possível carregar a última atualização.");
+              payload = (await monitoringResponse.json()) as SavedWorkbookResponse;
+            } catch (cause) {
+              if (attempt === 2 || (cause instanceof Error && cause.message === "Não foi possível carregar a última atualização.")) {
+                throw new Error("Não foi possível carregar a última atualização. Tente novamente em instantes.");
+              }
+              await new Promise<void>((resolve) => window.setTimeout(resolve, 400 * (attempt + 1)));
+            }
+          }
+          if (!payload) throw new Error("Não foi possível carregar a última atualização. Tente novamente em instantes.");
         }
-        if (!payload) throw new Error("Não foi possível carregar a última atualização. Tente novamente em instantes.");
         if (!active) return;
         let responsibilityResponse: Response | null = null;
         try {
@@ -2916,7 +3560,10 @@ export function DashboardApp() {
             console.error(`[Redes Painéis] Falha ao carregar ou validar responsibilityList (${status}); KPIs continuam disponíveis e regiões sem associação não serão inferidas.`);
           }
         }
-        const monitoringWorkbook = payload.workbook ?? await readTaxaHistory(await fetchOptionalWorkbook("monitoring"), "monitoring");
+        setDashboardSourcesReady(true);
+        const monitoringWorkbook = isMatrixAdminViewer
+          ? null
+          : payload?.workbook ?? await readTaxaHistory(await fetchOptionalWorkbook("monitoring"), "monitoring");
         if (monitoringWorkbook) {
           applyLoadedData(
             buildLoadedData(
@@ -2927,6 +3574,7 @@ export function DashboardApp() {
           );
           primaryWorkbookLoaded = true;
         }
+        if (isMatrixAdminViewer) primaryWorkbookLoaded = true;
         const taxaResponse = await fetchOptionalWorkbook("taxa");
         {
           const taxaWorkbook = await readTaxaHistory(taxaResponse);
@@ -3068,6 +3716,7 @@ export function DashboardApp() {
         setError("Não foi possível carregar a atualização principal. Tente novamente em instantes.");
       } finally {
         if (active) {
+          if (primaryWorkbookLoaded) loadedDashboardDataViewerRef.current = viewerIdentity.username;
           setLoading(false);
           setTaxaLoading(false);
           setMovementLoading(false);
@@ -3083,7 +3732,520 @@ export function DashboardApp() {
     return () => {
       active = false;
     };
-  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
+  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
+
+  useEffect(() => {
+    if (view !== "monitoramento" || isFirstMileUnderReview || !viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) return undefined;
+
+    let active = true;
+    const controller = new AbortController();
+    const dateFrom = monitoringV2PeriodStart;
+    const dateTo = monitoringV2PeriodEnd;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setMonitoringV2Status("loading");
+        setMonitoringV2Message(null);
+        if (!dateFrom || !dateTo || dateFrom > dateTo) {
+          setMonitoringV2Status("error");
+          setMonitoringV2Message("Informe um intervalo de datas válido para consultar os dados.");
+          return;
+        }
+        const authorizationHeaders = new Headers();
+        if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+          authorizationHeaders.set("authorization", viewerAuthorization);
+        }
+        try {
+          const published = await loadPublishedMonitoringWorkbook(
+            { dateFrom, dateTo },
+            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+            controller.signal,
+          );
+          if (!active) return;
+          if (published.rowCount === 0) {
+            setLoaded(null);
+            setDateStart(dateFrom);
+            setDateEnd(dateTo);
+            setMonitoringV2Status("empty");
+            setMonitoringV2Message("Sem dados publicados para a data selecionada");
+            return;
+          }
+
+          const nextData = {
+            ...buildLoadedData(published.parsed, published.fileName, published.updatedAt, "DATA_FOUNDATION_V2"),
+            initialStart: dateFrom,
+            initialEnd: dateTo,
+          };
+          const previous = monitoringFilterSnapshot.current;
+          const previousData = previous.loaded?.sourceType === "DATA_FOUNDATION_V2" ? previous.loaded : null;
+          const nextRegionsAvailable = nextData.regions;
+          const previousRegionsWereAll = Boolean(previousData && previous.regions.size === previousData.regions.length);
+          const nextRegions = !previousData
+            ? initialRegionSelection(nextData.parsed.rows.map((row) => rowRegion(row, nextData.parsed.regionColumn)), viewerIdentity)
+            : previousRegionsWereAll
+              ? new Set(nextRegionsAvailable)
+              : new Set([...previous.regions].filter((region) => nextRegionsAvailable.includes(region)));
+
+          const nextResponsibility = monitoringResponsibilityOptionsForData(nextData, responsibilityLoaded);
+          const nextRmsAvailable = [...new Set([...nextResponsibility.rms, UNASSIGNED_RM])];
+          const nextRgmsAvailable = [...new Set([...nextResponsibility.rgms, UNASSIGNED_RGM])];
+          const previousResponsibility = previousData
+            ? monitoringResponsibilityOptionsForData(previousData, responsibilityLoaded)
+            : null;
+          const previousRmsWereAll = Boolean(previousResponsibility && previous.rms.size === new Set([...previousResponsibility.rms, UNASSIGNED_RM]).size);
+          const previousRgmsWereAll = Boolean(previousResponsibility && previous.rgms.size === new Set([...previousResponsibility.rgms, UNASSIGNED_RGM]).size);
+          const nextRms = !previousData || previousRmsWereAll
+            ? new Set(nextRmsAvailable)
+            : new Set([...previous.rms].filter((item) => nextRmsAvailable.includes(item)));
+          const nextRgms = !previousData || previousRgmsWereAll
+            ? new Set(nextRgmsAvailable)
+            : new Set([...previous.rgms].filter((item) => nextRgmsAvailable.includes(item)));
+
+          const nextBasesAvailable = monitoringBasesForSelection(nextData, nextRegions, responsibilityLoaded, nextRms, nextRgms);
+          const previousBasesAvailable = previousData
+            ? monitoringBasesForSelection(previousData, previous.regions, responsibilityLoaded, previous.rms, previous.rgms)
+            : [];
+          const previousBasesWereAll = Boolean(previousData && previous.bases.size === previousBasesAvailable.length);
+          const nextBases = !previousData || previousBasesWereAll
+            ? new Set(nextBasesAvailable)
+            : new Set([...previous.bases].filter((base) => nextBasesAvailable.includes(base)));
+          const nextMetrics = previous.metrics.size === MONITORING_METRIC_OPTIONS.length
+            ? new Set<MonitoringMetric>(MONITORING_METRIC_OPTIONS)
+            : new Set(previous.metrics);
+
+          setLoaded(nextData);
+          setSelectedRegions(nextRegions);
+          setSelectedRms(nextRms);
+          setSelectedRgms(nextRgms);
+          setSelectedBases(nextBases);
+          setSelectedMonitoringMetrics(nextMetrics);
+          setSelectedStatuses(new Set(monitoringStatusesForMetrics(nextData.statuses, nextMetrics)));
+          setSelectedOrigins(new Set(nextData.origins));
+          setDateStart(dateFrom);
+          setDateEnd(dateTo);
+          setPage(1);
+          setMonitoringV2Status("ready");
+          setMonitoringV2Message(null);
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof MonitoringV2LoadError
+            ? cause
+            : new MonitoringV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+          const authorizationFailed = loadError.message.startsWith("Sua sessão expirou") ||
+            loadError.message.includes("autorização ADMIN/matrix");
+          if (authorizationFailed) setLoaded(null);
+          setMonitoringV2Status(loadError.kind === "empty" ? "empty" : "error");
+          setMonitoringV2Message(loadError.kind === "empty"
+            ? "Sem dados publicados para a data selecionada"
+            : loadError.message);
+          if (loadError.kind === "empty") {
+            setLoaded(null);
+            setDateStart(dateFrom);
+            setDateEnd(dateTo);
+          }
+        }
+      })();
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
+
+  useEffect(() => {
+    if (view !== "taxa" || isFirstMileUnderReview) return undefined;
+    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    const dateFrom = collectionRateV2State.period.dateFrom;
+    const dateTo = collectionRateV2State.period.dateTo;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setCollectionRateV2State((current) => ({
+          ...current,
+          status: "loading",
+          records: [],
+          receivedCount: 0,
+          publicationId: null,
+          updatedAt: null,
+          error: null,
+        }));
+        if (!dateFrom || !dateTo || dateFrom > dateTo) {
+          setCollectionRateV2State((current) => ({
+            ...current,
+            status: "error",
+            error: "Informe um intervalo de datas válido para consultar os dados.",
+          }));
+          return;
+        }
+
+        const authorizationHeaders = new Headers();
+        if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+          authorizationHeaders.set("authorization", viewerAuthorization);
+        }
+        try {
+          const published = await loadPublishedCollectionRate(
+            { dateFrom, dateTo },
+            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+            controller.signal,
+          );
+          if (!active) return;
+          setCollectionRateV2State((current) => ({
+            ...current,
+            status: published.rowCount === 0 ? "empty" : "ready",
+            period: published.period,
+            records: published.records,
+            receivedCount: published.rowCount,
+            columnCount: published.columnCount,
+            publicationId: published.publicationId,
+            updatedAt: published.updatedAt,
+            error: published.rowCount === 0 ? "Sem dados publicados para a data selecionada" : null,
+          }));
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof CollectionRateV2LoadError
+            ? cause
+            : new CollectionRateV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+          setCollectionRateV2State((current) => ({
+            ...current,
+            status: loadError.kind === "empty" ? "empty" : "error",
+            records: [],
+            receivedCount: 0,
+            publicationId: null,
+            updatedAt: null,
+            error: loadError.kind === "empty" ? "Sem dados publicados para a data selecionada" : loadError.message,
+          }));
+        }
+      })();
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+
+  useEffect(() => {
+    if (view !== "movimentacao" || isFirstMileUnderReview) return undefined;
+    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setNoMovementV2State((current) => ({
+          ...current,
+          status: "loading",
+          records: [],
+          receivedCount: 0,
+          publicationId: null,
+          updatedAt: null,
+          error: null,
+        }));
+
+        const authorizationHeaders = new Headers();
+        if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+          authorizationHeaders.set("authorization", viewerAuthorization);
+        }
+        try {
+          const snapshot = await loadCurrentNoMovementSnapshot(
+            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+            controller.signal,
+          );
+          if (!active) return;
+          setNoMovementV2State((current) => ({
+            ...current,
+            status: snapshot.rowCount === 0 ? "empty" : "ready",
+            records: snapshot.records,
+            receivedCount: snapshot.rowCount,
+            columnCount: snapshot.columnCount,
+            publicationId: snapshot.publicationId,
+            updatedAt: snapshot.updatedAt,
+            error: null,
+          }));
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof NoMovementV2LoadError
+            ? cause
+            : new NoMovementV2LoadError("invalid_data", "Não foi possível preparar o snapshot publicado da Data Foundation V2.");
+          setNoMovementV2State((current) => ({
+            ...current,
+            status: loadError.kind === "empty" ? "empty" : "error",
+            records: [],
+            receivedCount: 0,
+            publicationId: null,
+            updatedAt: null,
+            error: loadError.message,
+          }));
+        }
+      })();
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+
+  useEffect(() => {
+    if (view !== "bipagem" || isFirstMileUnderReview) return undefined;
+    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    const dateFrom = pddCollectionFailureV2State.period.dateFrom;
+    const dateTo = pddCollectionFailureV2State.period.dateTo;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setPddCollectionFailureV2State((current) => ({
+          ...current,
+          status: "loading",
+          records: [],
+          receivedCount: 0,
+          publicationId: null,
+          publicationIds: [],
+          updatedAt: null,
+          error: null,
+        }));
+        if (!dateFrom || !dateTo || dateFrom > dateTo) {
+          setPddCollectionFailureV2State((current) => ({
+            ...current,
+            status: "error",
+            error: "Informe um intervalo de datas válido para consultar os dados.",
+          }));
+          return;
+        }
+
+        const authorizationHeaders = new Headers();
+        if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+          authorizationHeaders.set("authorization", viewerAuthorization);
+        }
+        try {
+          const published = await loadPublishedPddCollectionFailure(
+            { dateFrom, dateTo },
+            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+            controller.signal,
+          );
+          if (!active) return;
+          setPddCollectionFailureV2State((current) => ({
+            ...current,
+            status: published.rowCount === 0 ? "empty" : "ready",
+            period: published.period,
+            records: published.records,
+            receivedCount: published.rowCount,
+            columnCount: published.columnCount,
+            publicationId: published.publicationId,
+            publicationIds: published.publicationIds,
+            updatedAt: published.updatedAt,
+            error: null,
+          }));
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof PddCollectionFailureV2LoadError
+            ? cause
+            : new PddCollectionFailureV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+          setPddCollectionFailureV2State((current) => ({
+            ...current,
+            status: loadError.kind === "empty" ? "empty" : "error",
+            records: [],
+            receivedCount: 0,
+            publicationId: null,
+            publicationIds: [],
+            updatedAt: null,
+            error: loadError.message,
+          }));
+        }
+      })();
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, view, viewerAuthorization]);
+
+  useEffect(() => {
+    if (view !== "sellers" || isFirstMileUnderReview) return undefined;
+    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+      if (!viewerAuthorization || !isMatrixAdminViewer) {
+        jtMonitoringV2RequestRef.current?.abort();
+        jtMonitoringV2RequestRef.current = null;
+      }
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    jtMonitoringV2RequestRef.current?.abort();
+    jtMonitoringV2RequestRef.current = controller;
+    const period = jtMonitoringV2State.period;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setJtMonitoringV2State((current) => ({
+          ...current,
+          status: "loading",
+          loading: true,
+          records: [],
+          totalAvailable: 0,
+          loadedCount: 0,
+          publicationId: null,
+          publicationIds: [],
+          publishedAt: null,
+          dateCountsSignature: null,
+          error: null,
+        }));
+        if (!period.dateFrom || !period.dateTo || period.dateFrom > period.dateTo) {
+          setJtMonitoringV2State((current) => ({
+            ...current,
+            status: "error",
+            loading: false,
+            error: "Informe um intervalo de datas válido para consultar os dados.",
+          }));
+          return;
+        }
+
+        const authorizationHeaders = new Headers();
+        if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+          authorizationHeaders.set("authorization", viewerAuthorization);
+        }
+        try {
+          const page = await loadJtMonitoringPage(
+            period,
+            0,
+            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+            controller.signal,
+          );
+          if (!active) return;
+          setJtMonitoringV2State((current) => ({
+            ...current,
+            status: page.totalAvailable === 0 ? "empty" : "ready",
+            loading: false,
+            period: page.period,
+            records: page.records,
+            totalAvailable: page.totalAvailable,
+            loadedCount: page.records.length,
+            columnCount: page.columnCount,
+            publicationId: page.publicationId,
+            publicationIds: page.publicationIds,
+            publishedAt: page.publishedAt,
+            dateCountsSignature: page.dateCountsSignature,
+            error: null,
+          }));
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof JtMonitoringV2LoadError
+            ? cause
+            : new JtMonitoringV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+          setJtMonitoringV2State((current) => ({
+            ...current,
+            status: loadError.kind === "empty" ? "empty" : "error",
+            loading: false,
+            records: [],
+            totalAvailable: 0,
+            loadedCount: 0,
+            publicationId: null,
+            publicationIds: [],
+            publishedAt: null,
+            dateCountsSignature: null,
+            error: loadError.message,
+          }));
+        } finally {
+          if (jtMonitoringV2RequestRef.current === controller) jtMonitoringV2RequestRef.current = null;
+        }
+      })();
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      jtMonitoringV2RequestRef.current?.abort();
+      if (jtMonitoringV2RequestRef.current) jtMonitoringV2RequestRef.current = null;
+    };
+  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, jtMonitoringV2State.period.dateFrom, jtMonitoringV2State.period.dateTo, view, viewerAuthorization]);
+
+  const loadMoreJtMonitoringV2 = useCallback(async () => {
+    const currentState = jtMonitoringV2State;
+    if (
+      !viewerAuthorization ||
+      !isMatrixAdminViewer ||
+      (currentState.status !== "ready" && !(currentState.status === "error" && currentState.loadedCount > 0)) ||
+      currentState.loading ||
+      currentState.loadedCount >= currentState.totalAvailable ||
+      currentState.loadedCount >= JT_MONITORING_V2_MAX_PREVIEW_ROWS ||
+      jtMonitoringV2RequestRef.current
+    ) return;
+
+    const offset = currentState.records.length;
+    const controller = new AbortController();
+    jtMonitoringV2RequestRef.current = controller;
+    setJtMonitoringV2State((state) => ({ ...state, status: "ready", loading: true, error: null }));
+
+    const authorizationHeaders = new Headers();
+    if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
+      authorizationHeaders.set("authorization", viewerAuthorization);
+    }
+    try {
+      const page = await loadJtMonitoringPage(
+        currentState.period,
+        offset,
+        (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      if (
+        page.offset !== currentState.loadedCount ||
+        page.totalAvailable !== currentState.totalAvailable ||
+        page.publicationId !== currentState.publicationId ||
+        page.dateCountsSignature !== currentState.dateCountsSignature
+      ) {
+        throw new JtMonitoringV2LoadError("inconsistent", "A publicação ou a contagem mudou; atualize o período antes de carregar outra página.");
+      }
+      const existingIdentities = new Set(currentState.records.map(jtMonitoringV2RowIdentity));
+      for (const record of page.records) {
+        const identity = jtMonitoringV2RowIdentity(record);
+        if (existingIdentities.has(identity)) {
+          throw new JtMonitoringV2LoadError("invalid_data", "A API V2 repetiu uma linha física entre páginas.");
+        }
+        existingIdentities.add(identity);
+      }
+      setJtMonitoringV2State((state) => {
+        if (state.period.dateFrom !== currentState.period.dateFrom || state.period.dateTo !== currentState.period.dateTo || state.records.length !== offset) return state;
+        return {
+          ...state,
+          status: "ready",
+          loading: false,
+          records: [...state.records, ...page.records],
+          loadedCount: state.records.length + page.records.length,
+          publicationIds: [...new Set([...state.publicationIds, ...page.publicationIds])].sort(),
+          error: null,
+        };
+      });
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      const loadError = cause instanceof JtMonitoringV2LoadError
+        ? cause
+        : new JtMonitoringV2LoadError("invalid_data", "Não foi possível carregar a próxima página V2.");
+      setJtMonitoringV2State((state) => ({
+        ...state,
+        status: "error",
+        loading: false,
+        error: loadError.message,
+      }));
+    } finally {
+      if (jtMonitoringV2RequestRef.current === controller) jtMonitoringV2RequestRef.current = null;
+    }
+  }, [isMatrixAdminViewer, jtMonitoringV2State, viewerAuthorization]);
 
   const loadFile = useCallback(async (file: File) => {
     setError(null);
@@ -3468,8 +4630,8 @@ export function DashboardApp() {
         date <= dateEnd &&
         selectedBases.has(base) &&
         selectedRegions.has(region) &&
-        selectedOrigins.has(origin) &&
-        matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms)
+        (loaded.sourceType === "DATA_FOUNDATION_V2" || selectedOrigins.has(origin)) &&
+        matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms, row)
       );
     });
   }, [loaded, dateStart, dateEnd, responsibilityLoaded, selectedBases, selectedOrigins, selectedRegions, selectedRgms, selectedRms]);
@@ -3518,8 +4680,8 @@ export function DashboardApp() {
     const groups = new Map<string, MonitoringRmSummaryRow>();
     for (const row of monitoringSummaryRows) {
       const base = rowBase(row, loaded.parsed.baseColumn);
-      const responsibility = monitoringResponsibilityForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
-      const rmArea = rmAreaForBase(responsibilityLoaded, base);
+      const responsibility = monitoringResponsibilityForRow(responsibilityLoaded, row, base, rowRegion(row, loaded.parsed.regionColumn));
+      const rmArea = responsibility.rmArea;
       const key = `${rmArea}::${responsibility.rm}::${responsibility.rgm}`;
       const current = groups.get(key) ?? {
         rmArea,
@@ -3545,24 +4707,47 @@ export function DashboardApp() {
     }, { orderVolume: 0, awaiting: 0, collected: 0 }),
     [monitoringRegionalSummary],
   );
+  const firstScanTableRows = useMemo(() => {
+    if (!isReferenceBaseTestActive) return monitoringSummaryRows;
+    if (!loaded?.parsed.baseColumn || !loaded.parsed.dateColumn) return [];
+    const selectedDayRows = loaded.parsed.rows.filter(
+      (row) => String(row[loaded.parsed.dateColumn as string] ?? "") === "2026-10-05",
+    );
+    return filterRowsByReferenceBaseNames(
+      selectedDayRows,
+      referenceBaseTestSelected,
+      (row) => row.__sourceBaseName ?? row[loaded.parsed.baseColumn as string],
+    );
+  }, [isReferenceBaseTestActive, loaded, monitoringSummaryRows, referenceBaseTestSelected]);
+  const firstScanReferenceTestInfo = useMemo(() => {
+    if (!isReferenceBaseTestActive || !loaded?.parsed.baseColumn || !loaded.parsed.dateColumn) return null;
+    const dayRows = loaded.parsed.rows.filter(
+      (row) => String(row[loaded.parsed.dateColumn as string] ?? "") === "2026-10-05",
+    );
+    const rowsWithoutBaseName = dayRows.filter((row) =>
+      !normalizeReferenceBaseName(row.__sourceBaseName ?? row[loaded.parsed.baseColumn as string]),
+    ).length;
+    return { dayRows: dayRows.length, includedRows: firstScanTableRows.length, rowsWithoutBaseName };
+  }, [firstScanTableRows, isReferenceBaseTestActive, loaded]);
+
   const firstScanRegionalSummary = useMemo(() => {
     if (!loaded?.parsed.baseColumn) return [] as Array<{ region: string; rgm: string } & FirstScanMetrics>;
     const groups = new Map<string, { region: string; rgm: string } & FirstScanMetrics>();
-    for (const row of monitoringSummaryRows) {
+    for (const row of firstScanTableRows) {
       const region = rowRegion(row, loaded.parsed.regionColumn);
       const current = groups.get(region) ?? { region, rgm: officialRgmForRegion(region) ?? UNASSIGNED_RGM, orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
       addFirstScanMetrics(current, firstScanMetricsForRow(row, loaded.statuses));
       groups.set(region, current);
     }
     return [...groups.values()].filter((row) => row.orderVolume > 0).sort((a, b) => firstScanTotalRetained(b) - firstScanTotalRetained(a));
-  }, [loaded, monitoringSummaryRows, responsibilityLoaded]);
+  }, [firstScanTableRows, loaded]);
   const firstScanRmSummary = useMemo(() => {
     if (!loaded?.parsed.baseColumn) return [] as Array<{ rmArea: string; rm: string; rgm: string } & FirstScanMetrics>;
     const groups = new Map<string, { rmArea: string; rm: string; rgm: string } & FirstScanMetrics>();
     for (const row of monitoringSummaryRows) {
       const base = rowBase(row, loaded.parsed.baseColumn);
-      const responsibility = monitoringResponsibilityForBase(responsibilityLoaded, base, rowRegion(row, loaded.parsed.regionColumn));
-      const rmArea = rmAreaForBase(responsibilityLoaded, base);
+      const responsibility = monitoringResponsibilityForRow(responsibilityLoaded, row, base, rowRegion(row, loaded.parsed.regionColumn));
+      const rmArea = responsibility.rmArea;
       const key = `${rmArea}\u0000${responsibility.rm}\u0000${responsibility.rgm}`;
       const current = groups.get(key) ?? { rmArea, rm: responsibility.rm, rgm: responsibility.rgm, orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
       addFirstScanMetrics(current, firstScanMetricsForRow(row, loaded.statuses));
@@ -3572,6 +4757,7 @@ export function DashboardApp() {
   }, [loaded, monitoringSummaryRows, responsibilityLoaded]);
   const firstScanTotal = useMemo(() => firstScanRegionalSummary.reduce<FirstScanMetrics>((total, row) => { addFirstScanMetrics(total, row); return total; }, { orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 }), [firstScanRegionalSummary]);
   const firstScanPreviousRegional = useMemo(() => {
+    if (isReferenceBaseTestActive) return new Map<string, FirstScanMetrics>();
     if (!loaded?.parsed.dateColumn || !loaded.parsed.baseColumn) return new Map<string, FirstScanMetrics>();
     const currentDate = monitoringSummaryDates[monitoringSummaryDates.length - 1];
     const previousDate = loaded.dates.filter((date) => date < currentDate).at(-1);
@@ -3582,13 +4768,13 @@ export function DashboardApp() {
       const base = rowBase(row, loaded.parsed.baseColumn);
       const region = rowRegion(row, loaded.parsed.regionColumn);
       const origin = rowOrigin(row, loaded.originColumn);
-      if (!selectedRegions.has(region) || !selectedBases.has(base) || !selectedOrigins.has(origin) || !matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms)) continue;
+      if (!selectedRegions.has(region) || !selectedBases.has(base) || (loaded.sourceType !== "DATA_FOUNDATION_V2" && !selectedOrigins.has(origin)) || !matchesMonitoringResponsibility(responsibilityLoaded, base, region, selectedRms, selectedRgms, row)) continue;
       const current = groups.get(region) ?? { orderVolume: 0, baseRetained: 0, baseDispatched: 0, hubArrived: 0 };
       addFirstScanMetrics(current, firstScanMetricsForRow(row, loaded.statuses));
       groups.set(region, current);
     }
     return groups;
-  }, [loaded, monitoringSummaryDates, responsibilityLoaded, selectedBases, selectedOrigins, selectedRegions, selectedRgms, selectedRms]);
+  }, [isReferenceBaseTestActive, loaded, monitoringSummaryDates, responsibilityLoaded, selectedBases, selectedOrigins, selectedRegions, selectedRgms, selectedRms]);
   const firstScanPreviousTotal = useMemo(() => [...firstScanPreviousRegional.values()].reduce<FirstScanMetrics>((total, row) => {
     addFirstScanMetrics(total, row);
     return total;
@@ -4080,6 +5266,20 @@ export function DashboardApp() {
   const taxaSummary = useMemo(
     () => summarizeTaxaPeriod(taxaFilteredRecords),
     [taxaFilteredRecords],
+  );
+
+  const taxaV2CardRows = useMemo(
+    () => mapTaxaV2CardRecords(collectionRateV2State.records),
+    [collectionRateV2State.records],
+  );
+  const taxaV2Options = useMemo(() => taxaV2FilterOptions(taxaV2CardRows), [taxaV2CardRows]);
+  const taxaV2FilteredRows = useMemo(
+    () => filterTaxaV2CardRecords(taxaV2CardRows, taxaV2Filters),
+    [taxaV2CardRows, taxaV2Filters],
+  );
+  const taxaV2Summary = useMemo(
+    () => summarizeTaxaV2Cards(taxaV2FilteredRows),
+    [taxaV2FilteredRows],
   );
 
   const baseAnalysisText = useMemo(() => {
@@ -5006,7 +6206,239 @@ export function DashboardApp() {
   };
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
-  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true;
+  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer);
+  const noMovementV2Diagnostic = isMatrixAdminViewer ? (
+    <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="no-movement-v2-diagnostic">
+      <div className="filters-card-top">
+        <div>
+          <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
+          <p>{t("Leitura somente do snapshot vigente; estes registros ainda não alimentam os componentes do painel.")}</p>
+        </div>
+      </div>
+      <div
+        className={`filter-summary${noMovementV2State.status === "error" ? " invalid" : ""}`}
+        role={noMovementV2State.status === "error" ? "alert" : "status"}
+        aria-live="polite"
+      >
+        <span><strong>{t("Status V2:")}</strong> {noMovementV2State.status === "idle"
+          ? t("Aguardando consulta")
+          : noMovementV2State.status === "loading"
+            ? t("Consultando snapshot vigente…")
+            : noMovementV2State.status === "ready"
+              ? t("Snapshot conectado")
+            : noMovementV2State.status === "empty"
+              ? noMovementV2State.error
+                ? t("Nenhum snapshot vigente")
+                : t("Snapshot vigente sem registros")
+              : t("Erro de conexão")}</span>
+        <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || noMovementV2State.status === "empty" ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
+        <span><strong>{t("Colunas:")}</strong> {formatNumber(noMovementV2State.columnCount)}</span>
+        <span><strong>{t("Publicação:")}</strong> {noMovementV2State.publicationId ?? "—"}</span>
+        <span><strong>{t("Atualizado em:")}</strong> {noMovementV2State.updatedAt ? formatDateTime(noMovementV2State.updatedAt) : "—"}</span>
+        {noMovementV2State.error ? <span>{t(noMovementV2State.error)}</span> : null}
+      </div>
+    </section>
+  ) : null;
+  const pddCollectionFailureV2Diagnostic = isMatrixAdminViewer ? (
+    <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="pdd-collection-failure-v2-diagnostic">
+      <div className="filters-card-top">
+        <div>
+          <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
+          <p>{t("Consulta da fonte oficial por período; os registros V2 ainda não alimentam indicadores, gráficos ou tabelas.")}</p>
+        </div>
+      </div>
+      <div className="filter-grid taxa-filter-grid">
+        <div className="filter-field date-field">
+          <label className="filter-label" htmlFor="pdd-v2-date-start">{t("Data inicial")}</label>
+          <div className="date-input-wrap">
+            <CalendarDays size={16} />
+            <input
+              id="pdd-v2-date-start"
+              type="date"
+              value={pddCollectionFailureV2State.period.dateFrom}
+              onChange={(event) => {
+                const dateFrom = event.target.value;
+                setPddCollectionFailureV2State((current) => ({
+                  ...current,
+                  period: {
+                    dateFrom,
+                    dateTo: !current.period.dateTo || current.period.dateTo < dateFrom ? dateFrom : current.period.dateTo,
+                  },
+                }));
+              }}
+            />
+          </div>
+        </div>
+        <div className="filter-field date-field">
+          <label className="filter-label" htmlFor="pdd-v2-date-end">{t("Data final")}</label>
+          <div className="date-input-wrap">
+            <CalendarDays size={16} />
+            <input
+              id="pdd-v2-date-end"
+              type="date"
+              value={pddCollectionFailureV2State.period.dateTo}
+              min={pddCollectionFailureV2State.period.dateFrom || undefined}
+              onChange={(event) => {
+                const dateTo = event.target.value;
+                setPddCollectionFailureV2State((current) => ({
+                  ...current,
+                  period: {
+                    dateFrom: current.period.dateFrom || dateTo,
+                    dateTo,
+                  },
+                }));
+              }}
+            />
+          </div>
+        </div>
+      </div>
+      <div
+        className={`filter-summary${pddCollectionFailureV2State.status === "error" ? " invalid" : ""}`}
+        role={pddCollectionFailureV2State.status === "error" ? "alert" : "status"}
+        aria-live="polite"
+      >
+        <span><strong>{t("Status V2:")}</strong> {pddCollectionFailureV2State.status === "idle"
+          ? t("Aguardando consulta")
+          : pddCollectionFailureV2State.status === "loading"
+            ? t("Consultando publicação vigente…")
+            : pddCollectionFailureV2State.status === "ready"
+              ? t("Conexão ativa")
+              : pddCollectionFailureV2State.status === "empty"
+                ? pddCollectionFailureV2State.error
+                  ? t("Sem publicação para a consulta")
+                  : t("Conectado, sem registros para o período")
+                : t("Erro de conexão")}</span>
+        <span><strong>{t("Período:")}</strong> {pddCollectionFailureV2State.period.dateFrom || "—"} a {pddCollectionFailureV2State.period.dateTo || "—"}</span>
+        <span><strong>{t("Registros recebidos:")}</strong> {pddCollectionFailureV2State.status === "ready" || pddCollectionFailureV2State.status === "empty" ? formatNumber(pddCollectionFailureV2State.receivedCount) : "—"}</span>
+        <span><strong>{t("Colunas:")}</strong> {formatNumber(pddCollectionFailureV2State.columnCount)}</span>
+        {pddCollectionFailureV2State.publicationIds.length ? <span><strong>{t("Publicações nas linhas:")}</strong> {pddCollectionFailureV2State.publicationIds.join(", ")}</span> : null}
+        {pddCollectionFailureV2State.publicationId ? <span><strong>{t("Publicação mais recente:")}</strong> {pddCollectionFailureV2State.publicationId}</span> : null}
+        {pddCollectionFailureV2State.updatedAt ? <span><strong>{t("Atualizado em:")}</strong> {formatDateTime(pddCollectionFailureV2State.updatedAt)}</span> : null}
+        {pddCollectionFailureV2State.error ? <span>{t(pddCollectionFailureV2State.error)}</span> : null}
+      </div>
+    </section>
+  ) : null;
+  const jtMonitoringV2Diagnostic = isMatrixAdminViewer ? (
+    <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="jt-monitoring-v2-diagnostic">
+      <div className="filters-card-top">
+        <div>
+          <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
+          <p>{t("Fonte oficial jt_monitoring. A conexão valida a publicação e conta o período; os registros ainda não alimentam indicadores, gráficos ou tabelas.")}</p>
+        </div>
+      </div>
+      <div className="filter-grid taxa-filter-grid">
+        <div className="filter-field date-field">
+          <label className="filter-label" htmlFor="jt-v2-date-start">{t("Data inicial")}</label>
+          <div className="date-input-wrap">
+            <CalendarDays size={16} />
+            <input
+              id="jt-v2-date-start"
+              type="date"
+              value={jtMonitoringV2State.period.dateFrom}
+              onChange={(event) => {
+                const dateFrom = event.target.value;
+                jtMonitoringV2RequestRef.current?.abort();
+                jtMonitoringV2RequestRef.current = null;
+                setJtMonitoringV2State((current) => ({
+                  ...current,
+                  status: "idle",
+                  loading: false,
+                  period: {
+                    dateFrom,
+                    dateTo: !current.period.dateTo || current.period.dateTo < dateFrom ? dateFrom : current.period.dateTo,
+                  },
+                  records: [],
+                  totalAvailable: 0,
+                  loadedCount: 0,
+                  publicationId: null,
+                  publicationIds: [],
+                  publishedAt: null,
+                  dateCountsSignature: null,
+                  error: null,
+                }));
+              }}
+            />
+          </div>
+        </div>
+        <div className="filter-field date-field">
+          <label className="filter-label" htmlFor="jt-v2-date-end">{t("Data final")}</label>
+          <div className="date-input-wrap">
+            <CalendarDays size={16} />
+            <input
+              id="jt-v2-date-end"
+              type="date"
+              value={jtMonitoringV2State.period.dateTo}
+              min={jtMonitoringV2State.period.dateFrom || undefined}
+              onChange={(event) => {
+                const dateTo = event.target.value;
+                jtMonitoringV2RequestRef.current?.abort();
+                jtMonitoringV2RequestRef.current = null;
+                setJtMonitoringV2State((current) => ({
+                  ...current,
+                  status: "idle",
+                  loading: false,
+                  period: {
+                    dateFrom: current.period.dateFrom || dateTo,
+                    dateTo,
+                  },
+                  records: [],
+                  totalAvailable: 0,
+                  loadedCount: 0,
+                  publicationId: null,
+                  publicationIds: [],
+                  publishedAt: null,
+                  dateCountsSignature: null,
+                  error: null,
+                }));
+              }}
+            />
+          </div>
+        </div>
+      </div>
+      <div
+        className={`filter-summary${jtMonitoringV2State.status === "error" ? " invalid" : ""}`}
+        role={jtMonitoringV2State.status === "error" ? "alert" : "status"}
+        aria-live="polite"
+      >
+        <span><strong>{t("Status V2:")}</strong> {jtMonitoringV2State.status === "idle"
+          ? t("Aguardando consulta")
+          : jtMonitoringV2State.status === "loading"
+            ? t("Consultando publicação vigente…")
+            : jtMonitoringV2State.status === "ready"
+              ? t("Conexão ativa")
+              : jtMonitoringV2State.status === "empty"
+                ? jtMonitoringV2State.error
+                  ? t("Sem publicação vigente")
+                  : t("Publicado, sem registros no período")
+                : t("Consulta V2 indisponível")}</span>
+        <span><strong>{t("Período:")}</strong> {jtMonitoringV2State.period.dateFrom || "—"} a {jtMonitoringV2State.period.dateTo || "—"}</span>
+        <span><strong>{t("Total disponível:")}</strong> {jtMonitoringV2State.status === "ready" || jtMonitoringV2State.status === "empty" ? formatNumber(jtMonitoringV2State.totalAvailable) : "—"}</span>
+        <span><strong>{t("Carregados:")}</strong> {formatNumber(jtMonitoringV2State.loadedCount)}</span>
+        <span><strong>{t("Colunas:")}</strong> {formatNumber(jtMonitoringV2State.columnCount)}</span>
+        {jtMonitoringV2State.publicationId ? <span><strong>{t("Publicação mais recente:")}</strong> {jtMonitoringV2State.publicationId}</span> : null}
+        {jtMonitoringV2State.publicationIds.length ? <span><strong>{t("Publicações nas linhas carregadas:")}</strong> {jtMonitoringV2State.publicationIds.join(", ")}</span> : null}
+        {jtMonitoringV2State.publishedAt ? <span><strong>{t("Publicada em:")}</strong> {formatDateTime(jtMonitoringV2State.publishedAt)}</span> : null}
+        {jtMonitoringV2State.loading && jtMonitoringV2State.loadedCount > 0 ? <span>{t("Carregando próxima página; os dados já carregados permanecem visíveis.")}</span> : null}
+        {jtMonitoringV2State.error ? <span>{t(jtMonitoringV2State.error)}</span> : null}
+        {jtMonitoringV2State.totalAvailable > JT_MONITORING_V2_MAX_PREVIEW_ROWS && jtMonitoringV2State.loadedCount >= JT_MONITORING_V2_MAX_PREVIEW_ROWS
+          ? <span>{t("Limite temporário de {count} registros atingido.", { count: formatNumber(JT_MONITORING_V2_MAX_PREVIEW_ROWS) })}</span>
+          : null}
+      </div>
+      <div className="table-detail-actions">
+        <small>{t("A consulta inicial carrega no máximo 250 linhas. Páginas adicionais são manuais e limitadas a 1.000 linhas nesta homologação.")}</small>
+        {jtMonitoringV2State.loadedCount < jtMonitoringV2State.totalAvailable && jtMonitoringV2State.loadedCount < JT_MONITORING_V2_MAX_PREVIEW_ROWS ? (
+          <button
+            className="reset-button"
+            type="button"
+            onClick={() => void loadMoreJtMonitoringV2()}
+            disabled={jtMonitoringV2State.loading || (jtMonitoringV2State.status !== "ready" && !(jtMonitoringV2State.status === "error" && jtMonitoringV2State.loadedCount > 0))}
+          >
+            {jtMonitoringV2State.loading ? t("Carregando…") : jtMonitoringV2State.status === "error" ? t("Tentar próxima página (250)") : t("Carregar próxima página (250)")}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  ) : null;
   const dashboardActionBand = (
     <DashboardActionBand
       reportDate={reportGeneratedAt}
@@ -5512,7 +6944,7 @@ export function DashboardApp() {
     : dashboardCards.find((card) => card.id === view && card.category === "last-mile");
 
   return (
-    <div className="app-shell" data-viewer-role={viewerIdentity.role}>
+    <div className="app-shell" data-viewer-role={viewerIdentity.role} data-theme={theme}>
       <input
         id="monitoring-upload"
         className="sr-only"
@@ -5566,17 +6998,23 @@ export function DashboardApp() {
 
       <header className="presentation-home-header">
         <div className="presentation-home-header-inner">
-          <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
+          <div className="presentation-brand-lockup">
+            <img src="/jnt-logo.png" alt="J&T Express" width={375} height={50} fetchPriority="high" />
+            <span className="presentation-brand-separator" aria-hidden="true" />
+            <strong className="presentation-brand-name">NEW BI</strong>
+          </div>
           <div className="presentation-header-actions">
-            {view === "home" && viewerIdentity.platform_role === "ADMIN" ? <>
-              <button className="presentation-user-control-button" type="button" onClick={() => { setView("data-foundation"); setShowUserControl(false); }}><Database size={18} /> {t("Central de Dados")}</button>
-              <button className="presentation-user-control-button" type="button" onClick={() => { setResponsibilityRefreshPending(false); setResponsibilitySourceDialogOpen(true); }}><FileSpreadsheet size={18} /> {t("De-para oficial")}</button>
-              <button className="presentation-user-control-button" type="button" onClick={() => setShowUserControl(true)} aria-current={showUserControl ? "page" : undefined}><UsersRound size={18} /> {t("Controle de usuários")}</button>
-            </> : null}
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
-            <button className="presentation-logout-button" type="button" onClick={endViewerSession}>
-              <LogOut size={18} /> {t("Sair")}
-            </button>
+            <UserProfileMenu
+              identity={viewerIdentity}
+              isAdmin={viewerIdentity.platform_role === "ADMIN"}
+              theme={theme}
+              onToggleTheme={toggleTheme}
+              onOpenDataSources={() => { setView("data-foundation"); setShowUserControl(false); }}
+              onOpenUserControl={() => { setView("home"); setShowUserControl(true); }}
+              onSignOut={endViewerSession}
+              t={t}
+            />
           </div>
         </div>
       </header>
@@ -5687,7 +7125,17 @@ export function DashboardApp() {
         t={t}
       /> : null}
 
-      <main className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}>
+      <main
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
+        data-v2-source={view === "taxa" && isMatrixAdminViewer ? "collection_rate" : undefined}
+        data-v2-status={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : undefined}
+        data-v2-period-start={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateFrom : undefined}
+        data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : undefined}
+        data-v2-record-count={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : undefined}
+        data-v2-column-count={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : undefined}
+        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.updatedAt ?? undefined : undefined}
+        data-v2-error={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : undefined}
+      >
         {view === "home" ? (
           showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
             setError(null);
@@ -5699,6 +7147,14 @@ export function DashboardApp() {
             t={t}
             canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
           /> : null
+        ) : isFirstMileUnderReview ? (
+          <DashboardUnderDevelopment
+            title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
+            description={dashboardCards.find((card) => card.id === view)?.description ?? ""}
+            sourceId={DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel] ?? ""}
+            availability={currentDashboardAvailability}
+            t={t}
+          />
         ) : pendingLastMilePanel ? (
           <PendingLastMileDashboard
             title={pendingLastMilePanel.title}
@@ -5748,7 +7204,10 @@ export function DashboardApp() {
           )
         ) : view === "bipagem" ? (
           !bipagemLoaded ? (
-            <EmptyDashboardPanel loading={bipagemLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
+            <>
+              {pddCollectionFailureV2Diagnostic}
+              <EmptyDashboardPanel loading={bipagemLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
+            </>
           ) : (
             <>
               <section className="dashboard-intro">
@@ -5764,6 +7223,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(bipagemLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {pddCollectionFailureV2Diagnostic}
               {dashboardActionBand}
 
               {error ? (
@@ -5962,7 +7422,10 @@ export function DashboardApp() {
           )
         ) : view === "movimentacao" ? (
           !movementLoaded ? (
-            <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
+            <>
+              {noMovementV2Diagnostic}
+              <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
+            </>
           ) : (
             <>
               <section className="dashboard-intro">
@@ -5979,6 +7442,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {noMovementV2Diagnostic}
               {dashboardActionBand}
 
               {error ? (
@@ -6384,6 +7848,7 @@ export function DashboardApp() {
                   <span><PackageCheck size={16} /> {t("Seller")}</span>
                 </div>
               </section>
+              {jtMonitoringV2Diagnostic}
               {dashboardActionBand}
               {error ? (
                 <div className="inline-alert error" role="alert">
@@ -6444,6 +7909,7 @@ export function DashboardApp() {
                   <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(sellerPerformanceLoaded.updatedAt) })}</span>
                 </div>
               </section>
+              {jtMonitoringV2Diagnostic}
               {dashboardActionBand}
 
               {error ? (
@@ -7121,7 +8587,208 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
             </>;
           })()
         ) : view === "taxa" ? (
-          !taxaLoaded ? (
+          isMatrixAdminViewer ? (
+            <>
+              <section className="dashboard-intro">
+                <div>
+                  <div className="eyebrow"><Target size={15} /> {t("Data Foundation V2")}</div>
+                  <h1>{t("Taxa de coleta")}</h1>
+                  <p>{t("Indicadores do período selecionado, calculados com a publicação vigente da fonte collection_rate.")}</p>
+                </div>
+                <div className="dataset-meta" aria-label={t("Fonte oficial V2")}>
+                  <span><Database size={16} /> collection_rate</span>
+                  <span><Layers3 size={16} /> {t("Contrato: {count} colunas", { count: formatNumber(collectionRateV2State.columnCount) })}</span>
+                  <span><Activity size={16} /> {t("{count} linhas no período", { count: formatNumber(collectionRateV2State.receivedCount) })}</span>
+                  <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(taxaV2Options.regions.length) })}</span>
+                  <span><Database size={16} /> {t("{count} bases", { count: formatNumber(taxaV2Options.bases.length) })}</span>
+                  <span><PackageCheck size={16} /> {t("{count} origens", { count: formatNumber(taxaV2Options.origins.length) })}</span>
+                  {collectionRateV2State.updatedAt ? <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(collectionRateV2State.updatedAt) })}</span> : null}
+                </div>
+              </section>
+              <section className="filters-card taxa-filters-card" aria-labelledby="taxa-v2-filters-heading">
+                <div className="filters-card-top">
+                  <div>
+                    <h2 id="taxa-v2-filters-heading"><Filter size={18} /> {t("Filtros operacionais")}</h2>
+                    <p>{t("A consulta busca somente as datas selecionadas na publicação vigente; os demais filtros refinam o mesmo conjunto recebido.")}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="reset-button"
+                    onClick={() => {
+                      const yesterday = yesterdayInSaoPaulo();
+                      setTaxaV2Filters({});
+                      setCollectionRateV2State((current) => ({
+                        ...current,
+                        period: { dateFrom: yesterday, dateTo: yesterday },
+                      }));
+                    }}
+                  >
+                    <RotateCcw size={15} /> {t("Limpar filtros")}
+                  </button>
+                </div>
+                <div className="filter-grid taxa-filter-grid">
+                  <MultiSelect
+                    label={t("Regional")}
+                    options={taxaV2Options.regions}
+                    selected={taxaV2Filters.regions ?? new Set(taxaV2Options.regions)}
+                    onChange={(regions) => setTaxaV2Filters((current) => ({ ...current, regions }))}
+                    allLabel={t("Todas as regionais")}
+                    singular={t("regional")}
+                    plural={t("regionais")}
+                    searchable
+                    t={t}
+                  />
+                  <MultiSelect
+                    label="RM"
+                    options={taxaV2Options.rms}
+                    selected={taxaV2Filters.rms ?? new Set(taxaV2Options.rms)}
+                    onChange={(rms) => setTaxaV2Filters((current) => ({ ...current, rms }))}
+                    allLabel={t("Todos os RM")}
+                    singular="RM"
+                    plural="RM"
+                    searchable
+                    t={t}
+                  />
+                  <MultiSelect
+                    label={t("Região do RM")}
+                    options={taxaV2Options.rmAreas}
+                    selected={taxaV2Filters.rmAreas ?? new Set(taxaV2Options.rmAreas)}
+                    onChange={(rmAreas) => setTaxaV2Filters((current) => ({ ...current, rmAreas }))}
+                    allLabel={t("Todas as regiões do RM")}
+                    singular={t("região do RM")}
+                    plural={t("regiões do RM")}
+                    searchable
+                    t={t}
+                  />
+                  <MultiSelect
+                    label={t("Base")}
+                    options={taxaV2Options.bases}
+                    selected={taxaV2Filters.bases ?? new Set(taxaV2Options.bases)}
+                    onChange={(bases) => setTaxaV2Filters((current) => ({ ...current, bases }))}
+                    allLabel={t("Todas as bases")}
+                    singular={t("base")}
+                    plural={t("bases")}
+                    searchable
+                    t={t}
+                  />
+                  <div className="filter-field date-field">
+                    <label className="filter-label" htmlFor="taxa-v2-date-start">{t("Data inicial")}</label>
+                    <div className="date-input-wrap">
+                      <CalendarDays size={16} />
+                      <input
+                        id="taxa-v2-date-start"
+                        type="date"
+                        value={collectionRateV2State.period.dateFrom}
+                        onChange={(event) => {
+                          const dateFrom = event.target.value;
+                          setCollectionRateV2State((current) => ({
+                            ...current,
+                            period: {
+                              dateFrom,
+                              dateTo: !current.period.dateTo || current.period.dateTo < dateFrom ? dateFrom : current.period.dateTo,
+                            },
+                          }));
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="filter-field date-field">
+                    <label className="filter-label" htmlFor="taxa-v2-date-end">{t("Data final")}</label>
+                    <div className="date-input-wrap">
+                      <CalendarDays size={16} />
+                      <input
+                        id="taxa-v2-date-end"
+                        type="date"
+                        value={collectionRateV2State.period.dateTo}
+                        min={collectionRateV2State.period.dateFrom || undefined}
+                        onChange={(event) => {
+                          const dateTo = event.target.value;
+                          setCollectionRateV2State((current) => ({
+                            ...current,
+                            period: {
+                              dateFrom: current.period.dateFrom || dateTo,
+                              dateTo,
+                            },
+                          }));
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <MultiSelect
+                    label={t("Origem do pedido")}
+                    options={taxaV2Options.origins}
+                    selected={taxaV2Filters.origins ?? new Set(taxaV2Options.origins)}
+                    onChange={(origins) => setTaxaV2Filters((current) => ({ ...current, origins }))}
+                    allLabel={t("Todas as origens")}
+                    singular={t("origem")}
+                    plural={t("origens")}
+                    searchable
+                    t={t}
+                  />
+                </div>
+                <div
+                  className={`filter-summary${collectionRateV2State.status === "error" ? " invalid" : ""}`}
+                  role={collectionRateV2State.status === "error" ? "alert" : "status"}
+                  data-testid="collection-rate-v2-diagnostic"
+                  aria-live="polite"
+                >
+                  <span><strong>{t("Status V2:")}</strong> {collectionRateV2State.status === "idle"
+                    ? t("Aguardando consulta")
+                    : collectionRateV2State.status === "loading"
+                      ? t("Consultando publicação vigente…")
+                      : collectionRateV2State.status === "ready"
+                        ? t("Conexão ativa")
+                        : collectionRateV2State.status === "empty"
+                          ? t("Conectado, sem registros para o período")
+                          : t("Erro de conexão")}</span>
+                  <span><strong>{t("Período:")}</strong> {collectionRateV2State.period.dateFrom || "—"} a {collectionRateV2State.period.dateTo || "—"}</span>
+                  <span><strong>{t("Registros recebidos:")}</strong> {formatNumber(collectionRateV2State.receivedCount)}</span>
+                  <span><strong>{t("Colunas:")}</strong> {formatNumber(collectionRateV2State.columnCount)}</span>
+                  <span><strong>{t("Linhas após filtros:")}</strong> {formatNumber(taxaV2FilteredRows.length)}</span>
+                  {collectionRateV2State.publicationId ? <span><strong>{t("Publicação vigente:")}</strong> {collectionRateV2State.publicationId}</span> : null}
+                  {collectionRateV2State.status === "empty" ? <span>{t("Sem dados publicados para a data selecionada")}</span> : null}
+                  {collectionRateV2State.status === "error" && collectionRateV2State.error ? <span>{t(collectionRateV2State.error)}</span> : null}
+                </div>
+              </section>
+              {collectionRateV2State.status === "ready" ? (
+                <section className="kpi-grid" aria-label={t("Indicadores de taxa de coleta")} data-testid="taxa-v2-kpi-grid">
+                  <KpiCard
+                    icon={<CalendarDays size={20} />}
+                    label={t("Taxa de coleta")}
+                    value={formatTaxaRate(taxaV2Summary.onTimeRate)}
+                    detail={t("{count} coletados no prazo", { count: formatNumber(taxaV2Summary.onTime) })}
+                  />
+                  <KpiCard
+                    icon={<TrendingUp size={20} />}
+                    label={t("Taxa com tentativa")}
+                    value={formatTaxaRate(taxaV2Summary.collectionWithAttemptsRate)}
+                    detail={t("{count} com coleta/tentativa", { count: formatNumber(taxaV2Summary.collectedWithAttempts) })}
+                    tone="orange"
+                  />
+                  <KpiCard
+                    icon={<Layers3 size={20} />}
+                    label={t("Previsto a coletar")}
+                    value={formatCompact(taxaV2Summary.toCollect)}
+                    detail={t("Valor previsto no período selecionado")}
+                    tone="dark"
+                  />
+                  <KpiCard
+                    icon={<CircleAlert size={20} />}
+                    label={t("Aguardando coleta")}
+                    value={formatCompact(taxaV2Summary.notCollected)}
+                    detail={t("{rate} do previsto a coletar", { rate: formatTaxaRate(taxaV2Summary.awaitingRate) })}
+                    tone="soft"
+                  />
+                </section>
+              ) : collectionRateV2State.status === "empty" ? (
+                <div className="quality-note" role="status">{t("Sem dados publicados para a data selecionada")}</div>
+              ) : collectionRateV2State.status === "error" ? (
+                <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{collectionRateV2State.error ? t(collectionRateV2State.error) : t("Erro de conexão")}</span></div>
+              ) : (
+                <div className="filter-summary" role="status">{collectionRateV2State.status === "loading" ? t("Consultando publicação vigente…") : t("Aguardando consulta à Data Foundation V2")}</div>
+              )}
+            </>
+          ) : !taxaLoaded ? (
             <>
               <section className="dashboard-intro">
                 <div>
@@ -7287,8 +8954,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                         max={taxaLoaded.dates[taxaLoaded.dates.length - 1]}
                         onChange={(event) => {
                           const nextStart = event.target.value;
+                          const nextEnd = !taxaDateEnd || taxaDateEnd < nextStart ? nextStart : taxaDateEnd;
                           setTaxaDateStart(nextStart);
-                          if (!taxaDateEnd || taxaDateEnd < nextStart) setTaxaDateEnd(nextStart);
+                          if (!taxaDateEnd || taxaDateEnd < nextStart) setTaxaDateEnd(nextEnd);
                           setTaxaPage(1);
                         }}
                       />
@@ -7305,7 +8973,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                         min={taxaDateStart || taxaLoaded.dates[0]}
                         max={taxaMaximumSelectableEnd || taxaLoaded.dates[taxaLoaded.dates.length - 1]}
                         onChange={(event) => {
-                          setTaxaDateEnd(event.target.value);
+                          const nextEnd = event.target.value;
+                          setTaxaDateEnd(nextEnd);
                           setTaxaPage(1);
                         }}
                       />
@@ -7735,8 +9404,28 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
               </footer>
             </>
           )
-        ) : !loaded ? (
-          <EmptyDashboardPanel loading={loading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "monitoring", files: [file] })} onAddSource={() => setDataSourceDialogId("monitoring")} inputId="monitoring-upload" t={t} />
+        ) : !loaded ||
+          (isMatrixAdminViewer && loaded.sourceType !== "DATA_FOUNDATION_V2") ||
+          (loaded.sourceType === "DATA_FOUNDATION_V2" && !isMatrixAdminViewer) ? (
+          <EmptyDashboardPanel
+            loading={isMatrixAdminViewer ? monitoringV2Status === "loading" || monitoringV2Status === "idle" : loading}
+            error={isMatrixAdminViewer ? (monitoringV2Status === "error" ? monitoringV2Message : null) : error}
+            canManageUpload={!isMatrixAdminViewer && viewerIdentity.platform_role === "ADMIN"}
+            onDrop={(file) => queueUpload({ kind: "monitoring", files: [file] })}
+            onAddSource={() => setDataSourceDialogId("monitoring")}
+            inputId="monitoring-upload"
+            description={isMatrixAdminViewer ? "Este painel consulta a publicação vigente de Monitoramento de Coleta na Data Foundation V2." : undefined}
+            sourceLabel={isMatrixAdminViewer ? "DATA FOUNDATION V2" : undefined}
+            emptyTitle={isMatrixAdminViewer && monitoringV2Status === "empty" ? "Sem dados publicados para a data selecionada" : undefined}
+            emptyDescription={isMatrixAdminViewer && monitoringV2Status === "empty" ? monitoringV2Message ?? "Sem dados publicados para a data selecionada" : undefined}
+            loadingDescription={isMatrixAdminViewer ? "Consultando a publicação vigente da Data Foundation V2…" : undefined}
+            periodStart={isMatrixAdminViewer ? monitoringV2PeriodStart : undefined}
+            periodEnd={isMatrixAdminViewer ? monitoringV2PeriodEnd : undefined}
+            onPeriodStartChange={isMatrixAdminViewer ? setMonitoringV2PeriodStart : undefined}
+            onPeriodEndChange={isMatrixAdminViewer ? setMonitoringV2PeriodEnd : undefined}
+            onRetry={isMatrixAdminViewer ? () => setMonitoringV2RetryKey((key) => key + 1) : undefined}
+            t={t}
+          />
         ) : (
           <>
             <section className="dashboard-intro">
@@ -7761,6 +9450,23 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <CircleAlert size={18} />
                 <span>{t(error)}</span>
                 <button type="button" onClick={() => setError(null)} aria-label={t("Fechar aviso")}><X size={16} /></button>
+              </div>
+            ) : null}
+
+            {isMatrixAdminViewer && monitoringV2Status === "loading" ? (
+              <div className="inline-alert" role="status">
+                <CalendarDays size={18} />
+                <span>{t("Carregando o período solicitado; os indicadores exibidos continuam referentes ao período {from}–{to}.", {
+                  from: dateStart,
+                  to: dateEnd,
+                })}</span>
+              </div>
+            ) : null}
+            {isMatrixAdminViewer && monitoringV2Status === "error" && monitoringV2Message ? (
+              <div className="inline-alert error" role="alert">
+                <CircleAlert size={18} />
+                <span>{t(monitoringV2Message)}</span>
+                <button type="button" onClick={() => setMonitoringV2RetryKey((key) => key + 1)}>{t("Tentar novamente")}</button>
               </div>
             ) : null}
 
@@ -7828,11 +9534,12 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     <input
                       id="date-start"
                       type="date"
-                      value={dateStart}
-                      min={loaded.dates[0]}
-                      max={loaded.dates[loaded.dates.length - 1]}
+                      value={loaded.sourceType === "DATA_FOUNDATION_V2" ? monitoringV2PeriodStart : dateStart}
+                      min={loaded.sourceType === "DATA_FOUNDATION_V2" ? undefined : loaded.dates[0]}
+                      max={loaded.sourceType === "DATA_FOUNDATION_V2" ? undefined : loaded.dates[loaded.dates.length - 1]}
                       onChange={(event) => {
-                        setDateStart(event.target.value);
+                        if (loaded.sourceType === "DATA_FOUNDATION_V2") setMonitoringV2PeriodStart(event.target.value);
+                        else setDateStart(event.target.value);
                         setPage(1);
                       }}
                     />
@@ -7845,11 +9552,12 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     <input
                       id="date-end"
                       type="date"
-                      value={dateEnd}
-                      min={loaded.dates[0]}
-                      max={loaded.dates[loaded.dates.length - 1]}
+                      value={loaded.sourceType === "DATA_FOUNDATION_V2" ? monitoringV2PeriodEnd : dateEnd}
+                      min={loaded.sourceType === "DATA_FOUNDATION_V2" ? undefined : loaded.dates[0]}
+                      max={loaded.sourceType === "DATA_FOUNDATION_V2" ? undefined : loaded.dates[loaded.dates.length - 1]}
                       onChange={(event) => {
-                        setDateEnd(event.target.value);
+                        if (loaded.sourceType === "DATA_FOUNDATION_V2") setMonitoringV2PeriodEnd(event.target.value);
+                        else setDateEnd(event.target.value);
                         setPage(1);
                       }}
                     />
@@ -7888,6 +9596,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   plural={t("origens")}
                   getOptionLabel={(option) => t(option)}
                   searchable
+                  disabled={loaded.sourceType === "DATA_FOUNDATION_V2"}
+                  disabledLabel={t("Não disponível na fonte V2")}
+                  disabledReason={t("A publicação oficial do Monitoramento de Coleta não contém Origem do Pedido.")}
                   t={t}
                 />
               </div>
@@ -7938,6 +9649,50 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     void downloadRowsAsExcel(firstScanRegionalSummary, columns, t("Primeira digitalização por regional"), "primeira_digitalizacao_regional.xlsx");
                   }}><FileSpreadsheet size={16}/>{t("Baixar Excel")}</button>
                 </div>
+                {isReferenceBaseTestActive && firstScanReferenceTestInfo ? (
+                  <div className="reference-base-test-controls">
+                    <div className="quality-note" role="status">
+                      <Info size={16} />
+                      <span>
+                        <strong>Teste — Bases da referência.</strong>{" "}
+                        {t("Modo local isolado: somente esta tabela usa a lista fornecida e o período 05/10/2026; os demais filtros e componentes permanecem independentes.")}{" "}
+                        {t("{included} de {total} linhas incluídas; {missing} linha(s) sem nome de base.", {
+                          included: formatNumber(firstScanReferenceTestInfo.includedRows),
+                          total: formatNumber(firstScanReferenceTestInfo.dayRows),
+                          missing: formatNumber(firstScanReferenceTestInfo.rowsWithoutBaseName),
+                        })}
+                      </span>
+                      <button
+                        type="button"
+                        className="reset-button"
+                        onClick={() => {
+                          setReferenceBaseTestRequested(false);
+                          const url = new URL(window.location.href);
+                          url.searchParams.delete("monitoringReferenceBaseTest");
+                          window.history.replaceState(window.history.state, "", url);
+                        }}
+                      >
+                        {t("Encerrar teste")}
+                      </button>
+                    </div>
+                    <div className="filter-grid monitoring-filter-grid">
+                      <MultiSelect
+                        label={t("Base")}
+                        options={[...REFERENCE_BASE_TEST_NAMES]}
+                        selected={referenceBaseTestSelected}
+                        onChange={setReferenceBaseTestSelected}
+                        allLabel={t("Todas as bases da referência")}
+                        singular={t("base")}
+                        plural={t("bases")}
+                        searchable
+                        t={t}
+                      />
+                      <span className="filter-summary">
+                        {t("{count} nomes na lista de referência.", { count: formatNumber(REFERENCE_BASE_TEST_NAMES.length) })}
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="dashboard-table-wrap movement-summary-table-wrap">
                   <table className="dashboard-data-table movement-summary-table monitoring-summary-table first-scan-table">
                     <thead>

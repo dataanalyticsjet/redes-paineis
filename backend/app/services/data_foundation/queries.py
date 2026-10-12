@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy import Engine, text
 
 from app.services.data_foundation.contracts import CONTRACTS
+from app.services.data_foundation.mapping_resolution import build_mapping_query
 from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError
 
 
@@ -21,7 +22,22 @@ class ScopedQuery:
     select_sql: str
 
 
-def _scope_clause(identity: dict[str, Any], params: dict[str, object]) -> str:
+def _require_matrix_admin_identity(identity: dict[str, Any]) -> None:
+    if str(identity.get("platform_role") or "").strip().upper() != "ADMIN":
+        raise DataFoundationError("admin_required", 403)
+    if (
+        str(identity.get("organizational_scope") or "").strip().lower() != "matrix"
+        or str(identity.get("role") or "").strip().lower() != "matrix"
+    ):
+        raise DataFoundationError("matrix_scope_required", 403)
+
+
+def _scope_clause(
+    identity: dict[str, Any],
+    params: dict[str, object],
+    *,
+    mapping_alias: str = "effective_entry",
+) -> str:
     scope = str(identity.get("organizational_scope") or "").strip().lower()
     role = str(identity.get("role") or "").strip().lower()
     if scope == "matrix" and role == "matrix":
@@ -39,7 +55,7 @@ def _scope_clause(identity: dict[str, Any], params: dict[str, object]) -> str:
             key = f"scope_region_{index}"
             params[key] = region
             placeholders.append(f":{key}")
-        return f"BINARY current_entry.regional_name IN ({', '.join(placeholders)})"
+        return f"BINARY {mapping_alias}.regional_name IN ({', '.join(placeholders)})"
     if scope == "base":
         base_code = str(identity.get("home_base") or identity.get("base") or "").strip()
         if not base_code:
@@ -57,21 +73,21 @@ def _scope_clause(identity: dict[str, Any], params: dict[str, object]) -> str:
                 key = f"scope_extra_region_{index}"
                 params[key] = extra
                 placeholders.append(f":{key}")
-            extra_region_clause = f" OR BINARY current_entry.regional_name IN ({', '.join(placeholders)})"
+            extra_region_clause = f" OR BINARY {mapping_alias}.regional_name IN ({', '.join(placeholders)})"
         home_region = str(identity.get("home_region") or identity.get("region") or "").strip().upper()
         if home_region:
             params["scope_base_name"] = base_code
             params["scope_home_region"] = home_region
             return (
-                "(current_entry.base_code = :scope_base_code"
-                " OR (BINARY current_entry.base_name = BINARY :scope_base_name"
-                " AND BINARY current_entry.regional_name = BINARY :scope_home_region"
-                " AND (SELECT COUNT(*) FROM base_mapping_entries AS exact_base"
-                " WHERE exact_base.map_version_id = current_entry.map_version_id"
-                " AND BINARY exact_base.base_name = BINARY current_entry.base_name"
-                f" AND BINARY exact_base.regional_name = BINARY current_entry.regional_name) = 1){extra_region_clause})"
+                f"({mapping_alias}.base_code = :scope_base_code"
+                f" OR (BINARY {mapping_alias}.base_name = BINARY :scope_base_name"
+                f" AND BINARY {mapping_alias}.regional_name = BINARY :scope_home_region"
+                f" AND (SELECT COUNT(*) FROM base_mapping_entries AS exact_base"
+                f" WHERE exact_base.map_version_id = {mapping_alias}.map_version_id"
+                f" AND BINARY exact_base.base_name = BINARY {mapping_alias}.base_name"
+                f" AND BINARY exact_base.regional_name = BINARY :scope_home_region) = 1){extra_region_clause})"
             )
-        return f"(current_entry.base_code = :scope_base_code{extra_region_clause})"
+        return f"({mapping_alias}.base_code = :scope_base_code{extra_region_clause})"
     raise DataFoundationError("user_scope_unavailable", 403)
 
 
@@ -84,7 +100,9 @@ def _query_plan(
     base_code: str | None = None,
     region: str | None = None,
     publication_id: str | None = None,
+    sql_dialect: str = "mysql",
 ) -> ScopedQuery:
+    _require_matrix_admin_identity(identity)
     contract = CONTRACTS.get(source_id)
     table = FACT_TABLES.get(source_id)
     if contract is None or table is None:
@@ -117,19 +135,25 @@ def _query_plan(
               ON head.source_id = fact.source_id
              AND head.publication_id = fact.publication_id
         """
+    column_keys = {column.key for column in contract.columns}
+    mapping_query = build_mapping_query(
+        source_id=source_id,
+        has_source_base_code="source_base_code" in column_keys,
+        has_source_base_name="source_base_name" in column_keys,
+        dialect=sql_dialect,
+    )
     from_sql = f"""
-        FROM `{table}` AS fact
+        FROM {chr(96)}{table}{chr(96)} AS fact
         {head_join}
         JOIN base_mapping_current AS current_map
           ON current_map.current_key = 'OFFICIAL'
-        JOIN base_mapping_entries AS current_entry
-          ON current_entry.map_version_id = current_map.map_version_id
-         AND current_entry.base_code = fact.resolved_base_code
+        JOIN base_mapping_versions AS current_version
+          ON current_version.map_version_id = current_map.map_version_id
+         AND current_version.version_state = 'PUBLISHED'
+        {mapping_query.joins}
     """
     where_parts = [
         "fact.source_id = :source_id",
-        "fact.resolved_base_code IS NOT NULL",
-        "fact.mapping_resolution IN ('CODE_MATCH', 'NAME_APPROVED')",
     ]
     if publication_id is not None:
         where_parts.append("fact.publication_id = :selected_publication_id")
@@ -141,10 +165,15 @@ def _query_plan(
         where_parts.append("fact.data_date <= :date_to")
         params["date_to"] = date_to
     if base_code:
-        where_parts.append("current_entry.base_code = :filter_base_code")
+        where_parts.append("effective_entry.base_code = :filter_base_code")
         params["filter_base_code"] = base_code
     if region:
-        where_parts.append("BINARY current_entry.regional_name = BINARY :filter_region")
+        if region == "Sem regional":
+            where_parts.append("effective_entry.base_code IS NULL")
+        elif sql_dialect == "sqlite":
+            where_parts.append("CAST(effective_entry.regional_name AS BLOB) = CAST(:filter_region AS BLOB)")
+        else:
+            where_parts.append("BINARY effective_entry.regional_name = BINARY :filter_region")
         params["filter_region"] = region
 
     fields = [f"fact.`{column.key}` AS `{column.key}`" for column in contract.columns]
@@ -153,7 +182,14 @@ def _query_plan(
         "fact.source_row_no AS source_row_no",
         "fact.resolved_base_code AS resolved_base_code",
         "fact.mapping_resolution AS mapping_resolution",
-        "current_entry.regional_name AS mapped_region",
+        f"{mapping_query.effective_base_code_sql} AS effective_base_code",
+        f"{mapping_query.effective_resolution_sql} AS effective_mapping_resolution",
+        f"{mapping_query.match_method_sql} AS mapping_match_method",
+        "effective_entry.base_name AS mapped_base_name",
+        "effective_entry.regional_name AS mapped_region",
+        "effective_entry.uf_code AS mapped_uf",
+        "effective_entry.rm_region AS mapped_rm_area",
+        "effective_entry.rm_responsible AS mapped_rm",
     ])
     return ScopedQuery(
         source_id=source_id,
@@ -181,8 +217,9 @@ def _assert_map_available(engine: Engine) -> None:
 
 def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> dict[str, object]:
     """Return current map metadata and only the base count visible to this identity."""
+    _require_matrix_admin_identity(identity)
     parameters: dict[str, object] = {}
-    scope = _scope_clause(identity, parameters)
+    scope = _scope_clause(identity, parameters, mapping_alias="current_entry")
     with engine.connect() as connection:
         current = connection.execute(text("""
             SELECT version.map_version_id, version.version_no, version.version_state,
@@ -244,6 +281,7 @@ def get_records(
         base_code=base_code,
         region=region,
         publication_id=publication_id,
+        sql_dialect=engine.dialect.name,
     )
     _assert_map_available(engine)
     where = f"WHERE {plan.where_sql}"
@@ -289,6 +327,7 @@ def get_date_counts(
         base_code=base_code,
         region=region,
         publication_id=publication_id,
+        sql_dialect=engine.dialect.name,
     )
     _assert_map_available(engine)
     if source_id == "no_movement":
@@ -334,7 +373,9 @@ def export_records(
     )
     headers = [
         *(column.key for column in CONTRACTS[source_id].columns),
-        "publication_id", "source_row_no", "resolved_base_code", "mapping_resolution", "mapped_region",
+        "publication_id", "source_row_no", "resolved_base_code", "mapping_resolution",
+        "effective_base_code", "effective_mapping_resolution", "mapping_match_method",
+        "mapped_base_name", "mapped_region", "mapped_uf", "mapped_rm_area", "mapped_rm",
     ]
     return headers, result["records"]
 
@@ -347,24 +388,32 @@ def get_publications(
     limit: int,
     offset: int,
 ) -> dict[str, object]:
+    _require_matrix_admin_identity(identity)
     if source_id not in FACT_TABLES:
         raise DataFoundationError("data_source_not_found", 404)
     table = FACT_TABLES[source_id]
     parameters: dict[str, object] = {"source_id": source_id}
     scope = _scope_clause(identity, parameters)
+    column_keys = {column.key for column in CONTRACTS[source_id].columns}
+    mapping_query = build_mapping_query(
+        source_id=source_id,
+        has_source_base_code="source_base_code" in column_keys,
+        has_source_base_name="source_base_name" in column_keys,
+        dialect=engine.dialect.name,
+    )
     from_sql = f"""
         FROM source_publications AS publication
-        JOIN `{table}` AS fact
+        JOIN {chr(96)}{table}{chr(96)} AS fact
           ON fact.source_id = publication.source_id
          AND fact.publication_id = publication.publication_id
         JOIN base_mapping_current AS current_map
           ON current_map.current_key = 'OFFICIAL'
-        JOIN base_mapping_entries AS current_entry
-          ON current_entry.map_version_id = current_map.map_version_id
-         AND current_entry.base_code = fact.resolved_base_code
+        JOIN base_mapping_versions AS current_version
+          ON current_version.map_version_id = current_map.map_version_id
+         AND current_version.version_state = 'PUBLISHED'
+        {mapping_query.joins}
     """
     filters = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
-    filters += " AND fact.resolved_base_code IS NOT NULL AND fact.mapping_resolution IN ('CODE_MATCH', 'NAME_APPROVED')"
     if scope:
         filters += f" AND {scope}"
     if source_id in DAILY_SOURCES:

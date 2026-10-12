@@ -15,7 +15,9 @@ from sqlalchemy import create_engine, event, text
 
 from app.services.data_foundation.contracts import CONTRACTS, contract_sha256
 from app.services.data_foundation.queries import get_current_mapping_status
+from app.services.data_foundation import repository as data_foundation_repository
 from app.services.data_foundation.repository import (
+    DataFoundationError,
     FACT_TABLES,
     create_preview_job,
     get_name_mapping_candidates,
@@ -285,6 +287,24 @@ def _create_job(engine, content, contract, resolver, staging_directory, file_nam
     return job_id, key, summary
 
 
+def _create_initial_mapping_job(engine, content, staging_directory):
+    contract = CONTRACTS["base_mapping_official"]
+    summary = parse_workbook(content, contract, MappingResolver())
+    key = save_uploaded_workbook(staging_directory, content)
+    with engine.connect() as connection:
+        job_id = create_preview_job(
+            connection,
+            source_id=contract.source_id,
+            actor_user_id=7,
+            file_name=contract.workbook_name,
+            file_size=len(content),
+            stored_file_key=key,
+            summary=summary,
+            request_id="sqlite-mapping-migration-test",
+        )
+    return job_id, key
+
+
 def _publish(engine, job_id, staging_directory, key):
     result = publish_import_job(
         engine,
@@ -312,43 +332,73 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
         if not mapping_path.is_file():
             pytest.skip("DoomsDay mapping workbook was not found in the review folder")
         mapping_content = mapping_path.read_bytes()
-        mapping_contract = CONTRACTS["base_mapping_official"]
-        mapping_summary = parse_workbook(mapping_content, mapping_contract, MappingResolver())
-        mapping_key = save_uploaded_workbook(staging_directory, mapping_content)
-        with engine.connect() as connection:
-            mapping_job_id = create_preview_job(
-                connection,
-                source_id="base_mapping_official",
-                actor_user_id=7,
-                file_name="De_para DoomsDay.xlsx",
-                file_size=len(mapping_content),
-                stored_file_key=mapping_key,
-                summary=mapping_summary,
-                request_id="sqlite-publication-test",
-            )
+        mapping_job_id, _mapping_key = _create_initial_mapping_job(
+            engine, mapping_content, staging_directory
+        )
+        mapping_idempotency_key = "sqlite-mapping-migration-idempotency"
         migrated = publish_initial_mapping_migration(
             engine,
             job_id=mapping_job_id,
             actor_user_id=7,
             staging_directory=staging_directory,
+            idempotency_key=mapping_idempotency_key,
             request_id="sqlite-publication-test",
         )
+        replayed_migration = publish_initial_mapping_migration(
+            engine,
+            job_id=mapping_job_id,
+            actor_user_id=7,
+            staging_directory=staging_directory,
+            idempotency_key=mapping_idempotency_key,
+            request_id="sqlite-publication-retry-test",
+        )
+        assert migrated["reused"] is False
+        assert replayed_migration["reused"] is True
+        assert replayed_migration["mapVersionId"] == migrated["mapVersionId"]
         assert migrated["version"] == 1
         assert migrated["mappingRowCount"] == 1628
+        with pytest.raises(DataFoundationError, match="mapping_migration_idempotency_conflict"):
+            publish_initial_mapping_migration(
+                engine,
+                job_id=mapping_job_id,
+                actor_user_id=7,
+                staging_directory=staging_directory,
+                idempotency_key="different-migration-key",
+                request_id="sqlite-publication-conflict-test",
+            )
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_versions"
+            )).scalar_one() == 1
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_entries"
+            )).scalar_one() == 1628
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_current"
+            )).scalar_one() == 1
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_entries WHERE map_version_id = "
+                "(SELECT map_version_id FROM base_mapping_current WHERE current_key = 'OFFICIAL')"
+            )).scalar_one() == 1628
         matrix_map = get_current_mapping_status(
             engine,
-            identity={"organizational_scope": "matrix", "role": "matrix"},
-        )
-        assert matrix_map["visibleBaseCount"] == 1628
-        out_of_scope_map = get_current_mapping_status(
-            engine,
             identity={
-                "organizational_scope": "regional",
-                "role": "regional",
-                "home_region": "__OUT_OF_SCOPE__",
+                "platform_role": "ADMIN",
+                "organizational_scope": "matrix",
+                "role": "matrix",
             },
         )
-        assert out_of_scope_map["visibleBaseCount"] == 0
+        assert matrix_map["visibleBaseCount"] == 1628
+        with pytest.raises(DataFoundationError, match="matrix_scope_required"):
+            get_current_mapping_status(
+                engine,
+                identity={
+                    "platform_role": "ADMIN",
+                    "organizational_scope": "regional",
+                    "role": "regional",
+                    "home_region": "__OUT_OF_SCOPE__",
+                },
+            )
 
         with engine.connect() as connection:
             unresolved_name_resolver = load_mapping_resolver(
@@ -380,21 +430,11 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
         assert candidate_report["candidateNameCount"] == 925
         exact_source_name = next(
             item for item in candidate_report["candidates"]
-            if item["decisionState"] == "UNREVIEWED"
+            if item["decisionState"] == "AUTO_MATCH"
             and len(item["exactTargetCandidates"]) == 1
         )
         target_code = exact_source_name["exactTargetCandidates"][0]["baseCode"]
-        decision = record_name_mapping_decision(
-            engine,
-            source_id="collection_monitoring",
-            source_base_name=exact_source_name["sourceBaseName"],
-            resolution_state="LINKED",
-            target_base_code=str(target_code),
-            review_note="Correspondência exata e destino único conferidos no teste local.",
-            actor_user_id=7,
-            request_id="sqlite-publication-test",
-        )
-        assert decision["alreadyRecorded"] is False
+        assert exact_source_name["approvedTargetBaseCode"] == target_code
         validated = validate_job_again(
             engine,
             job_id=collection_job,
@@ -427,11 +467,11 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
             summaries[source_id] = summary
 
         assert summaries["collection_monitoring"].exact_duplicate_count == 0
-        assert summaries["collection_rate"].mapped_row_count == 0
+        assert summaries["collection_rate"].mapped_row_count > 0
         assert summaries["collection_rate"].exact_name_candidate_row_count > 0
         assert summaries["collection_rate"].no_mapping_match_row_count > 0
         assert summaries["jt_monitoring"].exact_duplicate_count == 4
-        assert summaries["jt_monitoring"].mapped_row_count == 0
+        assert summaries["jt_monitoring"].mapped_row_count > 0
         assert summaries["no_movement"].mapped_row_count == 141
         assert summaries["no_movement"].unmapped_row_count == 10
         assert summaries["pdd_collection_failure"].mapped_row_count == 1598
@@ -519,6 +559,170 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
                 "SELECT COUNT(*) FROM source_publications WHERE source_id = 'no_movement'"
             )).scalar_one() == 2
             assert bytes(snapshot_head) != bytes.fromhex(publications["no_movement"]["publicationId"].replace("-", ""))
+    finally:
+        engine.dispose()
+
+
+def test_initial_mapping_migration_requires_active_source_and_approved_contract(tmp_path):
+    if not OFFICIAL_WORKBOOK_ROOT.is_dir():
+        pytest.skip("Set DATA_FOUNDATION_REVIEW_WORKBOOKS to the official workbook review folder")
+    mapping_path = OFFICIAL_WORKBOOK_ROOT / "De_para DoomsDay.xlsx"
+    if not mapping_path.is_file():
+        pytest.skip("DoomsDay mapping workbook was not found in the review folder")
+
+    engine = create_engine("sqlite://")
+    _sql_compatibility_for_sqlite(engine)
+    _sqlite_schema(engine)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("""
+                UPDATE data_source_registry SET source_state = 'PENDING'
+                WHERE source_id = 'base_mapping_official'
+            """))
+            connection.execute(text("""
+                UPDATE source_contract_versions SET contract_state = 'DISCOVERED'
+                WHERE source_id = 'base_mapping_official' AND contract_version = 1
+            """))
+        staging_directory = tmp_path / "private-staging"
+        job_id, _key = _create_initial_mapping_job(
+            engine, mapping_path.read_bytes(), staging_directory
+        )
+
+        with pytest.raises(DataFoundationError, match="base_mapping_source_not_active"):
+            publish_initial_mapping_migration(
+                engine,
+                job_id=job_id,
+                actor_user_id=7,
+                staging_directory=staging_directory,
+                idempotency_key="sqlite-mapping-approval-test",
+                request_id="sqlite-mapping-approval-test",
+            )
+        with engine.begin() as connection:
+            connection.execute(text("""
+                UPDATE data_source_registry SET source_state = 'ACTIVE'
+                WHERE source_id = 'base_mapping_official'
+            """))
+        with pytest.raises(DataFoundationError, match="base_mapping_contract_not_approved"):
+            publish_initial_mapping_migration(
+                engine,
+                job_id=job_id,
+                actor_user_id=7,
+                staging_directory=staging_directory,
+                idempotency_key="sqlite-mapping-approval-test",
+                request_id="sqlite-mapping-approval-test",
+            )
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_versions"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_entries"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_current"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT job_state FROM import_jobs WHERE job_id = :job_id"
+            ), {"job_id": bytes.fromhex(job_id.replace("-", ""))}).scalar_one() == "VALIDATED"
+    finally:
+        engine.dispose()
+
+
+def test_initial_mapping_migration_rolls_back_on_final_row_validation_failure(tmp_path, monkeypatch):
+    if not OFFICIAL_WORKBOOK_ROOT.is_dir():
+        pytest.skip("Set DATA_FOUNDATION_REVIEW_WORKBOOKS to the official workbook review folder")
+    mapping_path = OFFICIAL_WORKBOOK_ROOT / "De_para DoomsDay.xlsx"
+    if not mapping_path.is_file():
+        pytest.skip("DoomsDay mapping workbook was not found in the review folder")
+
+    engine = create_engine("sqlite://")
+    _sql_compatibility_for_sqlite(engine)
+    _sqlite_schema(engine)
+    try:
+        staging_directory = tmp_path / "private-staging"
+        job_id, _key = _create_initial_mapping_job(
+            engine, mapping_path.read_bytes(), staging_directory
+        )
+        original_parse = data_foundation_repository.parse_workbook
+
+        def fail_final_validation(content, contract, resolver=None, *, on_valid_row=None):
+            summary = original_parse(content, contract, resolver, on_valid_row=on_valid_row)
+            if on_valid_row is not None:
+                summary.duplicate_base_code_count = 1
+            return summary
+
+        monkeypatch.setattr(data_foundation_repository, "parse_workbook", fail_final_validation)
+        with pytest.raises(DataFoundationError, match="mapping_migration_validation_changed"):
+            publish_initial_mapping_migration(
+                engine,
+                job_id=job_id,
+                actor_user_id=7,
+                staging_directory=staging_directory,
+                idempotency_key="sqlite-mapping-rollback-test",
+                request_id="sqlite-mapping-rollback-test",
+            )
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_versions"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_entries"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_current"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT job_state FROM import_jobs WHERE job_id = :job_id"
+            ), {"job_id": bytes.fromhex(job_id.replace("-", ""))}).scalar_one() == "VALIDATED"
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM data_audit_events"
+            )).scalar_one() == 0
+    finally:
+        engine.dispose()
+
+
+def test_initial_mapping_migration_rolls_back_if_audit_write_fails(tmp_path, monkeypatch):
+    if not OFFICIAL_WORKBOOK_ROOT.is_dir():
+        pytest.skip("Set DATA_FOUNDATION_REVIEW_WORKBOOKS to the official workbook review folder")
+    mapping_path = OFFICIAL_WORKBOOK_ROOT / "De_para DoomsDay.xlsx"
+    if not mapping_path.is_file():
+        pytest.skip("DoomsDay mapping workbook was not found in the review folder")
+
+    engine = create_engine("sqlite://")
+    _sql_compatibility_for_sqlite(engine)
+    _sqlite_schema(engine)
+    try:
+        staging_directory = tmp_path / "private-staging"
+        job_id, _key = _create_initial_mapping_job(
+            engine, mapping_path.read_bytes(), staging_directory
+        )
+
+        def fail_audit(*_args, **_kwargs):
+            raise RuntimeError("simulated audit persistence failure")
+
+        monkeypatch.setattr(data_foundation_repository, "_write_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="simulated audit persistence failure"):
+            publish_initial_mapping_migration(
+                engine,
+                job_id=job_id,
+                actor_user_id=7,
+                staging_directory=staging_directory,
+                idempotency_key="sqlite-mapping-audit-rollback",
+                request_id="sqlite-mapping-audit-rollback",
+            )
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_versions"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_entries"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT COUNT(*) FROM base_mapping_current"
+            )).scalar_one() == 0
+            assert connection.execute(text(
+                "SELECT job_state FROM import_jobs WHERE job_id = :job_id"
+            ), {"job_id": bytes.fromhex(job_id.replace("-", ""))}).scalar_one() == "VALIDATED"
     finally:
         engine.dispose()
 

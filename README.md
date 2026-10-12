@@ -7,14 +7,14 @@ O histórico veio de [`apvalan-maker/dashboard-jt-t4t5-coletas`](https://github.
 ## Stack
 
 - Frontend: React 19, TypeScript, TanStack Start/Router, Vite e Nitro com preset `node-server`.
-- Backend: FastAPI, Pydantic Settings, SQLAlchemy e PyMySQL preparados para uso futuro.
+- Backend: FastAPI, Pydantic Settings, SQLAlchemy e PyMySQL; DB_* atende autenticação/administração e DATA_DB_* atende a Data Foundation V2 em schemas separados.
 - Planilhas: `xlsx` e `xlsx-js-style`; o browser mantém os parsers e cálculos atuais e envia o resultado ao FastAPI.
 - Sessão: OAuth Feishu no FastAPI, sessão própria em cookie HttpOnly e allowlist local.
 - Gerenciador JavaScript: pnpm. Backend Python: ambiente virtual e `requirements.txt`.
 
-O backend não abre conexão SQL no startup e não cria tabelas. A persistência atual de workbooks/fontes é local em `DATA_DIRECTORY`; não usa D1/R2. A sessão Feishu e os estados OAuth são mantidos em memória do processo e precisam de armazenamento compartilhado antes de produção.
+O backend não abre conexão SQL no startup, mas usa conexões sob demanda: DB_* para usuários/permissões no schema de autenticação e DATA_DB_* para consultas e publicações V2 no schema redes_paineis_dados. A aplicação não cria tabelas nem executa migrations. Workbooks e fontes legadas continuam em DATA_DIRECTORY; a sessão Feishu e o estado OAuth permanecem em memória do processo.
 
-Cloudflare Worker, D1, R2 e Drizzle não fazem parte do runtime atual. O histórico técnico do repositório foi preservado; o backend atual não acessa serviços Cloudflare nem banco SQL.
+Cloudflare Worker, D1, R2 e Drizzle não fazem parte do runtime atual. O histórico técnico do repositório foi preservado; o backend atual não acessa serviços Cloudflare.
 
 ## Estrutura
 
@@ -29,10 +29,10 @@ public/                    # logo, ícones e imagens
 backend/
   app/api/                 # health, auth, fontes e workbooks
   app/core/                # configurações Pydantic
-  app/db/                  # engine/session SQLAlchemy futuro, sem conexão automática
+  app/db/                   # engines SQLAlchemy sob demanda; schemas provisionados fora do app
   app/services/            # OAuth Feishu e persistência local de arquivos
   tests/                   # testes FastAPI
-  sql/                     # reservado; nenhuma migration foi executada
+  sql/                     # scripts de referência; o app não cria nem altera schemas
 ops/nginx/                 # exemplo de proxy same-origin
 ops/systemd/               # exemplos de serviços Node e FastAPI
 docs/                      # inventário e documentação operacional
@@ -80,10 +80,11 @@ Preencha `backend/.env` localmente. Nunca coloque App Secret, senha, token ou cr
 | `FEISHU_OAUTH_APP_ID`, `FEISHU_OAUTH_APP_SECRET` | Credenciais do aplicativo; exclusivamente no servidor. |
 | `FEISHU_OAUTH_AUTHORIZE_URL`, `FEISHU_OAUTH_TOKEN_URL`, `FEISHU_OAUTH_USERINFO_URL` | Endpoints Feishu mantidos na configuração server-side; o fluxo atual usa token v2. |
 | `FEISHU_OAUTH_REDIRECT_URI` | Callback cadastrado no Feishu. Exemplo local com chamada direta ao FastAPI: `http://127.0.0.1:8001/api/auth/feishu/callback`. |
+| DATA_DB_HOST, DATA_DB_PORT, DATA_DB_NAME, DATA_DB_USER, DATA_DB_PASSWORD | Conexão separada, sob demanda, da Data Foundation V2; o schema esperado é redes_paineis_dados. |
 | `FEISHU_SESSION_SECRET` | Chave aleatória local da sessão, independente do App Secret. |
 | `FEISHU_VIEWER_ACCOUNTS_JSON` | Allowlist explícita com e-mail, tenant e escopo autorizado. |
 | `ALLOWED_CORPORATE_DOMAINS` | Domínios aceitos para identidade Feishu. |
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Reservadas para uso futuro de MySQL; não são usadas nem conectadas nesta etapa. |
+| DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD | Conexão sob demanda ao banco de usuários/autenticação redes_paineis; não é aberta no startup. |
 
 Os endpoints Feishu e a versão do fluxo estão centralizados nas configurações do backend. O login real exige credenciais válidas, callback cadastrado e conta correspondente à allowlist; sem isso, a aplicação mostra falha e não cria sessão. O callback deve usar o mesmo valor em autorização, troca do código e configuração do aplicativo Feishu. Em produção, configure `FEISHU_OAUTH_REDIRECT_URI` com a URL HTTPS do domínio publicado.
 

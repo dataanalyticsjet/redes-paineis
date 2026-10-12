@@ -102,6 +102,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(route, /Depends\(get_current_viewer\)/);
   assert.match(route, /Depends\(require_admin\)/);
   assert.match(source, /onDataSource=\{canManageActiveDataSource && activeDataSourceId \? \(\) => setDataSourceDialogId\(activeDataSourceId\) : undefined\}/);
+  assert.match(source, /loaded\.sourceType === "DATA_FOUNDATION_V2" && !isMatrixAdminViewer/);
   assert.match(source, /className="primary-upload-button" type="button" onClick=\{\(\) => setDataSourceDialogId\("taxa"\)\}/);
   assert.doesNotMatch(source, /view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE/);
   assert.match(source, /canManage=\{viewerIdentity\.platform_role === "ADMIN"\}/);
@@ -135,7 +136,8 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(source, /useState<OptionSelection>\(\{ mode: "all" \}\)/);
   assert.match(source, /selectedOptions\(taxaRmAreaOptions, taxaRmAreaSelection\)/);
   assert.match(source, /optionSelectionFromValues\(taxaRmAreaOptions, value\)/);
-  assert.match(source, /const selectedLabel = allSelected\s*\? allLabel/);
+  assert.match(source, /const selectedLabel = disabled && disabledLabel \? disabledLabel\s*:\s*allSelected\s*\? allLabel/);
+  assert.match(source, /disabledReason=\{t\("A publicação oficial do Monitoramento de Coleta não contém Origem do Pedido\."\)\}/);
   assert.match(source, /const taxaRowsBeforeRmAreaFilter = useMemo/);
   assert.match(source, /distinctFilterOptions\(taxaRowsBeforeRmAreaFilter/);
   assert.match(source, /filterRowsByOption\(/);
