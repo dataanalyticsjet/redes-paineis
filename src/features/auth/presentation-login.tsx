@@ -11,6 +11,13 @@ type Props = {
 export function PresentationLogin({ error, loading, onFeishuLogin }: Props) {
   return (
     <main className="presentation-login-page">
+      <link
+        rel="preload"
+        as="image"
+        href="/login-background.avif"
+        type="image/avif"
+        fetchPriority="high"
+      />
       <section className="presentation-login-card" aria-labelledby="presentation-login-title">
         <span className="presentation-login-kicker"><LockKeyhole size={14} /> Acesso seguro</span>
         <h1 id="presentation-login-title">Central de Painéis</h1>
