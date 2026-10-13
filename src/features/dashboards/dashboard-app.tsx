@@ -9,7 +9,8 @@ import { UserControl } from "../users/user-control";
 import { FeishuShareDialog, type FeishuSharePreview } from "../../components/feishu-share-dialog";
 import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-source-dialog";
 import { ResponsibilitySourceDialog } from "../data-sources/responsibility-source-dialog";
-import { PresentationLogin } from "../auth/presentation-login";
+import { PresentationAuthTransition, PresentationLogin } from "../auth/presentation-login";
+import { viewerAuthStateFromResponse, type ViewerAuthState } from "../../lib/viewer-auth-state";
 import { apiFetch, apiUrl } from "../../lib/api-url.ts";
 import { formatCollaboratorName } from "../../lib/profile-name.ts";
 import { organizationalRegionLabel, type OrganizationalRegionStatus } from "../../lib/organizational-region.ts";
@@ -2675,8 +2676,15 @@ export function DashboardApp() {
   const themeInitializedRef = useRef(false);
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
-  const [viewerChecked, setViewerChecked] = useState(false);
-  const [viewerAuthError, setViewerAuthError] = useState<string | null>(null);
+  const [viewerAuthState, setViewerAuthState] = useState<ViewerAuthState>("CHECKING");
+  const [viewerSessionCheckAttempt, setViewerSessionCheckAttempt] = useState(0);
+  const [viewerAuthError, setViewerAuthError] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const authError = new URLSearchParams(window.location.search).get("authError");
+    return authError
+      ? FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed
+      : null;
+  });
   const [viewerAuthLoading, setViewerAuthLoading] = useState(false);
   const [view, setView] = useState<DashboardView>("home");
   const [dashboardAvailability, setDashboardAvailability] = useState<DashboardAvailabilityState>({ status: "idle" });
@@ -2990,37 +2998,48 @@ export function DashboardApp() {
 
   useEffect(() => {
     let active = true;
-    const authError = new URLSearchParams(window.location.search).get("authError");
-    const authErrorFrame = authError
-      ? window.requestAnimationFrame(() => {
-          setViewerAuthError(
-            FEISHU_AUTH_ERROR_MESSAGES[authError] ?? FEISHU_AUTH_ERROR_MESSAGES.feishu_auth_failed,
-          );
-        })
-      : null;
     void apiFetch("/api/auth/me", { method: "GET", cache: "no-store" })
       .then(async (response) => {
-        if (!response.ok) throw new Error("Sessão inválida");
+        if (response.status === 401) {
+          if (!active) return;
+          setViewerAuthorization(null);
+          setViewerIdentity(null);
+          setViewerAuthState("UNAUTHENTICATED");
+          return;
+        }
+        if (!response.ok) {
+          throw new Error("O serviço de autenticação retornou uma resposta inesperada.");
+        }
         const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
         if (!active) return;
+        const nextAuthState = viewerAuthStateFromResponse(response.status, identity);
+        if (nextAuthState !== "AUTHENTICATED") {
+          setViewerAuthorization(null);
+          setViewerIdentity(null);
+          setViewerAuthState(nextAuthState);
+          return;
+        }
         setViewerAuthError(null);
         setViewerAuthorization(FEISHU_COOKIE_SESSION);
         setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
+        setViewerAuthState("AUTHENTICATED");
       })
-      .catch(() => {})
-      .finally(() => {
-        if (active) setViewerChecked(true);
+      .catch(() => {
+        if (!active) return;
+        setViewerAuthError("Não foi possível verificar a sessão por um problema de comunicação. Tente novamente.");
+        setViewerAuthState("ERROR");
       });
     return () => {
       active = false;
-      if (authErrorFrame !== null) window.cancelAnimationFrame(authErrorFrame);
     };
-  }, []);
+  }, [viewerSessionCheckAttempt]);
 
   const endViewerSession = useCallback(() => {
     void apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setViewerAuthorization(null);
     setViewerIdentity(null);
+    setViewerAuthError(null);
+    setViewerAuthState("UNAUTHENTICATED");
     setLoaded(null);
     setTaxaLoaded(null);
     setEpopLoaded(null);
@@ -3120,6 +3139,12 @@ export function DashboardApp() {
     setViewerAuthError(null);
     setViewerAuthLoading(true);
     window.location.assign(apiUrl("/api/auth/feishu/login"));
+  }, []);
+
+  const retryViewerSessionCheck = useCallback(() => {
+    setViewerAuthError(null);
+    setViewerAuthState("CHECKING");
+    setViewerSessionCheckAttempt((attempt) => attempt + 1);
   }, []);
 
   const changeLanguage = useCallback((nextLanguage: DashboardLanguage) => {
@@ -6930,14 +6955,31 @@ export function DashboardApp() {
     </div>
   );
 
-  if (!viewerChecked || !viewerAuthorization || !viewerIdentity) {
+  if (viewerAuthState === "CHECKING") {
+    return <PresentationAuthTransition error={null} loading={viewerAuthLoading} onRetry={retryViewerSessionCheck} onFeishuLogin={startFeishuLogin} />;
+  }
+
+  if (viewerAuthState === "ERROR") {
+    return <PresentationAuthTransition error={viewerAuthError} loading={viewerAuthLoading} onRetry={retryViewerSessionCheck} onFeishuLogin={startFeishuLogin} />;
+  }
+
+  if (viewerAuthState === "UNAUTHENTICATED") {
     return (
       <PresentationLogin
-        error={!viewerChecked ? null : viewerAuthError ? t(viewerAuthError) : null}
+        error={viewerAuthError ? t(viewerAuthError) : null}
         loading={viewerAuthLoading}
         onFeishuLogin={startFeishuLogin}
       />
     );
+  }
+
+  if (!viewerAuthorization || !viewerIdentity) {
+    return <PresentationAuthTransition
+      error="A sessão não foi confirmada corretamente. Tente verificar novamente."
+      loading={viewerAuthLoading}
+      onRetry={retryViewerSessionCheck}
+      onFeishuLogin={startFeishuLogin}
+    />;
   }
 
   const pendingLastMilePanel = view === "home"

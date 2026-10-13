@@ -53,7 +53,7 @@ after(async () => {
   await exited;
 });
 
-test("Node server-renders the protected Feishu presentation login", async () => {
+test("Node server-renders session verification before deciding whether to show login", async () => {
   const response = await fetch(appBaseUrl, { headers: { accept: "text/html" } });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
@@ -61,11 +61,11 @@ test("Node server-renders the protected Feishu presentation login", async () => 
   const html = await response.text();
   assert.match(html, /<html[^>]+lang="pt-BR"/i);
   assert.match(html, /<title>DASH BOARD - MONITORAMENTO DE COLETA<\/title>/i);
-  assert.match(html, /class="presentation-login-page"/);
-  assert.match(html, /Central de Painéis/);
-  assert.match(html, /Acesse seus indicadores e dashboards/);
-  assert.match(html, /Entrar com Feishu/);
-  assert.match(html, /Acesso exclusivo para colaboradores autorizados/);
+  assert.match(html, /class="presentation-auth-transition"/);
+  assert.match(html, /Preparando sua área de trabalho/);
+  assert.match(html, /J&amp;T Express/);
+  assert.doesNotMatch(html, /class="presentation-login-page"/);
+  assert.doesNotMatch(html, /Entrar com Feishu/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 

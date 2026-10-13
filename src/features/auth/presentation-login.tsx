@@ -32,3 +32,37 @@ export function PresentationLogin({ error, loading, onFeishuLogin }: Props) {
     </main>
   );
 }
+
+type AuthTransitionProps = {
+  error: string | null;
+  loading: boolean;
+  onRetry: () => void;
+  onFeishuLogin: () => void;
+};
+
+export function PresentationAuthTransition({ error, loading, onRetry, onFeishuLogin }: AuthTransitionProps) {
+  return (
+    <main className="presentation-auth-transition" aria-live="polite">
+      <section className="presentation-auth-transition-card" aria-busy={!error}>
+        <img className="presentation-auth-transition-logo" src="/jnt-logo-red.png" alt="J&T Express" />
+        {error ? (
+          <>
+            <h1>Não foi possível validar sua sessão</h1>
+            <p className="presentation-auth-transition-error" role="alert">{error}</p>
+            <button className="presentation-auth-transition-primary" type="button" onClick={onRetry}>
+              Tentar novamente
+            </button>
+            <button className="presentation-auth-transition-secondary" type="button" onClick={onFeishuLogin} disabled={loading}>
+              {loading ? "Conectando ao Feishu…" : "Entrar novamente com Feishu"}
+            </button>
+          </>
+        ) : (
+          <>
+            <LoaderCircle className="presentation-auth-transition-spinner" size={22} aria-hidden="true" />
+            <h1>Preparando sua área de trabalho...</h1>
+          </>
+        )}
+      </section>
+    </main>
+  );
+}
