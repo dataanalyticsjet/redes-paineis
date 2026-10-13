@@ -9,7 +9,7 @@ O histórico veio de [`apvalan-maker/dashboard-jt-t4t5-coletas`](https://github.
 - Frontend: React 19, TypeScript, TanStack Start/Router, Vite e Nitro com preset `node-server`.
 - Backend: FastAPI, Pydantic Settings, SQLAlchemy e PyMySQL; DB_* atende autenticação/administração e DATA_DB_* atende a Data Foundation V2 em schemas separados.
 - Planilhas: `xlsx` e `xlsx-js-style`; o browser mantém os parsers e cálculos atuais e envia o resultado ao FastAPI.
-- Sessão: OAuth Feishu no FastAPI, sessão própria em cookie HttpOnly e allowlist local.
+- Sessão: OAuth Feishu no FastAPI, validação de tenant/domínio corporativo e sessão própria em cookie HttpOnly.
 - Gerenciador JavaScript: pnpm. Backend Python: ambiente virtual e `requirements.txt`.
 
 O backend não abre conexão SQL no startup, mas usa conexões sob demanda: DB_* para usuários/permissões no schema de autenticação e DATA_DB_* para consultas e publicações V2 no schema redes_paineis_dados. A aplicação não cria tabelas nem executa migrations. Workbooks e fontes legadas continuam em DATA_DIRECTORY; a sessão Feishu e o estado OAuth permanecem em memória do processo.
@@ -82,11 +82,11 @@ Preencha `backend/.env` localmente. Nunca coloque App Secret, senha, token ou cr
 | `FEISHU_OAUTH_REDIRECT_URI` | Callback cadastrado no Feishu. Exemplo local com chamada direta ao FastAPI: `http://127.0.0.1:8001/api/auth/feishu/callback`. |
 | DATA_DB_HOST, DATA_DB_PORT, DATA_DB_NAME, DATA_DB_USER, DATA_DB_PASSWORD | Conexão separada, sob demanda, da Data Foundation V2; o schema esperado é redes_paineis_dados. |
 | `FEISHU_SESSION_SECRET` | Chave aleatória local da sessão, independente do App Secret. |
-| `FEISHU_VIEWER_ACCOUNTS_JSON` | Allowlist explícita com e-mail, tenant e escopo autorizado. |
-| `ALLOWED_CORPORATE_DOMAINS` | Domínios aceitos para identidade Feishu. |
+| `FEISHU_ALLOWED_TENANT_KEY` | Tenant corporativo Feishu autorizado; deve corresponder ao `tenant_key` retornado pelo Feishu. |
+| `ALLOWED_CORPORATE_DOMAINS` | Domínios corporativos aceitos para a identidade Feishu. |
 | DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD | Conexão sob demanda ao banco de usuários/autenticação redes_paineis; não é aberta no startup. |
 
-Os endpoints Feishu e a versão do fluxo estão centralizados nas configurações do backend. O login real exige credenciais válidas, callback cadastrado e conta correspondente à allowlist; sem isso, a aplicação mostra falha e não cria sessão. O callback deve usar o mesmo valor em autorização, troca do código e configuração do aplicativo Feishu. Em produção, configure `FEISHU_OAUTH_REDIRECT_URI` com a URL HTTPS do domínio publicado.
+Os endpoints Feishu e a versão do fluxo estão centralizados nas configurações do backend. O login real exige credenciais válidas, callback cadastrado, tenant corporativo autorizado e domínio corporativo permitido. Depois da validação Feishu, a aplicação reutiliza a identidade local ou cria uma conta USER sem escopo de dados até atribuição administrativa. O callback deve usar o mesmo valor em autorização, troca do código e configuração do aplicativo Feishu. Em produção, configure `FEISHU_OAUTH_REDIRECT_URI` com a URL HTTPS do domínio publicado.
 
 ## Executar localmente
 
@@ -131,7 +131,7 @@ O build de produção gera `.output/server/index.mjs`; execute-o com `pnpm start
 
 Os modelos em `ops/systemd/` e `ops/nginx/redes-paineis.conf.example` não estão instalados nem habilitados. Antes de usá-los, escolher e validar no servidor `DOMINIO_PRODUCAO`, `FRONTEND_PORT` e `BACKEND_PORT`; os dois serviços escutam somente em `127.0.0.1`, enquanto o Nginx recebe HTTPS, encaminha `/` ao Nitro/Node e `/api/` ao FastAPI. Nenhuma porta interna deve ser aberta no firewall público. O arquivo Nginx é um template: substitua os três placeholders e valide a configuração antes de habilitá-la.
 
-O `backend/.env.example` documenta as variáveis sem valores reais. O arquivo de ambiente usado pelo systemd deve ficar fora do Git, por exemplo `/etc/redes-paineis/backend.env`, com `APP_ENV=production`, `DATA_DIRECTORY` absoluto e externo ao checkout, `FRONTEND_BASE_URL=https://DOMINIO_PRODUCAO` e `FEISHU_OAUTH_REDIRECT_URI=https://DOMINIO_PRODUCAO/api/auth/feishu/callback`. Preencha App ID, App Secret, chave de sessão e allowlist localmente no servidor; nunca copie credenciais para o repositório.
+O `backend/.env.example` documenta as variáveis sem valores reais. O arquivo de ambiente usado pelo systemd deve ficar fora do Git, por exemplo `/etc/redes-paineis/backend.env`, com `APP_ENV=production`, `DATA_DIRECTORY` absoluto e externo ao checkout, `FRONTEND_BASE_URL=https://DOMINIO_PRODUCAO` e `FEISHU_OAUTH_REDIRECT_URI=https://DOMINIO_PRODUCAO/api/auth/feishu/callback`. Preencha App ID, App Secret, chave de sessão e `FEISHU_ALLOWED_TENANT_KEY` localmente no servidor; nunca copie credenciais para o repositório. A lista antiga de usuários não é mais necessária.
 
 O FastAPI falha na configuração se `DATA_DIRECTORY` não estiver definido, não for absoluto ou apontar para dentro do projeto em produção. Crie a pasta persistente com proprietário/permissões restritos ao usuário do serviço. O Nginx serve os arquivos públicos do frontend, não o diretório de dados. Workbooks/fontes permanecem no disco após reiniciar a API, desde que o mesmo `DATA_DIRECTORY` seja mantido. O serviço FastAPI está configurado com **um worker**: sessões Feishu e state OAuth são em memória; reiniciar a API encerra sessões e exige novo login. Persistência/compartilhamento de sessão continua pendência futura.
 

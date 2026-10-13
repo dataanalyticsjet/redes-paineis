@@ -338,11 +338,12 @@ function selectedShareFilter(
 }
 const FEISHU_COOKIE_SESSION = "feishu-cookie-session";
 const FEISHU_AUTH_ERROR_MESSAGES: Record<string, string> = {
-  feishu_not_configured: "Configure o App ID, o App Secret, o callback e a chave de sessão no arquivo local de variáveis.",
+  feishu_not_configured: "Configure App ID, App Secret, callback, chave de sessão e tenant corporativo autorizado no ambiente do backend.",
   feishu_access_denied: "Não foi possível vincular esta identidade Feishu a uma conta local.",
   feishu_consent_denied: "O acesso foi recusado no Feishu. Autorize o aplicativo e tente novamente.",
   feishu_email_missing: "O Feishu não forneceu um e-mail para esta conta. Peça ao administrador a permissão de e-mail necessária.",
   feishu_domain_denied: "Esta conta não pertence a um domínio corporativo autorizado.",
+  feishu_tenant_denied: "Esta conta não pertence à organização Feishu autorizada para a NEW BI.",
   feishu_identity_incomplete: "O Feishu não retornou a organização e a identidade necessárias para o login.",
   feishu_token_exchange_failed: "O Feishu não aceitou a troca do código. Confira o App ID, App Secret e callback cadastrados.",
   feishu_token_credentials_invalid: "O Feishu não reconheceu as credenciais. Confirme se App ID e App Secret são do mesmo aplicativo.",

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects import mysql
@@ -32,6 +33,7 @@ class Region(Base):
 
 class PlatformUser(Base):
     __tablename__ = "platform_users"
+    __table_args__ = (UniqueConstraint("tenant_key", "open_id", name="uq_platform_users_feishu_identity"),)
 
     id: Mapped[int] = mapped_column(
         mysql.BIGINT(unsigned=True).with_variant(Integer, "sqlite"),

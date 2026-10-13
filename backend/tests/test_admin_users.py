@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.main import app
 from app.models import PlatformUser, UserAccessAudit
+from app.services.data_foundation.repository import DataFoundationError
+from app.services.data_foundation.queries import _require_matrix_admin_identity
 from app.services import feishu_auth
-from app.services.user_access import provision_feishu_user
+from app.services.user_access import UserAccessError, identity_for_user, provision_feishu_user
 
 
 @pytest.fixture
@@ -71,8 +73,9 @@ def test_first_feishu_provision_is_user_and_repeat_login_reuses_identity(
         first = provision_feishu_user(db, identity)
         first_id = first.id
         assert first.platform_role == "USER"
-        assert first.organizational_scope == "regional"
-        assert first.home_region == "SPE"
+        assert first.organizational_scope == "base"
+        assert first.home_region is None
+        assert first.home_base is None
         assert first.is_active is True
 
         second = provision_feishu_user(db, identity)
@@ -80,6 +83,93 @@ def test_first_feishu_provision_is_user_and_repeat_login_reuses_identity(
 
         users = list(db.scalars(select(PlatformUser).where(PlatformUser.email == "new.viewer@example.test")))
         assert len(users) == 1
+
+
+def test_existing_admin_permissions_and_scope_are_preserved_on_login(
+    user_test_session_factory: sessionmaker[Session],
+) -> None:
+    identity = {
+        "username": "Updated Feishu Name",
+        "_tenant_key": "existing-tenant",
+        "_open_id": "existing-admin-open-id",
+        "_email": "updated.admin@example.test",
+        # Provider/user input must never grant or rewrite authorization.
+        "role": "matrix",
+        "region": None,
+        "base": None,
+    }
+    with user_test_session_factory() as db:
+        existing = PlatformUser(
+            tenant_key="existing-tenant",
+            open_id="existing-admin-open-id",
+            email="old.admin@example.test",
+            display_name="Old Name",
+            platform_role="ADMIN",
+            organizational_scope="regional",
+            home_region="SPE",
+            home_base=None,
+            is_active=True,
+        )
+        db.add(existing)
+        db.commit()
+        existing_id = existing.id
+
+        provisioned = provision_feishu_user(db, identity)
+        assert provisioned.id == existing_id
+        assert provisioned.email == "updated.admin@example.test"
+        assert provisioned.display_name == "Updated Feishu Name"
+        assert provisioned.platform_role == "ADMIN"
+        assert provisioned.organizational_scope == "regional"
+        assert provisioned.home_region == "SPE"
+        assert provisioned.home_base is None
+
+
+def test_inactive_feishu_user_remains_blocked(
+    user_test_session_factory: sessionmaker[Session],
+) -> None:
+    identity = {
+        "username": "Disabled User",
+        "_tenant_key": "inactive-tenant",
+        "_open_id": "inactive-open-id",
+        "_email": "inactive@example.test",
+    }
+    with user_test_session_factory() as db:
+        db.add(PlatformUser(
+            tenant_key="inactive-tenant",
+            open_id="inactive-open-id",
+            email="inactive@example.test",
+            display_name="Disabled User",
+            platform_role="USER",
+            organizational_scope="base",
+            home_region=None,
+            home_base=None,
+            is_active=False,
+        ))
+        db.commit()
+
+        with pytest.raises(UserAccessError, match="user_inactive"):
+            provision_feishu_user(db, identity)
+        inactive = db.scalar(select(PlatformUser).where(PlatformUser.open_id == "inactive-open-id"))
+        assert inactive is not None and inactive.is_active is False
+
+
+def test_automatically_provisioned_user_has_no_restricted_dashboard_scope(
+    user_test_session_factory: sessionmaker[Session],
+) -> None:
+    identity = {
+        "username": "Unassigned User",
+        "_tenant_key": "unassigned-tenant",
+        "_open_id": "unassigned-open-id",
+        "_email": "unassigned@example.test",
+    }
+    with user_test_session_factory() as db:
+        user = provision_feishu_user(db, identity)
+        session_identity = identity_for_user(db, user)
+        assert session_identity["platform_role"] == "USER"
+        assert session_identity["organizational_scope"] == "base"
+        assert session_identity["effective_regions"] == []
+        with pytest.raises(DataFoundationError, match="admin_required"):
+            _require_matrix_admin_identity(session_identity)
 
 
 def test_user_cannot_call_admin_routes_or_modify_users(

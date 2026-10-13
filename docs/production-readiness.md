@@ -8,7 +8,7 @@ Este documento descreve o estado após o corte estrutural local. Não foi feito 
 | --- | --- | --- |
 | Frontend `/` | TanStack Start + Vite + Nitro/Node | Build server-side gera `.output/server/index.mjs`; navegação dos dashboards ainda usa o estado React da home. |
 | `GET /api/health` | FastAPI | Não consulta banco. |
-| /api/auth/* | FastAPI + MySQL DB_* | OAuth Feishu v2, state de uso único, allowlist/domínio e cookie HttpOnly. Usuários e permissões são lidos no schema de autenticação; perfil Feishu organizacional fica em platform_user_feishu_profiles. Sessão/state em memória. |
+| /api/auth/* | FastAPI + MySQL DB_* | OAuth Feishu v2, state de uso único, tenant/domínio corporativos autorizados e cookie HttpOnly; novos usuários são USER sem escopo até atribuição administrativa. Usuários e permissões são lidos no schema de autenticação; perfil Feishu organizacional fica em platform_user_feishu_profiles. Sessão/state em memória. |
 | /api/v2/* | FastAPI + MySQL DATA_DB_* | Consultas, contratos e publicações da Data Foundation no schema separado redes_paineis_dados; as flags controlam importação e consulta. |
 | `/api/workbook` | FastAPI | Processamento do Excel permanece no frontend; JSON e Excel original são versionados em disco local. Escopo é aplicado antes de devolver dados. |
 | `/api/data-sources/*` | FastAPI | Preview/import/remove no backend local e armazenamento em `DATA_DIRECTORY`. |

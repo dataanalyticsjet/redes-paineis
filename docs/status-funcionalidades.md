@@ -7,7 +7,7 @@
 - **Sete painéis First Mile:** Monitoramento de coleta, Taxa de coleta, Cobertura EPOP, Monitoramento de sellers prioritários J&T, Sem movimentação, Falha na coleta PDD e Extravio. A interface e as regras permanecem no recurso `src/features/dashboards/` e os cálculos reutilizáveis em `src/lib/`.
 - **Planilhas e filtros:** parsers `xlsx`, normalização e fórmulas locais existentes; os painéis continuam dirigidos pelos mesmos datasets e estados de filtro.
 - **Upload e persistência local:** FastAPI `/api/workbook` e `/api/data-sources/*` validam e persistem versões/arquivos em `DATA_DIRECTORY`, fora do checkout por padrão. O acesso é limitado pela sessão/escopo atual e o upload usa credenciais server-side.
-- **Login Feishu:** a versão local FastAPI faz OAuth v2, valida `state`, consulta o perfil, aplica domínio e allowlist e cria uma sessão HttpOnly. O login real foi confirmado em uma execução local anterior; esta migração não repetiu o OAuth. Persistência de sessão compartilhada para produção ainda falta.
+- **Login Feishu:** a versão local FastAPI faz OAuth v2, valida `state`, consulta o perfil, valida tenant e domínio corporativos, reutiliza ou provisiona a identidade local como USER sem escopo e cria uma sessão HttpOnly. O login real foi confirmado em uma execução local anterior; esta migração não repetiu o OAuth. Persistência de sessão compartilhada para produção ainda falta.
 - **Geração de PDF:** usa a impressão do navegador (`window.print`); não há serviço que gere/guarde PDF próprio.
 - **Resumo de análise local:** compõe texto usando o painel/filtros disponíveis; não chama um modelo de IA.
 

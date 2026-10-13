@@ -183,10 +183,7 @@ async def feishu_callback(request: Request) -> Response:
     except FeishuAuthError as error:
         logger.warning("Feishu OAuth identity rejected (category=%s)", error.code)
         return _login_error(request, error.code)
-    if not identity:
-        logger.warning("Feishu OAuth user is not in the local allowlist")
-        return _login_error(request, "feishu_access_denied")
-    logger.info("Feishu corporate domain validated and local authorization matched")
+    logger.info("Feishu corporate tenant identity validated")
 
     try:
         with database_session(settings) as db:

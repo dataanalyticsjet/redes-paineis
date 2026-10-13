@@ -16,19 +16,6 @@ class UserAccessError(Exception):
         self.status_code = status_code
 
 
-def _organizational_scope(identity: dict[str, Any]) -> tuple[str, str | None, str | None]:
-    role = str(identity.get("role") or "").strip().lower()
-    region = str(identity.get("region") or "").strip().upper() or None
-    base = str(identity.get("base") or "").strip().upper() or None
-    if role == "matrix":
-        return "matrix", None, None
-    if base:
-        return "base", region, base
-    if region:
-        return "regional", region, None
-    raise UserAccessError("user_scope_unavailable", 403)
-
-
 def provision_feishu_user(db: Session, identity: dict[str, Any]) -> PlatformUser:
     tenant_key = str(identity.get("_tenant_key") or "").strip()
     open_id = str(identity.get("_open_id") or "").strip()
@@ -36,8 +23,6 @@ def provision_feishu_user(db: Session, identity: dict[str, Any]) -> PlatformUser
     display_name = str(identity.get("username") or email).strip() or email
     if not tenant_key or not open_id or not email:
         raise UserAccessError("feishu_identity_incomplete", 403)
-    organizational_scope, home_region, home_base = _organizational_scope(identity)
-
     try:
         user = db.scalar(
             select(PlatformUser).where(
@@ -52,9 +37,11 @@ def provision_feishu_user(db: Session, identity: dict[str, Any]) -> PlatformUser
                 email=email,
                 display_name=display_name,
                 platform_role="USER",
-                organizational_scope=organizational_scope,
-                home_region=home_region,
-                home_base=home_base,
+                # The existing ENUM has no unassigned value. base + NULL
+                # is a fail-closed placeholder until an administrator assigns scope.
+                organizational_scope="base",
+                home_region=None,
+                home_base=None,
                 is_active=True,
             )
             db.add(user)
@@ -74,14 +61,10 @@ def provision_feishu_user(db: Session, identity: dict[str, Any]) -> PlatformUser
             db.rollback()
             raise UserAccessError("user_inactive", 403)
 
-        # Feishu/configuration remains the source of organizational scope.
-        # Platform role and additional regions are managed separately and are
-        # deliberately not overwritten by a subsequent login.
+        # Feishu supplies verified identity attributes only. Authorization
+        # fields remain administrator-managed and are never changed at login.
         user.email = email
         user.display_name = display_name
-        user.organizational_scope = organizational_scope
-        user.home_region = home_region
-        user.home_base = home_base
         db.commit()
         db.refresh(user)
         return user

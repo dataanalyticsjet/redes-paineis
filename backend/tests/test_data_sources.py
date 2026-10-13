@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import pytest
 import json
+import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -21,7 +21,6 @@ def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path, create_user_
     monkeypatch.setenv("FEISHU_OAUTH_APP_ID", "test-app")
     monkeypatch.setenv("FEISHU_OAUTH_APP_SECRET", "test-secret")
     monkeypatch.setenv("FEISHU_OAUTH_REDIRECT_URI", "http://127.0.0.1:8000/api/auth/feishu/callback")
-    monkeypatch.setenv("FEISHU_VIEWER_ACCOUNTS_JSON", "[]")
     monkeypatch.setenv("DATA_DIRECTORY", str(tmp_path / "local-data"))
     get_settings.cache_clear()
     feishu_auth.reset_temporary_auth_state()
@@ -418,16 +417,6 @@ def test_matrix_user_data_source_preview_is_not_region_filtered(
     monkeypatch: pytest.MonkeyPatch,
     create_user_session,
 ) -> None:
-    monkeypatch.setenv("FEISHU_VIEWER_ACCOUNTS_JSON", json.dumps([{
-        "email": "matrix@example.test",
-        "tenant_key": "tenant-test",
-        "role": "regional",
-        "region": " matriz ",
-    }]))
-    monkeypatch.setenv("ALLOWED_CORPORATE_DOMAINS", "example.test")
-    get_settings.cache_clear()
-
-    get_settings()
     matrix_token, _user = create_user_session(
         name="Matrix Admin",
         platform_role="ADMIN",

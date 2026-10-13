@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     feishu_oauth_userinfo_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v1/user_info"
     feishu_oauth_redirect_uri: AnyHttpUrl | None = None
     feishu_session_secret: str | None = None
-    feishu_viewer_accounts_json: str = "[]"
+    feishu_allowed_tenant_key: str | None = None
     allowed_corporate_domains: str = "jtexpress.com.br"
 
     @model_validator(mode="before")

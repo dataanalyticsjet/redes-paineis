@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -27,11 +26,8 @@ def local_feishu_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv("FEISHU_SESSION_SECRET", "test-session-key-with-32-characters")
     monkeypatch.setenv("ALLOWED_CORPORATE_DOMAINS", "example.test")
-    monkeypatch.setenv(
-        "FEISHU_VIEWER_ACCOUNTS_JSON",
-        '[{"email":"allowed@example.test","tenant_key":"tenant-test",'
-        '"role":"regional","region":"SPS"}]',
-    )
+    monkeypatch.setenv("FEISHU_ALLOWED_TENANT_KEY", "tenant-test")
+    monkeypatch.delenv("FEISHU_VIEWER_ACCOUNTS_JSON", raising=False)
     get_settings.cache_clear()
     feishu_auth.reset_temporary_auth_state()
     yield
@@ -163,7 +159,7 @@ def test_unauthorized_feishu_user_is_blocked(
         {
             "code": 0,
             "data": {
-                "enterprise_email": "other@example.test",
+                "enterprise_email": "other@outside.test",
                 "email": "allowed@example.test",
                 "tenant_key": "tenant-test",
                 "open_id": "open-id-test",
@@ -179,7 +175,7 @@ def test_unauthorized_feishu_user_is_blocked(
 
     assert response.status_code == 303
     assert parse_qs(urlsplit(response.headers["location"]).query)["authError"] == [
-        "feishu_access_denied"
+        "feishu_domain_denied"
     ]
     assert client.get("/api/auth/me").status_code == 401
 
@@ -187,6 +183,7 @@ def test_unauthorized_feishu_user_is_blocked(
 def test_authorized_login_creates_local_session_and_logout_revokes_it(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    user_test_session_factory,
 ) -> None:
     patch_feishu_user(
         monkeypatch,
@@ -235,18 +232,33 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
         "username": "Demo Viewer",
         "avatar_url": None,
         "role": "regional",
-        "region": "SPS",
+        "region": None,
         "base": None,
         "platform_role": "USER",
-        "organizational_scope": "regional",
-        "home_region": "SPS",
+        "organizational_scope": "base",
+        "home_region": None,
         "home_base": None,
         "additional_regions": [],
-        "effective_regions": ["SPS"],
+        "effective_regions": [],
         "is_active": True,
         "organizational_region_code": None,
         "region_resolution_status": "UNKNOWN",
     }
+
+    from sqlalchemy import select
+
+    from app.models import PlatformUser
+
+    with user_test_session_factory() as db:
+        provisioned = db.scalar(
+            select(PlatformUser).where(
+                PlatformUser.tenant_key == "tenant-test",
+                PlatformUser.open_id == "open-id-test",
+            )
+        )
+        assert provisioned is not None
+        assert provisioned.email == "allowed@example.test"
+        assert provisioned.email != "different@example.test"
 
     logout = client.post("/api/auth/logout")
     assert logout.status_code == 204
@@ -333,6 +345,7 @@ def test_authenticated_profile_exposes_only_valid_feishu_avatar_url(
 def test_authenticated_profile_exposes_resolved_organizational_region_without_private_paths(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    user_test_session_factory,
 ) -> None:
     from app.services.feishu_contacts import FeishuOrganizationalProfile
 
@@ -370,6 +383,23 @@ def test_authenticated_profile_exposes_resolved_organizational_region_without_pr
     assert "union_id" not in profile
     assert "open_id" not in profile
 
+    from sqlalchemy import select
+
+    from app.models import PlatformUser
+
+    with user_test_session_factory() as db:
+        provisioned = db.scalar(
+            select(PlatformUser).where(
+                PlatformUser.tenant_key == "tenant-test",
+                PlatformUser.open_id == "private-open-id",
+            )
+        )
+        assert provisioned is not None
+        assert provisioned.platform_role == "USER"
+        assert provisioned.organizational_scope == "base"
+        assert provisioned.home_region is None
+        assert provisioned.home_base is None
+
 
 def test_contacts_failure_does_not_block_login(
     client: TestClient,
@@ -391,7 +421,7 @@ def test_contacts_failure_does_not_block_login(
     )
 
     async def unavailable(*_args: object, **_kwargs: object):
-        raise FeishuContactsError("contacts_permission_denied", 403)
+        raise FeishuContactsError("contacts_permission_denied", 200)  # Feishu code 40004
 
     monkeypatch.setattr("app.api.auth.fetch_feishu_organizational_profile", unavailable)
     state, _ = begin_login(client)
@@ -416,8 +446,9 @@ def test_contacts_failure_does_not_block_login(
         )
         assert provisioned is not None
         assert provisioned.platform_role == "USER"
-        assert provisioned.organizational_scope == "regional"
-        assert provisioned.home_region == "SPS"
+        assert provisioned.organizational_scope == "base"
+        assert provisioned.home_region is None
+        assert provisioned.home_base is None
 
 
 @pytest.mark.parametrize(
@@ -499,23 +530,54 @@ def test_callback_honors_direct_authorization_error_query(
     ]
 
 
-def test_email_fallback_is_allowed_only_for_configured_corporate_domain(
+
+def test_feishu_tenant_mismatch_is_rejected_by_callback(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    patch_feishu_user(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "enterprise_email": "employee@example.test",
+                "tenant_key": "untrusted-tenant",
+                "open_id": "untrusted-open-id",
+            },
+        },
+    )
+    state, _ = begin_login(client)
+    response = client.get(
+        f"/api/auth/feishu/callback?code=fake-code&state={state}",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert parse_qs(urlsplit(response.headers["location"]).query)["authError"] == [
+        "feishu_tenant_denied"
+    ]
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_email_fallback_uses_only_provider_identity_and_allowlist_is_not_required() -> None:
+    settings = get_settings()
+    assert feishu_auth.configuration_is_ready(settings)
+    assert not hasattr(settings, "feishu_viewer_accounts_json")
+
     identity = feishu_auth.resolve_authorized_viewer(
         {
             "enterprise_email": " ",
             "email": " ALLOWED@example.test ",
             "tenant_key": "tenant-test",
             "open_id": "open-id-test",
+            "name": "Corporate User",
         },
-        get_settings(),
+        settings,
     )
-    assert identity is not None
-    assert identity["role"] == "regional"
-    assert identity["_owner_subject"]
-    assert "open-id-test" not in identity["_owner_subject"]
-    assert "allowed@example.test" not in identity["_owner_subject"]
+    assert identity["_email"] == "allowed@example.test"
+    assert identity["username"] == "Corporate User"
+    assert "role" not in identity
+    assert "region" not in identity
+    assert "base" not in identity
 
     with pytest.raises(feishu_auth.FeishuAuthError, match="feishu_domain_denied"):
         feishu_auth.resolve_authorized_viewer(
@@ -525,98 +587,34 @@ def test_email_fallback_is_allowed_only_for_configured_corporate_domain(
                 "tenant_key": "tenant-test",
                 "open_id": "open-id-test",
             },
+            settings,
+        )
+
+
+def test_feishu_tenant_mismatch_is_rejected() -> None:
+    with pytest.raises(feishu_auth.FeishuAuthError, match="feishu_tenant_denied"):
+        feishu_auth.resolve_authorized_viewer(
+            {
+                "enterprise_email": "allowed@example.test",
+                "tenant_key": "another-tenant",
+                "open_id": "open-id-test",
+            },
             get_settings(),
         )
 
 
-@pytest.mark.parametrize("configured_region", ["MATRIZ", " matriz "])
-def test_matrix_region_resolves_to_unscoped_matrix_role(
-    monkeypatch: pytest.MonkeyPatch,
-    configured_region: str,
-) -> None:
-    monkeypatch.setenv(
-        "FEISHU_VIEWER_ACCOUNTS_JSON",
-        json.dumps([{
-            "email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "role": "regional",
-            "region": configured_region,
-        }]),
-    )
-    get_settings.cache_clear()
-
-    identity = feishu_auth.resolve_authorized_viewer(
-        {
-            "enterprise_email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "open_id": "matrix-open-id",
-            "name": "Matrix Viewer",
-        },
-        get_settings(),
-    )
-
-    assert identity is not None
-    assert identity["role"] == "matrix"
-    assert identity["region"] is None
-    assert identity["base"] is None
-
-
-@pytest.mark.parametrize("configured_region", ["SPE", "SPS"])
-def test_regular_region_keeps_regional_role_and_scope(
-    monkeypatch: pytest.MonkeyPatch,
-    configured_region: str,
-) -> None:
-    monkeypatch.setenv(
-        "FEISHU_VIEWER_ACCOUNTS_JSON",
-        json.dumps([{
-            "email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "role": "regional",
-            "region": configured_region,
-        }]),
-    )
-    get_settings.cache_clear()
-
-    identity = feishu_auth.resolve_authorized_viewer(
-        {
-            "enterprise_email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "open_id": "regional-open-id",
-        },
-        get_settings(),
-    )
-
-    assert identity is not None
-    assert identity["role"] == "regional"
-    assert identity["region"] == configured_region
-    assert identity["base"] is None
-
-
-def test_base_viewer_keeps_existing_base_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "FEISHU_VIEWER_ACCOUNTS_JSON",
-        json.dumps([{
-            "email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "role": "regional",
-            "base": "Base 1",
-        }]),
-    )
-    get_settings.cache_clear()
-
-    identity = feishu_auth.resolve_authorized_viewer(
-        {
-            "enterprise_email": "allowed@example.test",
-            "tenant_key": "tenant-test",
-            "open_id": "base-open-id",
-        },
-        get_settings(),
-    )
-
-    assert identity is not None
-    assert identity["role"] == "regional"
-    assert identity["region"] is None
-    assert identity["base"] == "BASE 1"
+def test_missing_authorized_tenant_fails_closed() -> None:
+    settings = get_settings().model_copy(update={"feishu_allowed_tenant_key": None})
+    assert not feishu_auth.configuration_is_ready(settings)
+    with pytest.raises(feishu_auth.FeishuAuthError, match="feishu_not_configured"):
+        feishu_auth.resolve_authorized_viewer(
+            {
+                "enterprise_email": "allowed@example.test",
+                "tenant_key": "tenant-test",
+                "open_id": "open-id-test",
+            },
+            settings,
+        )
 
 
 def test_feishu_owner_subject_uses_tenant_and_open_id_not_display_name() -> None:
@@ -640,7 +638,6 @@ def test_feishu_owner_subject_uses_tenant_and_open_id_not_display_name() -> None
         settings,
     )
 
-    assert first is not None and second is not None
     assert first["username"] == second["username"]
     assert first["_owner_subject"] != second["_owner_subject"]
     assert feishu_auth.SESSION_COOKIE not in first

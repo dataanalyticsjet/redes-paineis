@@ -38,14 +38,6 @@ class OAuthAttempt:
     expires_at: float
 
 
-@dataclass(frozen=True)
-class LocalViewer:
-    email: str
-    tenant_key: str
-    role: str
-    region: str | None
-    base: str | None
-
 
 class FeishuAuthError(Exception):
     def __init__(self, code: str, http_status: int | None = None) -> None:
@@ -101,40 +93,6 @@ def reset_temporary_auth_state() -> None:
         _sessions.clear()
 
 
-def parse_viewer_allowlist(value: str) -> list[LocalViewer] | None:
-    try:
-        parsed: Any = json.loads(value or "[]")
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(parsed, list) or not parsed:
-        return None
-
-    viewers: list[LocalViewer] = []
-    identities: set[tuple[str, str]] = set()
-    for item in parsed:
-        if not isinstance(item, dict):
-            return None
-        email = str(item.get("email") or "").strip().lower()
-        tenant_key = str(item.get("tenant_key") or "").strip()
-        role = item.get("role")
-        region = str(item.get("region") or "").strip().upper() or None
-        base = str(item.get("base") or "").strip().upper() or None
-        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or not tenant_key:
-            return None
-        if role not in {"regional", "matrix"}:
-            return None
-        if role == "regional" and not (region or base):
-            return None
-        if role == "matrix" and (region or base):
-            return None
-        identity = (email, tenant_key)
-        if identity in identities:
-            return None
-        identities.add(identity)
-        viewers.append(LocalViewer(email, tenant_key, role, region, base))
-    return viewers
-
-
 def configuration_is_ready(settings: Settings) -> bool:
     return bool(
         settings.feishu_oauth_enabled
@@ -144,7 +102,7 @@ def configuration_is_ready(settings: Settings) -> bool:
         and settings.feishu_session_secret
         and len(settings.feishu_session_secret) >= 32
         and settings.corporate_domain_allowlist
-        and parse_viewer_allowlist(settings.feishu_viewer_accounts_json)
+        and bool((settings.feishu_allowed_tenant_key or "").strip())
     )
 
 
@@ -375,37 +333,31 @@ async def fetch_user_info(access_token: str, settings: Settings) -> dict[str, An
     return user
 
 
-def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[str, Any] | None:
+def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """Validate Feishu's provider identity against the configured J&T tenant."""
     enterprise_email = str(user.get("enterprise_email") or "").strip().lower()
     fallback_email = str(user.get("email") or "").strip().lower()
     email = enterprise_email or fallback_email
     tenant_key = str(user.get("tenant_key") or "").strip()
     open_id = str(user.get("open_id") or "").strip()
+    allowed_tenant_key = str(settings.feishu_allowed_tenant_key or "").strip()
+
     if not email:
         raise FeishuAuthError("feishu_email_missing")
     if not tenant_key or not open_id:
         raise FeishuAuthError("feishu_identity_incomplete")
-    email_domain = email.rpartition("@")[2]
+    if not allowed_tenant_key:
+        raise FeishuAuthError("feishu_not_configured")
+
+    email_domain = email.rpartition("@")[2].rstrip(".")
     if email_domain not in settings.corporate_domain_allowlist:
         logger.warning("Feishu identity rejected (corporate_domain_validated=false)")
         raise FeishuAuthError("feishu_domain_denied")
-    logger.info("Feishu identity email domain validated")
+    if not hmac.compare_digest(tenant_key.encode("utf-8"), allowed_tenant_key.encode("utf-8")):
+        logger.warning("Feishu identity rejected (authorized_tenant_matched=false)")
+        raise FeishuAuthError("feishu_tenant_denied")
+    logger.info("Feishu corporate tenant and email domain validated")
 
-    allowlist = parse_viewer_allowlist(settings.feishu_viewer_accounts_json)
-    if not allowlist:
-        raise FeishuAuthError("feishu_not_configured")
-    viewer = next(
-        (
-            item
-            for item in allowlist
-            if item.email == email and item.tenant_key == tenant_key
-        ),
-        None,
-    )
-    if not viewer:
-        logger.warning("Feishu identity rejected (local_allowlist_matched=false)")
-        return None
-    logger.info("Feishu identity authorized by local allowlist")
     display_name = str(user.get("name") or "").strip()
     owner_subject = _keyed_digest(
         json.dumps(
@@ -415,32 +367,15 @@ def resolve_authorized_viewer(user: dict[str, Any], settings: Settings) -> dict[
         ),
         settings.feishu_session_secret or "",
     )
-    resolved_role = viewer.role
-    resolved_region = viewer.region
-    resolved_base = viewer.base
-    if (
-        resolved_role == "regional"
-        and resolved_base is None
-        and resolved_region is not None
-        and resolved_region.strip().casefold() == "matriz"
-    ):
-        resolved_role = "matrix"
-        resolved_region = None
-        resolved_base = None
 
     return {
         "username": display_name or email,
         "avatar_url": _feishu_avatar_url(user),
-        "role": resolved_role,
-        "region": resolved_region,
-        "base": resolved_base,
-        # These claims are used only while provisioning the local account.
-        # The raw provider identifiers are never returned by /api/auth/me.
+        # These verified provider claims are consumed only by backend provisioning.
         "_email": email,
         "_tenant_key": tenant_key,
         "_open_id": open_id,
-        # Keep the Feishu identity private to the backend session. This keyed
-        # digest is stable across logins and does not expose provider claims.
+        # Stable keyed subject without exposing provider identifiers to the frontend.
         "_owner_subject": owner_subject,
     }
 
