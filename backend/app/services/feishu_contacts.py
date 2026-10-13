@@ -11,10 +11,14 @@ from app.services.feishu_auth import _feishu_avatar_url
 
 
 _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-_USER_URL = "https://open.feishu.cn/open-apis/contact/v3/users/{open_id}?user_id_type=open_id"
+_USER_URL = (
+    "https://open.feishu.cn/open-apis/contact/v3/users/{open_id}"
+    "?user_id_type=open_id&department_id_type=open_department_id"
+)
 _DEPARTMENT_URL = "https://open.feishu.cn/open-apis/contact/v3/departments/{department_id}?department_id_type=open_department_id"
 _MAX_MEMBERSHIPS = 20
 _MAX_HIERARCHY_DEPTH = 32
+_MAX_DEPARTMENT_REQUESTS = 64
 
 
 class FeishuContactsError(Exception):
@@ -106,6 +110,38 @@ async def fetch_feishu_organizational_profile(
                 item.strip() for item in raw_department_ids if isinstance(item, str) and item.strip()
             ))
 
+            department_cache: dict[str, tuple[str, str]] = {}
+            department_request_count = 0
+
+            async def get_department(department_id: str) -> tuple[str, str]:
+                nonlocal department_request_count
+                cached = department_cache.get(department_id)
+                if cached is not None:
+                    return cached
+                if department_request_count >= _MAX_DEPARTMENT_REQUESTS:
+                    raise FeishuContactsError("contacts_request_limit")
+                department_request_count += 1
+                response = await client.get(
+                    _DEPARTMENT_URL.format(department_id=quote(department_id, safe="")),
+                    headers=headers,
+                )
+                body = _json_body(response, "contacts_department_unavailable")
+                item_data = body.get("data")
+                department = item_data.get("department") if isinstance(item_data, dict) else None
+                if not isinstance(department, dict):
+                    raise FeishuContactsError("contacts_department_unavailable", response.status_code)
+                actual_id = department.get("open_department_id")
+                parent_id = department.get("parent_department_id")
+                if not isinstance(actual_id, str) or actual_id != department_id:
+                    raise FeishuContactsError("contacts_department_data_invalid", response.status_code)
+                if not isinstance(parent_id, str) or not parent_id.strip():
+                    # Feishu documents "0" as the root parent. Missing ancestry
+                    # data is incomplete and must never be interpreted as root.
+                    raise FeishuContactsError("contacts_hierarchy_incomplete", response.status_code)
+                result = (actual_id, parent_id)
+                department_cache[department_id] = result
+                return result
+
             async def department_path(start_id: str) -> list[str]:
                 current_id = start_id
                 seen: set[str] = set()
@@ -114,23 +150,11 @@ async def fetch_feishu_organizational_profile(
                     if current_id in seen:
                         raise FeishuContactsError("contacts_department_cycle")
                     seen.add(current_id)
-                    response = await client.get(
-                        _DEPARTMENT_URL.format(department_id=quote(current_id, safe="")),
-                        headers=headers,
-                    )
-                    body = _json_body(response, "contacts_department_unavailable")
-                    item_data = body.get("data")
-                    department = item_data.get("department") if isinstance(item_data, dict) else None
-                    if not isinstance(department, dict):
-                        raise FeishuContactsError("contacts_department_unavailable", response.status_code)
-                    actual_id = department.get("open_department_id")
-                    if isinstance(actual_id, str) and actual_id:
-                        current_id = actual_id
-                    reverse_path.append(current_id)
-                    parent_id = department.get("parent_department_id")
-                    if not isinstance(parent_id, str) or not parent_id or parent_id == "0":
+                    actual_id, parent_id = await get_department(current_id)
+                    reverse_path.append(actual_id)
+                    if parent_id == "0":
                         break
-                    if current_id == parent_id:
+                    if actual_id == parent_id:
                         raise FeishuContactsError("contacts_department_cycle")
                     current_id = parent_id
                 else:
