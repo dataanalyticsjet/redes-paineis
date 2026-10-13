@@ -6,6 +6,7 @@ import pytest
 from app.core.config import Settings
 from app.services import feishu_contacts
 from app.services.feishu_contacts import FeishuContactsError, fetch_feishu_organizational_profile
+from app.services.feishu_regions import resolve_organizational_region
 
 
 JT_BRASIL = "od-33e90ac1a93b12c1b65347320e648498"
@@ -211,6 +212,81 @@ def test_contacts_multiple_departments_reuse_shared_ancestor_requests(monkeypatc
     ]
     department_calls = [call for call in client.calls if call[0] == "GET" and "/departments/" in call[1]]
     assert len(department_calls) == 4
+
+
+def test_contacts_stops_at_jt_brasil_and_checks_all_memberships(monkeypatch):
+    first = "it-department"
+    second = "finance-department"
+    external_ancestor = "external-parent"
+
+    class BoundaryClient(MockContactsClient):
+        async def get(self, url, *, headers):
+            self.calls.append(("GET", url, headers.get("Authorization")))
+            if "/users/" in url:
+                payload = {"code": 0, "data": {"user": {"department_ids": [first, second]}}}
+                return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+            department_id = url.split("/departments/", 1)[1].split("?", 1)[0]
+            if department_id in {first, second}:
+                payload = {"code": 0, "data": {"department": {
+                    "open_department_id": department_id,
+                    "parent_department_id": JT_BRASIL,
+                }}}
+                return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+            if department_id == JT_BRASIL:
+                payload = {"code": 0, "data": {"department": {
+                    "open_department_id": JT_BRASIL,
+                    "parent_department_id": external_ancestor,
+                }}}
+                return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+            return httpx.Response(403, request=httpx.Request("GET", url))
+
+    client = BoundaryClient(timeout=None)
+    monkeypatch.setattr(feishu_contacts.httpx, "AsyncClient", lambda **_kwargs: client)
+    settings = Settings(feishu_oauth_app_id="mock-app", feishu_oauth_app_secret="mock-secret", _env_file=None)
+
+    profile = asyncio.run(fetch_feishu_organizational_profile("mock-open-id", settings))
+
+    assert profile.department_paths == [
+        [JT_BRASIL, first],
+        [JT_BRASIL, second],
+    ]
+    assert resolve_organizational_region(profile.department_paths).region_code == "MATRIZ"
+    department_urls = [call[1] for call in client.calls if call[0] == "GET" and "/departments/" in call[1]]
+    assert any(f"/{first}?" in url for url in department_urls)
+    assert any(f"/{second}?" in url for url in department_urls)
+    assert any(f"/{JT_BRASIL}?" in url for url in department_urls)
+    assert not any(f"/{external_ancestor}?" in url for url in department_urls)
+
+
+def test_contacts_403_before_jt_brasil_does_not_return_a_profile(monkeypatch):
+    class ForbiddenAncestorClient(MockContactsClient):
+        async def get(self, url, *, headers):
+            self.calls.append(("GET", url, headers.get("Authorization")))
+            if "/users/" in url:
+                payload = {"code": 0, "data": {"user": {"department_ids": ["required-leaf"]}}}
+                return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+            if url.endswith("/required-leaf?department_id_type=open_department_id"):
+                payload = {"code": 0, "data": {"department": {
+                    "open_department_id": "required-leaf",
+                    "parent_department_id": "restricted-required-parent",
+                }}}
+                return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+            return httpx.Response(403, request=httpx.Request("GET", url))
+
+    client = ForbiddenAncestorClient(timeout=None)
+    monkeypatch.setattr(feishu_contacts.httpx, "AsyncClient", lambda **_kwargs: client)
+    settings = Settings(feishu_oauth_app_id="mock-app", feishu_oauth_app_secret="mock-secret", _env_file=None)
+
+    with pytest.raises(FeishuContactsError) as caught:
+        asyncio.run(fetch_feishu_organizational_profile("mock-open-id", settings))
+
+    assert caught.value.category == "contacts_permission_denied"
+    assert not any(
+        f"/{JT_BRASIL}?" in call[1]
+        for call in client.calls
+        if call[0] == "GET" and "/departments/" in call[1]
+    )
 
 def test_contacts_code_40004_is_reported_as_access_or_visibility_failure():
     response = httpx.Response(

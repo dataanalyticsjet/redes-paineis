@@ -56,8 +56,10 @@ def resolve_organizational_region(
         return RegionResolution(next(iter(generic)), "RESOLVED")
 
     sponsor_seen = any(REGIONAL_SPONSOR_ID in path for path in paths)
-    matrix_path_seen = any(JT_BRASIL_ID in path for path in paths)
-    if matrix_path_seen and not sponsor_seen:
+    # Every associated path must reach the corporate boundary. One complete
+    # path cannot make an unrelated, incomplete path look like MATRIZ.
+    matrix_paths_complete = bool(paths) and all(JT_BRASIL_ID in path for path in paths)
+    if matrix_paths_complete and not sponsor_seen:
         return RegionResolution("MATRIZ", "RESOLVED")
 
     # A sponsor path, an incomplete path, or an unknown ID must never imply HQ.

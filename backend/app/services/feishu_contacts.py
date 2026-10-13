@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.services.feishu_auth import _feishu_avatar_url
+from app.services.feishu_regions import JT_BRASIL_ID
 
 
 _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -113,7 +114,7 @@ async def fetch_feishu_organizational_profile(
             department_cache: dict[str, tuple[str, str]] = {}
             department_request_count = 0
 
-            async def get_department(department_id: str) -> tuple[str, str]:
+            async def get_department(department_id: str) -> tuple[str, str | None]:
                 nonlocal department_request_count
                 cached = department_cache.get(department_id)
                 if cached is not None:
@@ -131,10 +132,11 @@ async def fetch_feishu_organizational_profile(
                 if not isinstance(department, dict):
                     raise FeishuContactsError("contacts_department_unavailable", response.status_code)
                 actual_id = department.get("open_department_id")
-                parent_id = department.get("parent_department_id")
                 if not isinstance(actual_id, str) or actual_id != department_id:
                     raise FeishuContactsError("contacts_department_data_invalid", response.status_code)
-                if not isinstance(parent_id, str) or not parent_id.strip():
+                raw_parent_id = department.get("parent_department_id")
+                parent_id = raw_parent_id.strip() if isinstance(raw_parent_id, str) and raw_parent_id.strip() else None
+                if actual_id != JT_BRASIL_ID and parent_id is None:
                     # Feishu documents "0" as the root parent. Missing ancestry
                     # data is incomplete and must never be interpreted as root.
                     raise FeishuContactsError("contacts_hierarchy_incomplete", response.status_code)
@@ -152,8 +154,14 @@ async def fetch_feishu_organizational_profile(
                     seen.add(current_id)
                     actual_id, parent_id = await get_department(current_id)
                     reverse_path.append(actual_id)
+                    if actual_id == JT_BRASIL_ID:
+                        # J&T Brasil is the organizational boundary we need.
+                        # Its parent may be outside the app's Contacts visibility.
+                        break
                     if parent_id == "0":
                         break
+                    if parent_id is None:
+                        raise FeishuContactsError("contacts_hierarchy_incomplete")
                     if actual_id == parent_id:
                         raise FeishuContactsError("contacts_department_cycle")
                     current_id = parent_id

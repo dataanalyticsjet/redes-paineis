@@ -51,6 +51,12 @@ def test_matrix_requires_jt_brasil_and_no_regional_sponsor():
     assert resolve_organizational_region([[JT_BRASIL_ID, REGIONAL_SPONSOR_ID]]).status == "UNKNOWN"
 
 
+def test_matrix_requires_every_associated_path_to_reach_jt_brasil():
+    result = resolve_organizational_region([[JT_BRASIL_ID], ["external-root"]])
+    assert result.region_code is None
+    assert result.status == "UNKNOWN"
+
+
 def test_unknown_and_sponsor_without_region_never_become_matrix():
     assert resolve_organizational_region([["unrecognized-id"]]).status == "UNKNOWN"
     assert resolve_organizational_region([[REGIONAL_SPONSOR_ID]]).status == "UNKNOWN"
