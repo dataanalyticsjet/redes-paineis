@@ -418,6 +418,10 @@ def get_publications(
         filters += f" AND {scope}"
     if source_id in DAILY_SOURCES:
         date_select = "MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end"
+    elif source_id == "no_movement":
+        # For snapshots these fields carry the collection date from the latest
+        # successful Bot_NewBI execution, not a business-date range.
+        date_select = "MAX(publication.period_start) AS period_start, MAX(publication.period_end) AS period_end"
     else:
         date_select = "NULL AS period_start, NULL AS period_end"
     with engine.connect() as connection:
@@ -430,11 +434,14 @@ def get_publications(
             ) AS visible_publications
         """), parameters).scalar_one())
         result = connection.execute(text(f"""
-            SELECT publication.publication_id, publication.version_no, publication.published_at,
+            SELECT publication.publication_id, publication.version_no, publication.contract_version, publication.published_at,
+                   publication.snapshot_as_of,
                    COUNT(*) AS visible_row_count, {date_select}
             {from_sql}
             WHERE {filters}
-            GROUP BY publication.publication_id, publication.version_no, publication.published_at
+            GROUP BY publication.publication_id, publication.version_no, publication.contract_version,
+                     publication.published_at,
+                     publication.snapshot_as_of
             ORDER BY publication.version_no DESC
             LIMIT :page_limit OFFSET :page_offset
         """), {**parameters, "page_limit": limit, "page_offset": offset}).mappings()
@@ -442,7 +449,9 @@ def get_publications(
             {
                 "publicationId": str(uuid.UUID(bytes=bytes(row["publication_id"]))),
                 "version": int(row["version_no"]),
+                "contractVersion": int(row["contract_version"]),
                 "publishedAt": row["published_at"],
+                "snapshotAsOf": row["snapshot_as_of"],
                 "visibleRowCount": int(row["visible_row_count"]),
                 "periodStart": row["period_start"],
                 "periodEnd": row["period_end"],

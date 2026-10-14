@@ -35,7 +35,7 @@ class SourceContract:
     history_policy: Literal["DAILY_REPLACE_DATES", "SNAPSHOT_REPLACE_ALL", "PENDING"]
     grain_description: str
     columns: tuple[ContractColumn, ...]
-    expected_sample_rows: int
+    expected_sample_rows: int | None
     approval_state: Literal["DISCOVERED"] = "DISCOVERED"
 
     @property
@@ -209,14 +209,14 @@ CONTRACTS: dict[str, SourceContract] = {
     "no_movement": SourceContract(
         source_id="no_movement",
         display_name="Sem Movimentação",
-        workbook_name="Monitoramento de movimentação em tempo real (novo)(Resumo)17474620261006102038.xlsx - Sem Movimentac\u0327a\u0303o.xlsx",
-        sheet_name="sheet0",
+        workbook_name="painel_sem_movimentacao.xlsx",
+        sheet_name="Dados",
         header_row=1,
-        version=1,
+        version=2,
         history_policy="SNAPSHOT_REPLACE_ALL",
-        grain_description="Snapshot integral; os códigos da base devem ser únicos. O arquivo não informa a data do snapshot.",
+        grain_description="Uma linha por registro físico da aba Dados; códigos de base repetidos em regionais diferentes são preservados. O snapshot é identificado pela aba Execucoes.",
         columns=_NO_MOVEMENT,
-        expected_sample_rows=151,
+        expected_sample_rows=None,
     ),
     "pdd_collection_failure": SourceContract(
         source_id="pdd_collection_failure",

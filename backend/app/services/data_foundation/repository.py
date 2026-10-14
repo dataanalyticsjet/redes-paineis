@@ -776,6 +776,14 @@ def publish_import_job(
         publication_id = publication_uuid.bytes
         period_start = min((date.fromisoformat(key) for key in summary.per_date_counts), default=None)
         period_end = max((date.fromisoformat(key) for key in summary.per_date_counts), default=None)
+        snapshot_as_of = None
+        if source_id == "no_movement":
+            # This snapshot has no per-row business date. Keep the Bot_NewBI
+            # collection date and execution time as source metadata; publication
+            # time remains published_at and is not a substitute for either.
+            period_start = summary.collection_date
+            period_end = summary.collection_date
+            snapshot_as_of = summary.bot_executed_at
         connection.execute(text("""
             INSERT INTO source_publications
               (publication_id, source_id, version_no, job_id, contract_version,
@@ -785,7 +793,7 @@ def publish_import_job(
             VALUES
               (:publication_id, :source_id, :version_no, :job_id, :contract_version,
                :map_version_id, :file_sha256, 'PREPARED', :history_policy,
-               :period_start, :period_end, NULL, :row_count, :mapped_row_count,
+               :period_start, :period_end, :snapshot_as_of, :row_count, :mapped_row_count,
                :unmapped_row_count, :missing_identifier_row_count, :ambiguous_row_count)
         """), {
             "publication_id": publication_id,
@@ -798,6 +806,7 @@ def publish_import_job(
             "history_policy": registry["history_policy"],
             "period_start": period_start,
             "period_end": period_end,
+            "snapshot_as_of": snapshot_as_of,
             "row_count": summary.valid_row_count,
             "mapped_row_count": summary.mapped_row_count,
             "unmapped_row_count": summary.unmapped_row_count,
@@ -838,6 +847,11 @@ def publish_import_job(
                 "rowCount": summary.valid_row_count,
                 "mappedRowCount": summary.mapped_row_count,
                 "unmappedRowCount": summary.unmapped_row_count,
+                **({
+                    "botExecutionId": summary.bot_execution_id,
+                    "botExecutedAt": summary.bot_executed_at.isoformat(sep=" ") if summary.bot_executed_at else None,
+                    "collectionDate": summary.collection_date.isoformat() if summary.collection_date else None,
+                } if source_id == "no_movement" else {}),
                 "idempotencyKeySha256": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
             },
         )

@@ -79,18 +79,28 @@ class PreviewSummary:
     mapping_version_available: bool = False
     map_version_id: bytes | None = None
     per_date_counts: dict[str, int] = field(default_factory=dict)
+    bot_execution_id: str | None = None
+    bot_executed_at: datetime | None = None
+    collection_date: date | None = None
+    workbook_validation_errors: list[str] = field(default_factory=list)
     error_counts: Counter[str] = field(default_factory=Counter)
     errors: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def can_publish(self) -> bool:
         map_available = self.mapping_version_available or self.source_id == "base_mapping_official"
-        return map_available and self.invalid_row_count == 0
+        return map_available and self.invalid_row_count == 0 and not self.workbook_validation_errors
 
     def add_error(self, row_no: int, column_key: str | None, code: str) -> None:
         self.error_counts[code] += 1
         if len(self.errors) < MAX_PREVIEW_ERRORS:
             self.errors.append({"rowNumber": row_no, "column": column_key, "code": code})
+
+    def add_workbook_error(self, code: str) -> None:
+        self.workbook_validation_errors.append(code)
+        self.error_counts[code] += 1
+        if len(self.errors) < MAX_PREVIEW_ERRORS:
+            self.errors.append({"rowNumber": 0, "column": "workbook", "code": code})
 
     def as_api_dict(self) -> dict[str, object]:
         return {
@@ -111,6 +121,9 @@ class PreviewSummary:
             "mappingVersionAvailable": self.mapping_version_available,
             "mappingVersionId": str(uuid.UUID(bytes=self.map_version_id)) if self.map_version_id else None,
             "perDateCounts": dict(sorted(self.per_date_counts.items())),
+            "botExecutionId": self.bot_execution_id,
+            "botExecutedAt": self.bot_executed_at.isoformat(sep=" ") if self.bot_executed_at else None,
+            "collectionDate": self.collection_date.isoformat() if self.collection_date else None,
             "errorCounts": dict(sorted(self.error_counts.items())),
             "errors": self.errors,
             "canPublish": self.can_publish,
@@ -408,6 +421,195 @@ def _date_key(row: dict[str, object]) -> date | None:
     return None
 
 
+def _metadata_header_key(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]", "", ascii_text.lower())
+
+
+def _metadata_row(
+    cells: dict[int, _RawCell],
+    header_indexes: dict[str, int],
+    date_styles: set[int],
+    uses_1904_epoch: bool,
+) -> dict[str, object | None]:
+    result: dict[str, object | None] = {}
+    for key, index in header_indexes.items():
+        cell = cells.get(index)
+        if cell is None or cell.formula or cell.invalid:
+            result[key] = None
+        else:
+            value = cell.value
+            if isinstance(value, Decimal) and cell.numeric and cell.date_style:
+                try:
+                    value = _excel_datetime(value, uses_1904_epoch)
+                except ValueError:
+                    value = None
+            result[key] = value
+    return result
+
+
+def _parse_metadata_datetime(value: object | None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("T", " ")
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_metadata_date(value: object | None) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for pattern in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _nonnegative_metadata_integer(value: object | None) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError, AttributeError):
+        return None
+    if not number.is_finite() or number < 0 or number != number.to_integral_value():
+        return None
+    return int(number)
+
+
+def _metadata_has_errors(value: object | None) -> bool:
+    if value is None or value is False or value == 0:
+        return False
+    if isinstance(value, str):
+        normalized = _metadata_header_key(value)
+        return normalized not in {"", "0", "false", "nao", "nenhum", "nenhumerro", "[]", "null", "none"}
+    return True
+
+
+def _validate_no_movement_metadata(
+    archive: zipfile.ZipFile,
+    shared: list[str],
+    date_styles: set[int],
+    uses_1904_epoch: bool,
+) -> tuple[str | None, datetime | None, date | None, int | None, int | None, str | None]:
+    expected_dictionary_fields = {
+        "scanAgentName", "dutyCode", "dutyName", "total", "halfwayCount", "day1", "day2",
+        "day3", "day4", "day5", "day6", "day7", "day10", "day14", "day30",
+        "operateTime", "dayRate14", "dayRate30",
+    }
+    try:
+        dictionary_path = _sheet_path(archive, "Dicionario")
+        dictionary_rows = iter(_iter_sheet_rows(archive, dictionary_path, shared, date_styles))
+        dictionary_header_row, dictionary_header = next(dictionary_rows)
+        if dictionary_header_row != 1:
+            return None, None, None, None, None, "no_movement_dictionary_invalid"
+        dictionary_indexes = {
+            _metadata_header_key(cell.value): index
+            for index, cell in dictionary_header.items()
+            if isinstance(cell.value, str)
+        }
+        source_field_index = dictionary_indexes.get("nomeoriginaldocampo")
+        identification_index = dictionary_indexes.get("statusdaidentificacao")
+        if source_field_index is None or identification_index is None:
+            return None, None, None, None, None, "no_movement_dictionary_invalid"
+        dictionary_fields: set[str] = set()
+        dictionary_field_count = 0
+        dictionary_confirmed = True
+        for _row_no, cells in dictionary_rows:
+            field_cell = cells.get(source_field_index)
+            status_cell = cells.get(identification_index)
+            if field_cell and isinstance(field_cell.value, str) and field_cell.value.strip():
+                dictionary_field_count += 1
+                dictionary_fields.add(field_cell.value.strip())
+                dictionary_confirmed = dictionary_confirmed and bool(
+                    status_cell and isinstance(status_cell.value, str)
+                    and "confirmado" in _metadata_header_key(status_cell.value)
+                )
+        if dictionary_field_count != len(expected_dictionary_fields) or dictionary_fields != expected_dictionary_fields or not dictionary_confirmed:
+            return None, None, None, None, None, "no_movement_dictionary_invalid"
+
+        executions_path = _sheet_path(archive, "Execucoes")
+        execution_rows = iter(_iter_sheet_rows(archive, executions_path, shared, date_styles))
+        execution_header_row, execution_header = next(execution_rows)
+        if execution_header_row != 1:
+            return None, None, None, None, None, "no_movement_execution_metadata_invalid"
+        raw_header_indexes = {
+            _metadata_header_key(cell.value): index
+            for index, cell in execution_header.items()
+            if isinstance(cell.value, str)
+        }
+        aliases = {
+            "execution_id": ("iddaexecucao",),
+            "executed_at": ("dataehorariodaexecucao",),
+            "received_count": ("quantidadederegistrosrecebidos",),
+            "page_count": ("quantidadedepaginasconsultadas",),
+            "status": ("situacaodaexecucao",),
+            "errors": ("erros",),
+            "collection_date": ("datadacoleta",),
+        }
+        execution_indexes = {
+            key: next((raw_header_indexes.get(alias) for alias in choices if raw_header_indexes.get(alias) is not None), None)
+            for key, choices in aliases.items()
+        }
+        if any(index is None for index in execution_indexes.values()):
+            return None, None, None, None, None, "no_movement_execution_metadata_invalid"
+        parsed_executions: list[dict[str, object | None]] = []
+        for _row_no, cells in execution_rows:
+            if not any(cell.value not in (None, "") for cell in cells.values()):
+                continue
+            row = _metadata_row(cells, {key: int(index) for key, index in execution_indexes.items()}, date_styles, uses_1904_epoch)
+            row["executed_at"] = _parse_metadata_datetime(row.get("executed_at"))
+            row["collection_date"] = _parse_metadata_date(row.get("collection_date"))
+            parsed_executions.append(row)
+        if not parsed_executions:
+            return None, None, None, None, None, "no_movement_execution_metadata_missing"
+        if any(
+            not isinstance(row.get("executed_at"), datetime)
+            or not isinstance(row.get("execution_id"), str)
+            or not str(row["execution_id"]).strip()
+            for row in parsed_executions
+        ):
+            return None, None, None, None, None, "no_movement_execution_metadata_invalid"
+        parsed_executions.sort(key=lambda row: row["executed_at"] if isinstance(row["executed_at"], datetime) else datetime.min)
+        latest = parsed_executions[-1]
+        execution_at = latest.get("executed_at")
+        execution_id = latest.get("execution_id")
+        if not isinstance(execution_at, datetime) or not isinstance(execution_id, str) or not execution_id.strip():
+            return None, None, None, None, None, "no_movement_execution_metadata_invalid"
+        if sum(row.get("executed_at") == execution_at for row in parsed_executions) != 1:
+            return None, None, None, None, None, "no_movement_execution_metadata_ambiguous"
+        status = _metadata_header_key(latest.get("status"))
+        successful = status in {"sucesso", "success", "concluido", "concluida"}
+        received_count = _nonnegative_metadata_integer(latest.get("received_count"))
+        page_count = _nonnegative_metadata_integer(latest.get("page_count"))
+        collection_date = latest.get("collection_date")
+        has_errors = _metadata_has_errors(latest.get("errors"))
+        failure = (
+            "no_movement_execution_not_successful" if not successful
+            else "no_movement_execution_has_errors" if has_errors
+            else "no_movement_execution_metadata_invalid" if received_count is None or page_count is None or not isinstance(collection_date, date)
+            else "no_movement_execution_page_count_invalid" if received_count > 0 and (page_count < 1 or page_count > received_count)
+            else None
+        )
+        return execution_id.strip(), execution_at, collection_date if isinstance(collection_date, date) else None, received_count, page_count, failure
+    except (WorkbookValidationError, StopIteration, KeyError, ValueError):
+        return None, None, None, None, None, "no_movement_execution_metadata_invalid"
+
+
 def _resolve_mapping(
     source_id: str,
     row: dict[str, object],
@@ -501,6 +703,20 @@ def parse_workbook(
         seen_base_codes: set[str] = set()
         expected_row_no = contract.header_row + 1
 
+        no_movement_received_count: int | None = None
+        no_movement_page_count: int | None = None
+        if contract.source_id == "no_movement" and contract.version >= 2:
+            (
+                summary.bot_execution_id,
+                summary.bot_executed_at,
+                summary.collection_date,
+                no_movement_received_count,
+                no_movement_page_count,
+                metadata_error,
+            ) = _validate_no_movement_metadata(archive, shared, date_styles, uses_1904_epoch)
+            if metadata_error:
+                summary.add_workbook_error(metadata_error)
+
         def process_row(row_no: int, cells: dict[int, _RawCell]) -> None:
             nonlocal expected_row_no
             summary.input_row_count += 1
@@ -548,9 +764,21 @@ def parse_workbook(
                 code = str(values[code_key])
                 if code in seen_base_codes:
                     summary.duplicate_base_code_count += 1
-                    row_errors.append((code_key, "duplicate_base_code"))
+                    if contract.source_id != "no_movement":
+                        row_errors.append((code_key, "duplicate_base_code"))
                 else:
                     seen_base_codes.add(code)
+
+            if contract.source_id == "no_movement" and contract.version >= 2:
+                aging_keys = (
+                    "stopped_over_1_day", "stopped_over_2_days", "stopped_over_3_days",
+                    "stopped_over_4_days", "stopped_over_5_days", "stopped_over_6_days",
+                    "stopped_over_7_days", "stopped_over_10_days", "stopped_over_14_days",
+                    "stopped_over_30_days",
+                )
+                if all(isinstance(values.get(key), int) for key in aging_keys) and isinstance(values.get("stopped_orders"), int):
+                    if sum(int(values[key]) for key in aging_keys) != values["stopped_orders"]:
+                        row_errors.append(("stopped_orders", "aging_total_mismatch"))
 
             if row_errors:
                 summary.invalid_row_count += 1
@@ -598,5 +826,11 @@ def parse_workbook(
                 raise WorkbookValidationError("workbook_row_order_invalid")
             process_row(row_no, cells)
             expected_row_no = row_no + 1
+
+    if contract.source_id == "no_movement" and contract.version >= 2:
+        if no_movement_received_count != summary.input_row_count:
+            summary.add_workbook_error("no_movement_execution_row_count_mismatch")
+        if summary.input_row_count > 0 and (no_movement_page_count is None or no_movement_page_count < 1):
+            summary.add_workbook_error("no_movement_execution_page_count_invalid")
 
     return summary

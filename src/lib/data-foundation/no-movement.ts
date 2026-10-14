@@ -2,6 +2,7 @@ import { apiFetch } from "../api-url.ts";
 import { withPublishedRegionalAssignment } from "./regional-assignment.ts";
 
 export const NO_MOVEMENT_V2_SOURCE_ID = "no_movement";
+export const NO_MOVEMENT_V2_CONTRACT_VERSION = 2;
 export const NO_MOVEMENT_V2_PAGE_SIZE = 250;
 
 export const NO_MOVEMENT_V2_COLUMNS = [
@@ -57,14 +58,16 @@ export interface NoMovementV2Record extends Record<string, unknown> {
 export interface PublishedNoMovementSnapshot {
   sourceId: typeof NO_MOVEMENT_V2_SOURCE_ID;
   publicationId: string;
-  updatedAt: string;
+  publishedAt: string;
+  updatedAt: string | null;
+  collectionDate: string | null;
   records: NoMovementV2Record[];
   rowCount: number;
   columnCount: typeof NO_MOVEMENT_V2_COLUMNS["length"];
 }
 
 export class NoMovementV2LoadError extends Error {
-  readonly kind: "empty" | "request" | "inconsistent" | "invalid_data";
+  readonly kind: "empty" | "incompatible" | "request" | "inconsistent" | "invalid_data";
 
   constructor(kind: NoMovementV2LoadError["kind"], message: string) {
     super(message);
@@ -78,7 +81,11 @@ type ApiFetch = (path: string, init?: RequestInit) => Promise<Response>;
 interface Publication {
   publicationId: string;
   version: number;
+  contractVersion: number;
   publishedAt: string;
+  snapshotAsOf?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
   visibleRowCount: number;
 }
 
@@ -176,6 +183,9 @@ async function readCurrentSnapshotMetadata(
   if (publications.total > 0 && (!publication || publication.visibleRowCount !== snapshot.snapshotRowCount)) {
     throw new NoMovementV2LoadError("inconsistent", "A publicação mais recente não corresponde ao snapshot vigente.");
   }
+  if (publication?.periodStart && publication.periodEnd && publication.periodStart !== publication.periodEnd) {
+    throw new NoMovementV2LoadError("invalid_data", "A API V2 retornou mais de uma data de coleta para o snapshot.");
+  }
   if (publications.total === 0 && snapshot.snapshotRowCount > 0) {
     throw new NoMovementV2LoadError("inconsistent", "O snapshot contém registros sem uma publicação identificável.");
   }
@@ -207,6 +217,12 @@ export async function loadCurrentNoMovementSnapshot(
   }
 
   const publication = before.publication;
+  if (publication.contractVersion !== NO_MOVEMENT_V2_CONTRACT_VERSION) {
+    throw new NoMovementV2LoadError(
+      "incompatible",
+      "A publicação vigente não utiliza o contrato V2 de Sem Movimentação.",
+    );
+  }
   const expectedCount = before.snapshotRowCount;
   const records: NoMovementV2Record[] = [];
   const seenRows = new Set<string>();
@@ -246,7 +262,9 @@ export async function loadCurrentNoMovementSnapshot(
   return {
     sourceId: NO_MOVEMENT_V2_SOURCE_ID,
     publicationId: publication.publicationId,
-    updatedAt: publication.publishedAt,
+    publishedAt: publication.publishedAt,
+    updatedAt: publication.snapshotAsOf ?? null,
+    collectionDate: publication.periodStart ?? null,
     records: records.map(withPublishedRegionalAssignment),
     rowCount: records.length,
     columnCount: NO_MOVEMENT_V2_COLUMNS.length,

@@ -323,7 +323,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(styles, /\.monitoring-summary-table th,[\s\S]*?overflow-wrap: anywhere;[\s\S]*?white-space: normal/);
   assert.match(styles, /\.movement-rm-summary-table\.monitoring-summary-table th:nth-child\(1\)\s*\{[\s\S]*?width: 13%/);
   assert.match(styles, /\.movement-rm-summary-table\.monitoring-summary-table th:nth-child\(5\)\s*\{[\s\S]*?width: 9%/);
-  assert.match(source, /movementFrom2DaysTotal\(record\)/);
+  assert.match(source, /summarizeMovementSnapshot\(movementDimensionFilteredRecords\)/);
   assert.match(source, /movementSelectionsAfterChange/);
   assert.match(source, /getMovementSource\(\)/);
   assert.match(source, /Sem movimentação por regional/);

@@ -168,6 +168,54 @@ export function movementFrom2DaysTotal(record: {
     record.over7Days + record.over10Days + record.over14Days + record.over30Days;
 }
 
+export interface MovementSnapshotSummary {
+  totalStopped: number;
+  inTransit: number;
+  over2Days: number;
+  over14Days: number;
+  over30Days: number;
+  criticalBases: number;
+  activeRegions: number;
+  topRegion: [string, number] | undefined;
+}
+
+export function summarizeMovementSnapshot(rows: readonly {
+  region: string;
+  sourceRegion?: string;
+  code: string;
+  totalStopped: number;
+  inTransit: number;
+  over2Days: number;
+  over3Days: number;
+  over4Days: number;
+  over5Days: number;
+  over6Days: number;
+  over7Days: number;
+  over10Days: number;
+  over14Days: number;
+  over30Days: number;
+}[]): MovementSnapshotSummary {
+  const totalStopped = rows.reduce((sum, record) => sum + record.totalStopped, 0);
+  const inTransit = rows.reduce((sum, record) => sum + record.inTransit, 0);
+  const over2Days = rows.reduce((sum, record) => sum + movementFrom2DaysTotal(record), 0);
+  const over14Days = rows.reduce((sum, record) => sum + record.over14Days, 0);
+  const over30Days = rows.reduce((sum, record) => sum + record.over30Days, 0);
+  const criticalBaseCodes = new Set(
+    rows.filter((record) => movementFrom2DaysTotal(record) > 0)
+      .map((record) => record.code.trim())
+      .filter((code) => code && code !== "—"),
+  );
+  const activeRegions = new Set(rows.map((record) => (record.sourceRegion ?? record.region).trim()).filter(Boolean)).size;
+  const regionalTotals = new Map<string, number>();
+  for (const record of rows) {
+    regionalTotals.set(record.region, (regionalTotals.get(record.region) ?? 0) + record.totalStopped);
+  }
+  const topRegion = [...regionalTotals.entries()].sort((a, b) =>
+    b[1] - a[1] || a[0].localeCompare(b[0], "pt-BR", { numeric: true }),
+  )[0];
+  return { totalStopped, inTransit, over2Days, over14Days, over30Days, criticalBases: criticalBaseCodes.size, activeRegions, topRegion };
+}
+
 export function movementWeightedRate(numerator: number, denominator: number): number | null {
   return denominator > 0 ? numerator / denominator : null;
 }

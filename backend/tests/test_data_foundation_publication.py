@@ -175,7 +175,13 @@ def _sql_compatibility_for_sqlite(engine) -> None:
         return statement, parameters
 
 
-def _xlsx_bytes(contract, rows: list[dict[str, object]]) -> bytes:
+def _xlsx_bytes(
+    contract,
+    rows: list[dict[str, object]],
+    *,
+    execution_overrides: dict[str, object] | None = None,
+    dictionary_status: str = "Confirmado",
+) -> bytes:
     def column_letters(index: int) -> str:
         result = ""
         while index:
@@ -187,48 +193,101 @@ def _xlsx_bytes(contract, rows: list[dict[str, object]]) -> bytes:
         parsed = datetime.combine(value, datetime.min.time()) if isinstance(value, date) and not isinstance(value, datetime) else value
         return str((parsed - datetime(1899, 12, 30)).total_seconds() / 86400)
 
-    xml_rows = []
-    all_rows = [dict(zip((column.key for column in contract.columns), contract.headers)), *rows]
-    for row_no, values in enumerate(all_rows, start=1):
-        cells = []
-        for index, column in enumerate(contract.columns, start=1):
-            value = values.get(column.key)
-            if value is None:
-                continue
-            reference = f"{column_letters(index)}{row_no}"
-            if row_no == 1 or column.kind in {"TEXT", "BASE_CODE"}:
-                cells.append(
-                    f'<c r="{reference}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>'
-                )
-            elif column.kind in {"DATE", "DATETIME"}:
-                cells.append(f'<c r="{reference}" s="1"><v>{excel_serial(value)}</v></c>')
-            else:
-                numeric = format(value, "f") if isinstance(value, Decimal) else str(value)
-                cells.append(f'<c r="{reference}" t="n"><v>{numeric}</v></c>')
-        xml_rows.append(f'<row r="{row_no}">{"".join(cells)}</row>')
+    def make_sheet_xml(
+        headers: list[str],
+        data_rows: list[dict[str, object]],
+        kinds: list[str],
+        row_keys: list[str] | None = None,
+    ) -> str:
+        keys = row_keys or headers
+        xml_rows = []
+        for row_no in range(1, len(data_rows) + 2):
+            values = data_rows[row_no - 2] if row_no > 1 else None
+            cells = []
+            for index, (header, kind) in enumerate(zip(headers, kinds), start=1):
+                value = header if values is None else values.get(keys[index - 1])
+                if value is None:
+                    continue
+                reference = f"{column_letters(index)}{row_no}"
+                if row_no == 1 or kind in {"TEXT", "BASE_CODE"}:
+                    cells.append(f'<c r="{reference}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>')
+                elif kind in {"DATE", "DATETIME"}:
+                    cells.append(f'<c r="{reference}" s="1"><v>{excel_serial(value)}</v></c>')
+                else:
+                    numeric = format(value, "f") if isinstance(value, Decimal) else str(value)
+                    cells.append(f'<c r="{reference}" t="n"><v>{numeric}</v></c>')
+            xml_rows.append(f'<row r="{row_no}">{"".join(cells)}</row>')
+        return (
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
+        )
 
-    sheet_name = escape(contract.sheet_name, {'"': "&quot;"})
+    if contract.source_id == "no_movement" and contract.version >= 2:
+        data_headers = list(contract.headers)
+        data_kinds = [column.kind for column in contract.columns]
+        execution_headers = [
+            "Id da execução", "Data e horário da execução", "Quantidade de registros recebidos",
+            "Quantidade de páginas consultadas", "Situação da execução", "Erros", "Data da coleta",
+        ]
+        execution_row = {
+            "Id da execução": "synthetic-execution",
+            "Data e horário da execução": datetime(2026, 10, 14, 10, 0),
+            "Quantidade de registros recebidos": len(rows),
+            "Quantidade de páginas consultadas": 1 if rows else 0,
+            "Situação da execução": "SUCESSO",
+            "Erros": None,
+            "Data da coleta": date(2026, 10, 14),
+        }
+        execution_row.update(execution_overrides or {})
+        dictionary_headers = [
+            "Nome original do campo", "Nome exibido no JMS", "Tradução para português", "Status da identificação",
+        ]
+        dictionary_fields = [
+            "scanAgentName", "dutyCode", "dutyName", "total", "halfwayCount", "day1", "day2", "day3",
+            "day4", "day5", "day6", "day7", "day10", "day14", "day30", "operateTime", "dayRate14", "dayRate30",
+        ]
+        dictionary_rows = [
+            {
+                "Nome original do campo": field,
+                "Nome exibido no JMS": field,
+                "Tradução para português": field,
+                "Status da identificação": dictionary_status,
+            }
+            for field in dictionary_fields
+        ]
+        sheets = [
+            ("Dados", data_headers, rows, data_kinds, [column.key for column in contract.columns]),
+            ("Execucoes", execution_headers, [execution_row], ["TEXT", "DATETIME", "INTEGER", "INTEGER", "TEXT", "TEXT", "DATE"], None),
+            ("Dicionario", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
+        ]
+    else:
+        headers = list(contract.headers)
+        sheets = [(contract.sheet_name, headers, rows, [column.kind for column in contract.columns], [column.key for column in contract.columns])]
+
     parts = {
         "xl/workbook.xml": (
             '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            f'<sheets><sheet name="{sheet_name}" sheetId="1" r:id="rId1"/></sheets></workbook>'
+            '<sheets>' + "".join(
+                f'<sheet name="{escape(name, {chr(34): "&quot;"})}" sheetId="{index}" r:id="rId{index}"/>'
+                for index, (name, _headers, _rows, _kinds, _keys) in enumerate(sheets, start=1)
+            ) + '</sheets></workbook>'
         ),
         "xl/_rels/workbook.xml.rels": (
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
-            'Target="worksheets/sheet1.xml"/></Relationships>'
+            + "".join(
+                f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
+                for index in range(1, len(sheets) + 1)
+            ) + '</Relationships>'
         ),
         "xl/styles.xml": (
             '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
             '<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd hh:mm:ss"/></numFmts>'
             '<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs></styleSheet>'
         ),
-        "xl/worksheets/sheet1.xml": (
-            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
-        ),
     }
+    for index, (_name, headers, sheet_rows, kinds, keys) in enumerate(sheets, start=1):
+        parts[f"xl/worksheets/sheet{index}.xml"] = make_sheet_xml(headers, sheet_rows, kinds, keys)
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in parts.items():
@@ -266,7 +325,81 @@ def _snapshot_row(code: str, name: str) -> dict[str, object]:
     for column in CONTRACTS["no_movement"].columns:
         if column.kind == "INTEGER":
             values[column.key] = 1
+    values["stopped_orders"] = 10
     return values
+
+
+def test_no_movement_v2_parser_preserves_duplicate_base_codes_at_row_grain():
+    contract = CONTRACTS["no_movement"]
+    rows = [
+        _snapshot_row("DUP-001", "Base duplicada - primeira regional"),
+        _snapshot_row("DUP-001", "Base duplicada - segunda regional"),
+    ]
+    imported = []
+    summary = parse_workbook(
+        _xlsx_bytes(contract, rows),
+        contract,
+        MappingResolver(map_version_id=b"0123456789abcdef"),
+        on_valid_row=imported.append,
+    )
+
+    assert summary.input_row_count == summary.valid_row_count == 2
+    assert summary.invalid_row_count == 0
+    assert summary.duplicate_base_code_count == 1
+    assert summary.exact_duplicate_count == 0
+    assert summary.can_publish is True
+    assert [row.source_row_no for row in imported] == [2, 3]
+    assert {row.values["source_base_code"] for row in imported} == {"DUP-001"}
+    assert summary.collection_date == date(2026, 10, 14)
+    assert summary.bot_executed_at == datetime(2026, 10, 14, 10, 0)
+
+
+def test_no_movement_v2_parser_blocks_failed_execution_and_unconfirmed_dictionary():
+    contract = CONTRACTS["no_movement"]
+    resolver = MappingResolver(map_version_id=b"0123456789abcdef")
+    row = _snapshot_row("CODE-001", "Base fictícia")
+
+    failed = parse_workbook(
+        _xlsx_bytes(contract, [row], execution_overrides={
+            "Situação da execução": "FALHA",
+            "Erros": "Falha de consulta",
+        }),
+        contract,
+        resolver,
+    )
+    assert failed.valid_row_count == 1
+    assert failed.can_publish is False
+    assert failed.error_counts["no_movement_execution_not_successful"] == 1
+
+    unconfirmed = parse_workbook(
+        _xlsx_bytes(contract, [row], dictionary_status="Pendente"),
+        contract,
+        resolver,
+    )
+    assert unconfirmed.valid_row_count == 1
+    assert unconfirmed.can_publish is False
+    assert unconfirmed.error_counts["no_movement_dictionary_invalid"] == 1
+
+
+def test_no_movement_v2_parser_blocks_execution_count_and_aging_mismatches():
+    contract = CONTRACTS["no_movement"]
+    resolver = MappingResolver(map_version_id=b"0123456789abcdef")
+    row = _snapshot_row("CODE-001", "Base fictícia")
+    row["stopped_over_1_day"] = 2
+
+    summary = parse_workbook(
+        _xlsx_bytes(contract, [row], execution_overrides={
+            "Quantidade de registros recebidos": 2,
+        }),
+        contract,
+        resolver,
+    )
+    assert summary.input_row_count == 1
+    assert summary.valid_row_count == 0
+    assert summary.invalid_row_count == 1
+    assert summary.error_counts["aging_total_mismatch"] == 1
+    assert summary.error_counts["no_movement_execution_row_count_mismatch"] == 1
+    assert summary.can_publish is False
 
 
 def _create_job(engine, content, contract, resolver, staging_directory, file_name):

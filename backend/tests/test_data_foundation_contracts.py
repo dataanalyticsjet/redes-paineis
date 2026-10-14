@@ -30,6 +30,7 @@ OFFICIAL_WORKBOOK_ROOT = Path(os.environ.get(
     "DATA_FOUNDATION_REVIEW_WORKBOOKS",
     "/home/phelippecardoso/RedesPaineis-DataFoundationV2-Review-2026-10-09/planilhas",
 ))
+NO_MOVEMENT_REFERENCE_WORKBOOK = Path(os.environ.get("DATA_FOUNDATION_NO_MOVEMENT_WORKBOOK", ""))
 
 
 @pytest.mark.parametrize(
@@ -52,13 +53,14 @@ def test_official_workbook_contracts_parse_without_a_mapping(source_id, expected
 
     summary = parse_workbook(path.read_bytes(), contract, MappingResolver())
 
-    assert summary.input_row_count == contract.expected_sample_rows
-    assert summary.valid_row_count == contract.expected_sample_rows
+    expected_rows = contract.expected_sample_rows if contract.expected_sample_rows is not None else summary.input_row_count
+    assert summary.input_row_count == expected_rows
+    assert summary.valid_row_count == expected_rows
     assert summary.invalid_row_count == 0
     assert summary.exact_duplicate_count == expected_duplicates
     assert len(summary.per_date_counts) == expected_dates
     assert summary.mapped_row_count == 0
-    assert summary.unmapped_row_count == contract.expected_sample_rows
+    assert summary.unmapped_row_count == expected_rows
     assert summary.can_publish is False
 
 
@@ -164,10 +166,11 @@ def test_five_source_previews_use_exact_shared_mapping_only(
 
     summary = parse_workbook(path.read_bytes(), contract, doomsday_resolver)
 
-    assert summary.input_row_count == contract.expected_sample_rows
-    assert summary.valid_row_count == contract.expected_sample_rows
+    expected_rows = contract.expected_sample_rows if contract.expected_sample_rows is not None else summary.input_row_count
+    assert summary.input_row_count == expected_rows
+    assert summary.valid_row_count == expected_rows
     assert summary.invalid_row_count == 0
-    assert summary.mapped_row_count + summary.unmapped_row_count == contract.expected_sample_rows
+    assert summary.mapped_row_count + summary.unmapped_row_count == expected_rows
     assert summary.can_publish is True
     if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
         # Unique names resolve immediately; ambiguous and absent names remain
@@ -250,6 +253,80 @@ def test_review_registry_hashes_match_versioned_python_contracts():
         entry = entries[source_id]
         assert entry["source"]["sourceState"] == "PENDING"
         assert entry["contract"]["state"] == "DISCOVERED"
+        if source_id == "no_movement":
+            # This checked-in manifest is a historical v1 review snapshot. The
+            # JMS workbook is a new v2 contract and must not rewrite that record.
+            assert entry["contract"]["version"] == 1
+            assert entry["contract"]["sha256"] == "52ecb4852bdd89e1df7a7e2f458ef7a3eeadd0e772eb4de08ba857b201f5ef22"
+            continue
         assert entry["contract"]["sha256"] == contract_sha256(contract).hex()
         assert [column["sourceHeader"] for column in entry["contract"]["columns"]] == list(contract.headers)
         assert all(not column["aliases"] for column in entry["contract"]["columns"])
+
+
+def test_jms_no_movement_contract_is_a_new_snapshot_v2():
+    contract = CONTRACTS["no_movement"]
+    assert contract.version == 2
+    assert contract.workbook_name == "painel_sem_movimentacao.xlsx"
+    assert contract.sheet_name == "Dados"
+    assert contract.history_policy == "SNAPSHOT_REPLACE_ALL"
+    assert len(contract.columns) == 18
+    assert contract.expected_sample_rows is None
+
+
+def test_latest_jms_reference_workbook_reconciles_snapshot_metrics():
+    if not NO_MOVEMENT_REFERENCE_WORKBOOK.is_file():
+        pytest.skip("Set DATA_FOUNDATION_NO_MOVEMENT_WORKBOOK to the supplied JMS workbook")
+    imported: list[ValidImportRow] = []
+    summary = parse_workbook(
+        NO_MOVEMENT_REFERENCE_WORKBOOK.read_bytes(),
+        CONTRACTS["no_movement"],
+        MappingResolver(map_version_id=b"0123456789abcdef"),
+        on_valid_row=imported.append,
+    )
+
+    assert summary.input_row_count == summary.valid_row_count == 162
+    assert summary.invalid_row_count == 0
+    assert summary.duplicate_base_code_count == 9
+    assert summary.exact_duplicate_count == 0
+    assert summary.workbook_validation_errors == []
+    assert summary.can_publish is True
+    assert summary.collection_date is not None
+    assert summary.bot_executed_at is not None
+    assert len(imported) == 162
+    assert len({str(row.values["source_base_code"]) for row in imported}) == 153
+
+    totals = {
+        key: sum(int(row.values[key]) for row in imported)
+        for key in (
+            "stopped_orders", "orders_in_transit", "stopped_over_2_days", "stopped_over_3_days",
+            "stopped_over_4_days", "stopped_over_5_days", "stopped_over_6_days", "stopped_over_7_days",
+            "stopped_over_10_days", "stopped_over_14_days", "stopped_over_30_days",
+        )
+    }
+    assert totals["stopped_orders"] == 13_316
+    assert totals["orders_in_transit"] == 364_350
+    assert sum(totals[key] for key in (
+        "stopped_over_2_days", "stopped_over_3_days", "stopped_over_4_days", "stopped_over_5_days",
+        "stopped_over_6_days", "stopped_over_7_days", "stopped_over_10_days", "stopped_over_14_days",
+        "stopped_over_30_days",
+    )) == 5_991
+    assert totals["stopped_over_14_days"] == 902
+    assert totals["stopped_over_30_days"] == 1_982
+    assert len({str(row.values["reported_region"]) for row in imported}) == 10
+    critical_codes = {
+        str(row.values["source_base_code"])
+        for row in imported
+        if sum(int(row.values[key]) for key in (
+            "stopped_over_2_days", "stopped_over_3_days", "stopped_over_4_days",
+            "stopped_over_5_days", "stopped_over_6_days", "stopped_over_7_days",
+            "stopped_over_10_days", "stopped_over_14_days", "stopped_over_30_days",
+        )) > 0
+    }
+    assert len(critical_codes) == 133
+    aging_keys = (
+        "stopped_over_1_day", "stopped_over_2_days", "stopped_over_3_days", "stopped_over_4_days",
+        "stopped_over_5_days", "stopped_over_6_days", "stopped_over_7_days", "stopped_over_10_days",
+        "stopped_over_14_days", "stopped_over_30_days",
+    )
+    assert all(sum(int(row.values[key]) for key in aging_keys) == int(row.values["stopped_orders"]) for row in imported)

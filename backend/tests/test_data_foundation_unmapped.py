@@ -71,7 +71,7 @@ def _create_query_schema(engine) -> None:
         connection.exec_driver_sql("CREATE TABLE base_mapping_current (current_key TEXT PRIMARY KEY, map_version_id BLOB)")
         connection.exec_driver_sql("CREATE TABLE base_mapping_entries (map_version_id BLOB, base_code TEXT, regional_name TEXT, base_name TEXT, uf_code TEXT, rm_region TEXT, rm_responsible TEXT)")
         connection.exec_driver_sql("CREATE TABLE base_mapping_name_decisions (map_version_id BLOB, source_id TEXT, source_base_name TEXT, resolution_state TEXT, target_base_code TEXT)")
-        connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, version_no INTEGER, published_at TEXT, publication_state TEXT)")
+        connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, contract_version INTEGER NOT NULL DEFAULT 1, version_no INTEGER, period_start TEXT, period_end TEXT, snapshot_as_of TEXT, published_at TEXT, publication_state TEXT)")
         connection.exec_driver_sql("CREATE TABLE source_daily_head (source_id TEXT, data_date DATE, publication_id BLOB, PRIMARY KEY(source_id, data_date))")
         connection.exec_driver_sql("CREATE TABLE source_snapshot_head (source_id TEXT PRIMARY KEY, publication_id BLOB)")
         connection.execute(text("INSERT INTO base_mapping_versions VALUES (:id, 'PUBLISHED')"), {"id": MAP_VERSION_ID})
@@ -160,6 +160,14 @@ def _row_values(source_id: str, row_no: int, *, duplicate_group: bool = False) -
             values["source_base_name"] = f"No match {row_no}"
     elif source_id in {"no_movement", "pdd_collection_failure"}:
         values["source_base_code"] = "MATCHED-001" if row_no == 1 else f"NO-MATCH-{row_no}"
+    if source_id == "no_movement":
+        aging_keys = (
+            "stopped_over_1_day", "stopped_over_2_days", "stopped_over_3_days",
+            "stopped_over_4_days", "stopped_over_5_days", "stopped_over_6_days",
+            "stopped_over_7_days", "stopped_over_10_days", "stopped_over_14_days",
+            "stopped_over_30_days",
+        )
+        values["stopped_orders"] = sum(int(values[key]) for key in aging_keys)
     return values
 
 
@@ -192,46 +200,73 @@ def _xlsx_bytes(contract, rows: list[dict[str, object]]) -> bytes:
         parsed = datetime.combine(value, datetime.min.time()) if isinstance(value, date) and not isinstance(value, datetime) else value
         return str((parsed - datetime(1899, 12, 30)).total_seconds() / 86400)
 
-    all_rows = [dict(zip((column.key for column in contract.columns), contract.headers)), *rows]
-    xml_rows = []
-    for row_no, values in enumerate(all_rows, start=1):
-        cells = []
-        for index, column in enumerate(contract.columns, start=1):
-            value = values.get(column.key)
-            if value is None:
-                continue
-            reference = f"{column_letters(index)}{row_no}"
-            if row_no == 1 or column.kind in {"TEXT", "BASE_CODE"}:
-                cells.append(f'<c r="{reference}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>')
-            elif column.kind in {"DATE", "DATETIME"}:
-                cells.append(f'<c r="{reference}" s="1"><v>{excel_serial(value)}</v></c>')
-            else:
-                numeric = format(value, "f") if isinstance(value, Decimal) else str(value)
-                cells.append(f'<c r="{reference}" t="n"><v>{numeric}</v></c>')
-        xml_rows.append(f'<row r="{row_no}">{"".join(cells)}</row>')
+    def make_sheet_xml(headers: list[str], data_rows: list[dict[str, object]], kinds: list[str], keys: list[str] | None = None) -> str:
+        row_keys = keys or headers
+        xml_rows = []
+        for row_no in range(1, len(data_rows) + 2):
+            values = data_rows[row_no - 2] if row_no > 1 else None
+            cells = []
+            for index, (header, kind) in enumerate(zip(headers, kinds), start=1):
+                value = header if values is None else values.get(row_keys[index - 1])
+                if value is None:
+                    continue
+                reference = f"{column_letters(index)}{row_no}"
+                if row_no == 1 or kind in {"TEXT", "BASE_CODE"}:
+                    cells.append(f'<c r="{reference}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>')
+                elif kind in {"DATE", "DATETIME"}:
+                    cells.append(f'<c r="{reference}" s="1"><v>{excel_serial(value)}</v></c>')
+                else:
+                    numeric = format(value, "f") if isinstance(value, Decimal) else str(value)
+                    cells.append(f'<c r="{reference}" t="n"><v>{numeric}</v></c>')
+            xml_rows.append(f'<row r="{row_no}">{"".join(cells)}</row>')
+        return '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' + f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
 
-    sheet_name = escape(contract.sheet_name, {'"': "&quot;"})
+    if contract.source_id == "no_movement" and contract.version >= 2:
+        execution_headers = ["Id da execução", "Data e horário da execução", "Quantidade de registros recebidos", "Quantidade de páginas consultadas", "Situação da execução", "Erros", "Data da coleta"]
+        execution_row = {
+            "Id da execução": "synthetic-execution",
+            "Data e horário da execução": datetime(2026, 10, 14, 10, 0),
+            "Quantidade de registros recebidos": len(rows),
+            "Quantidade de páginas consultadas": 1 if rows else 0,
+            "Situação da execução": "SUCESSO",
+            "Erros": None,
+            "Data da coleta": date(2026, 10, 14),
+        }
+        dictionary_headers = ["Nome original do campo", "Nome exibido no JMS", "Tradução para português", "Status da identificação"]
+        dictionary_fields = ["scanAgentName", "dutyCode", "dutyName", "total", "halfwayCount", "day1", "day2", "day3", "day4", "day5", "day6", "day7", "day10", "day14", "day30", "operateTime", "dayRate14", "dayRate30"]
+        dictionary_rows = [{header: value for header, value in zip(dictionary_headers, (field, field, field, "Confirmado"))} for field in dictionary_fields]
+        sheets = [
+            ("Dados", list(contract.headers), rows, [column.kind for column in contract.columns], [column.key for column in contract.columns]),
+            ("Execucoes", execution_headers, [execution_row], ["TEXT", "DATETIME", "INTEGER", "INTEGER", "TEXT", "TEXT", "DATE"], None),
+            ("Dicionario", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
+        ]
+    else:
+        sheets = [(contract.sheet_name, list(contract.headers), rows, [column.kind for column in contract.columns], [column.key for column in contract.columns])]
+
     parts = {
         "xl/workbook.xml": (
             '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            f'<sheets><sheet name="{sheet_name}" sheetId="1" r:id="rId1"/></sheets></workbook>'
+            '<sheets>' + "".join(
+                f'<sheet name="{escape(name, {chr(34): "&quot;"})}" sheetId="{index}" r:id="rId{index}"/>'
+                for index, (name, _headers, _rows, _kinds, _keys) in enumerate(sheets, start=1)
+            ) + '</sheets></workbook>'
         ),
         "xl/_rels/workbook.xml.rels": (
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
-            'Target="worksheets/sheet1.xml"/></Relationships>'
+            + "".join(
+                f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
+                for index in range(1, len(sheets) + 1)
+            ) + '</Relationships>'
         ),
         "xl/styles.xml": (
             '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
             '<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd hh:mm:ss"/></numFmts>'
             '<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs></styleSheet>'
         ),
-        "xl/worksheets/sheet1.xml": (
-            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
-        ),
     }
+    for index, (_name, headers, sheet_rows, kinds, keys) in enumerate(sheets, start=1):
+        parts[f"xl/worksheets/sheet{index}.xml"] = make_sheet_xml(headers, sheet_rows, kinds, keys)
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in parts.items():
@@ -286,9 +321,13 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
 
                 connection.execute(text("""
                     INSERT INTO source_publications
-                      (publication_id, source_id, version_no, published_at, publication_state)
-                    VALUES (:publication_id, :source_id, 1, '2026-10-09', 'PUBLISHED')
-                """), {"publication_id": publication_ids[source_id], "source_id": source_id})
+                      (publication_id, source_id, contract_version, version_no, published_at, publication_state)
+                    VALUES (:publication_id, :source_id, :contract_version, 1, '2026-10-09', 'PUBLISHED')
+                """), {
+                    "publication_id": publication_ids[source_id],
+                    "source_id": source_id,
+                    "contract_version": CONTRACTS[source_id].version,
+                })
                 if source_id in repository.DAILY_SOURCES:
                     connection.execute(text("""
                         INSERT INTO source_daily_head (source_id, data_date, publication_id)
@@ -331,6 +370,7 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
             )
             assert publication_result["total"] == 1
             assert publication_result["publications"][0]["visibleRowCount"] == expected_count
+            assert publication_result["publications"][0]["contractVersion"] == CONTRACTS[source_id].version
 
             counts = get_date_counts(engine, source_id=source_id, identity=identity)
             if source_id == "no_movement":
@@ -576,8 +616,8 @@ def test_central_mapping_resolution_uses_unique_official_names_and_keeps_every_f
                 })
             connection.execute(text("""
                 INSERT INTO source_publications
-                  (publication_id, source_id, version_no, published_at, publication_state)
-                VALUES (:publication_id, 'collection_monitoring', 1, '2026-10-05', 'PUBLISHED')
+                  (publication_id, source_id, contract_version, version_no, published_at, publication_state)
+                VALUES (:publication_id, 'collection_monitoring', 1, 1, '2026-10-05', 'PUBLISHED')
             """), {"publication_id": publication_id})
             connection.execute(text("""
                 INSERT INTO source_daily_head (source_id, data_date, publication_id)
@@ -614,8 +654,8 @@ def test_central_mapping_resolution_uses_unique_official_names_and_keeps_every_f
 
             connection.execute(text("""
                 INSERT INTO source_publications
-                  (publication_id, source_id, version_no, published_at, publication_state)
-                VALUES (:publication_id, 'no_movement', 1, '2026-10-05', 'PUBLISHED')
+                  (publication_id, source_id, contract_version, version_no, published_at, publication_state)
+                VALUES (:publication_id, 'no_movement', 2, 1, '2026-10-05', 'PUBLISHED')
             """), {"publication_id": snapshot_id})
             connection.execute(text("""
                 INSERT INTO source_snapshot_head (source_id, publication_id)

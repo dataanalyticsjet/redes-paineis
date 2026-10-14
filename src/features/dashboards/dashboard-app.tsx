@@ -106,8 +106,8 @@ import {
   formatMovementRate,
   initialMovementFilterSelections,
   MOVEMENT_SUMMARY_METRICS,
-  movementFrom2DaysTotal,
   movementSelectionsAfterChange,
+  summarizeMovementSnapshot,
   movementWeightedRate,
   selectMovementSummaryMetric,
 } from "../../lib/movement-summary";
@@ -156,9 +156,14 @@ import {
 import {
   loadCurrentNoMovementSnapshot,
   NO_MOVEMENT_V2_COLUMNS,
-  NoMovementV2LoadError,
   type NoMovementV2Record,
 } from "../../lib/data-foundation/no-movement";
+import {
+  mapNoMovementV2Record,
+  NO_MOVEMENT_SOURCE_HEADERS,
+  selectNoMovementSource,
+  type NoMovementFallbackReason,
+} from "../../lib/data-foundation/no-movement-dashboard";
 import {
   loadPublishedPddCollectionFailure,
   PDD_COLLECTION_FAILURE_V2_COLUMNS,
@@ -579,13 +584,15 @@ interface MovementRecord {
   origin: string;
   quantity: number;
   values: Record<string, unknown>;
+  sourceRegion?: string;
+  mappingResolution?: string;
 }
 
 interface MovementLoadedData {
   format: "summary" | "list";
   parsed: ParsedWorkbook;
   fileName: string;
-  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD";
+  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD" | "DATA_FOUNDATION_V2";
   fileSizeBytes?: number;
   contentType?: string;
   columns: MovementColumns;
@@ -602,6 +609,8 @@ interface MovementLoadedData {
   blankBaseRows: number;
   blankRegionRows: number;
   updatedAt?: string;
+  collectionDate?: string | null;
+  publishedAt?: string | null;
 }
 
 interface SellerReferenceRecord {
@@ -1177,8 +1186,9 @@ function movementValue(row: WorkbookRow, column: string): number {
 
 function formatMovementCell(value: unknown, percentageColumn = false): string {
   if (percentageColumn) {
+    const parsed = typeof value === "number" ? value : value == null || value === "" ? null : Number(String(value));
     return formatMovementRate(
-      typeof value === "number" ? value : null,
+      parsed != null && Number.isFinite(parsed) ? parsed : null,
       dashboardLocale(activeDashboardLanguage()),
     );
   }
@@ -1681,6 +1691,85 @@ function buildMovementLoadedData(
   };
 }
 
+function buildNoMovementV2LoadedData(snapshot: Awaited<ReturnType<typeof loadCurrentNoMovementSnapshot>>): MovementLoadedData {
+  const sourceHeaders = Object.values(NO_MOVEMENT_SOURCE_HEADERS);
+  const records = snapshot.records.map(mapNoMovementV2Record);
+  const rawRows = records.map((record) => record.values);
+  const headersByKey = NO_MOVEMENT_SOURCE_HEADERS;
+  const columns: MovementColumns = {
+    region: headersByKey.reported_region,
+    code: headersByKey.source_base_code,
+    base: headersByKey.source_base_name,
+    totalStopped: headersByKey.stopped_orders,
+    inTransit: headersByKey.orders_in_transit,
+    over1Day: headersByKey.stopped_over_1_day,
+    over2Days: headersByKey.stopped_over_2_days,
+    over3Days: headersByKey.stopped_over_3_days,
+    over4Days: headersByKey.stopped_over_4_days,
+    over5Days: headersByKey.stopped_over_5_days,
+    over6Days: headersByKey.stopped_over_6_days,
+    over7Days: headersByKey.stopped_over_7_days,
+    over10Days: headersByKey.stopped_over_10_days,
+    over14Days: headersByKey.stopped_over_14_days,
+    over30Days: headersByKey.stopped_over_30_days,
+    lastOperation: headersByKey.last_operation_at,
+    rate14Days: headersByKey.stopped_14_plus_days_rate,
+    rate30Days: headersByKey.stopped_30_plus_days_rate,
+    date: "",
+    aging: "",
+    status: "",
+    origin: "",
+    quantity: headersByKey.stopped_orders,
+  };
+  const parsed: ParsedWorkbook = {
+    sheetName: "Dados",
+    headers: sourceHeaders,
+    rows: rawRows,
+    regionColumn: columns.region,
+    baseColumn: columns.base,
+    statusColumns: sourceHeaders.slice(3).filter((header) => header !== columns.lastOperation),
+    metadata: {
+      sheetNames: ["Dados", "Execucoes", "Dicionario"],
+      headerRow: 1,
+      rowCount: records.length,
+      columnCount: sourceHeaders.length,
+      columns: sourceHeaders.map((header, index) => ({
+        key: header,
+        originalHeader: header,
+        normalizedHeader: normalizeHeaderText(header),
+        index,
+        role: "data",
+      })),
+      date1904: false,
+    },
+    warnings: [],
+  };
+  const bases = [...new Set(records.map((record) => record.base))].sort((left, right) => left.localeCompare(right, "pt-BR", { numeric: true }));
+  const regions = [...new Set(records.map((record) => record.region))].sort((left, right) => left.localeCompare(right, "pt-BR", { numeric: true }));
+  return {
+    format: "summary",
+    parsed,
+    fileName: "Snapshot JMS · Data Foundation V2",
+    sourceType: "DATA_FOUNDATION_V2",
+    columns,
+    records,
+    bases,
+    regions,
+    dates: [],
+    agings: ["Todas as faixas"],
+    statuses: ["Resumo JMS"],
+    origins: ["Sem origem"],
+    initialStart: "",
+    initialEnd: "",
+    displayColumns: sourceHeaders,
+    blankBaseRows: records.filter((record) => record.base === "Sem base").length,
+    blankRegionRows: records.filter((record) => record.region === "Sem regional").length,
+    updatedAt: snapshot.updatedAt ?? undefined,
+    collectionDate: snapshot.collectionDate,
+    publishedAt: snapshot.publishedAt,
+  };
+}
+
 function taxaBasesForRegions(data: TaxaLoadedData, regions: Set<string>): string[] {
   return Array.from(
     new Set(data.records.filter((record) => regions.has(record.region)).map((record) => record.base)),
@@ -2129,7 +2218,7 @@ interface EmptyDashboardPanelProps {
   loading: boolean;
   error: string | null;
   canManageUpload: boolean;
-  onDrop: (file: File) => void;
+  onDrop?: (file: File) => void;
   onAddSource?: () => void;
   inputId?: string;
   eyebrow?: string;
@@ -2156,7 +2245,7 @@ function EmptyDashboardPanel({ loading, error, canManageUpload, onDrop, onAddSou
     const file = event.dataTransfer.files?.[0];
     if (file && canManageUpload) {
       if (onAddSource) onAddSource();
-      else onDrop(file);
+      else onDrop?.(file);
     }
   };
 
@@ -2762,6 +2851,7 @@ export function DashboardApp() {
   const [movementDateEnd, setMovementDateEnd] = useState("");
   const [movementSummaryMetric, setMovementSummaryMetric] = useState("totalStopped");
   const [movementLoading, setMovementLoading] = useState(true);
+  const [movementFallbackNotice, setMovementFallbackNotice] = useState<NoMovementFallbackReason | null>(null);
   const [noMovementV2State, setNoMovementV2State] = useState(() => ({
     status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
     records: [] as NoMovementV2Record[],
@@ -2769,6 +2859,8 @@ export function DashboardApp() {
     columnCount: NO_MOVEMENT_V2_COLUMNS.length,
     publicationId: null as string | null,
     updatedAt: null as string | null,
+    collectionDate: null as string | null,
+    publishedAt: null as string | null,
     error: null as string | null,
   }));
   const [movementTableQuery, setMovementTableQuery] = useState("");
@@ -3375,6 +3467,8 @@ export function DashboardApp() {
       setLoading(true);
       setTaxaLoading(true);
       setMovementLoading(true);
+      if (isMatrixAdminViewer) setMovementLoaded(null);
+      if (isMatrixAdminViewer) setMovementFallbackNotice(null);
       setSellerLoading(true);
       setBipagemLoading(true);
       setDamageLoading(true);
@@ -3451,14 +3545,19 @@ export function DashboardApp() {
             // Keep the existing scoped demo fixture when no local taxa source is stored.
           }
           const epop = buildEpopLoadedData(scopeDemoWorkbook(fixtures.epop, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
-          let movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt, responsibility);
-          try {
-            const localSource = (await getMovementSource()).source;
-            if (active && localSource) {
-              movement = buildMovementLoadedData(localSource.parsed, localSource.fileName, localSource.importedAt, responsibility, "MANUAL_UPLOAD", localSource.fileSizeBytes, localSource.contentType);
+          if (!isMatrixAdminViewer) {
+            let movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt, responsibility);
+            try {
+              const localSource = (await getMovementSource()).source;
+              if (active && localSource) {
+                movement = buildMovementLoadedData(localSource.parsed, localSource.fileName, localSource.importedAt, responsibility, "MANUAL_UPLOAD", localSource.fileSizeBytes, localSource.contentType);
+              }
+            } catch {
+              // Keep the scoped demo fixture for profiles outside ADMIN/matrix.
             }
-          } catch {
-            // Keep the scoped demo fixture when no local movement snapshot is published.
+            if (active) applyMovementLoadedData(movement);
+          } else {
+            setMovementLoaded(null);
           }
           const sellerPerformanceParsed = scopeDemoWorkbook(fixtures.sellerPerformance, viewerIdentity);
           const sellerListParsed = scopeDemoSellerReference(fixtures.sellerList, sellerPerformanceParsed, viewerIdentity, false);
@@ -3491,7 +3590,6 @@ export function DashboardApp() {
           setEpopSelectedBases(new Set(epop.bases));
           setEpopDateStart(epop.dates[0] ?? "");
           setEpopDateEnd(epop.dates.at(-1) ?? "");
-          applyMovementLoadedData(movement);
           applySellerPerformanceLoadedData(sellerPerformance, responsibility);
           applyBipagemLoadedData(bipagem, responsibility);
           applyDamageLoadedData(damage, responsibility);
@@ -3623,22 +3721,26 @@ export function DashboardApp() {
             setEpopDateStart(epop.dates[0] ?? ""); setEpopDateEnd(epop.dates[epop.dates.length - 1] ?? "");
           }
         }
-        try {
-          const movementSource = (await getMovementSource()).source;
-          if (!active) return;
-          if (movementSource) {
-            applyMovementLoadedData(buildMovementLoadedData(
-              movementSource.parsed,
-              movementSource.fileName,
-              movementSource.importedAt,
-              responsibility,
-              "MANUAL_UPLOAD",
-              movementSource.fileSizeBytes,
-              movementSource.contentType,
-            ));
+        if (!isMatrixAdminViewer) {
+          try {
+            const movementSource = (await getMovementSource()).source;
+            if (!active) return;
+            if (movementSource) {
+              applyMovementLoadedData(buildMovementLoadedData(
+                movementSource.parsed,
+                movementSource.fileName,
+                movementSource.importedAt,
+                responsibility,
+                "MANUAL_UPLOAD",
+                movementSource.fileSizeBytes,
+                movementSource.contentType,
+              ));
+            }
+          } catch {
+            // The dashboard remains empty when no shared movement snapshot exists.
           }
-        } catch {
-          // The dashboard remains empty when no shared movement snapshot exists.
+        } else {
+          setMovementLoaded(null);
         }
         const sellerSpecialListResponse = await fetchOptionalWorkbook("sellerSpecialList");
         let sellerReference: SellerReferenceData | null = null;
@@ -3745,7 +3847,7 @@ export function DashboardApp() {
           if (primaryWorkbookLoaded) loadedDashboardDataViewerRef.current = viewerIdentity.username;
           setLoading(false);
           setTaxaLoading(false);
-          setMovementLoading(false);
+          if (!isMatrixAdminViewer) setMovementLoading(false);
           setSellerLoading(false);
         setBipagemLoading(false);
         setDamageLoading(false);
@@ -3966,6 +4068,9 @@ export function DashboardApp() {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void (async () => {
+        setMovementLoading(true);
+        setMovementLoaded(null);
+        setMovementFallbackNotice(null);
         setNoMovementV2State((current) => ({
           ...current,
           status: "loading",
@@ -3973,6 +4078,8 @@ export function DashboardApp() {
           receivedCount: 0,
           publicationId: null,
           updatedAt: null,
+          collectionDate: null,
+          publishedAt: null,
           error: null,
         }));
 
@@ -3980,12 +4087,32 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
-        try {
-          const snapshot = await loadCurrentNoMovementSnapshot(
+        const selection = await selectNoMovementSource(
+          () => loadCurrentNoMovementSnapshot(
             (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
             controller.signal,
-          );
-          if (!active) return;
+          ),
+          async () => {
+            const legacySource = (await getMovementSource()).source;
+            return legacySource
+              ? buildMovementLoadedData(
+                legacySource.parsed,
+                legacySource.fileName,
+                legacySource.importedAt,
+                responsibilityLoaded,
+                "MANUAL_UPLOAD",
+                legacySource.fileSizeBytes,
+                legacySource.contentType,
+              )
+              : null;
+          },
+        );
+        if (!active || controller.signal.aborted) return;
+        setMovementLoading(false);
+        if (selection.source === "V2") {
+          const snapshot = selection.data;
+          setMovementFallbackNotice(null);
+          if (snapshot.rowCount > 0) applyMovementLoadedData(buildNoMovementV2LoadedData(snapshot));
           setNoMovementV2State((current) => ({
             ...current,
             status: snapshot.rowCount === 0 ? "empty" : "ready",
@@ -3994,23 +4121,29 @@ export function DashboardApp() {
             columnCount: snapshot.columnCount,
             publicationId: snapshot.publicationId,
             updatedAt: snapshot.updatedAt,
+            collectionDate: snapshot.collectionDate,
+            publishedAt: snapshot.publishedAt,
             error: null,
           }));
-        } catch (cause) {
-          if (!active || controller.signal.aborted) return;
-          const loadError = cause instanceof NoMovementV2LoadError
-            ? cause
-            : new NoMovementV2LoadError("invalid_data", "Não foi possível preparar o snapshot publicado da Data Foundation V2.");
-          setNoMovementV2State((current) => ({
-            ...current,
-            status: loadError.kind === "empty" ? "empty" : "error",
-            records: [],
-            receivedCount: 0,
-            publicationId: null,
-            updatedAt: null,
-            error: loadError.message,
-          }));
+          return;
         }
+
+        setMovementFallbackNotice(selection.reason);
+        if (selection.legacyUnavailable) {
+          console.warn("[Redes Painéis] Não foi possível carregar a fonte anterior de Sem Movimentação durante a transição V2.");
+        }
+        if (selection.data) applyMovementLoadedData(selection.data);
+        setNoMovementV2State((current) => ({
+          ...current,
+          status: selection.reason === "awaiting_v2" ? "empty" : "error",
+          records: [],
+          receivedCount: 0,
+          publicationId: null,
+          updatedAt: null,
+          collectionDate: null,
+          publishedAt: null,
+          error: selection.v2Error,
+        }));
       })();
     }, 180);
 
@@ -4019,7 +4152,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+  }, [applyMovementLoadedData, dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, responsibilityLoaded, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "bipagem" || isFirstMileUnderReview) return undefined;
@@ -5847,9 +5980,9 @@ export function DashboardApp() {
   const downloadTaxaRmPocExcel = downloadTaxaManagementWorkbook;
   const downloadTaxaTableExcel = downloadTaxaManagementWorkbook;
 
-  const movementFilteredRecords = useMemo(() => {
+  const movementDimensionFilteredRecords = useMemo(() => {
     if (!movementLoaded) return [];
-    return movementFilterOptions.filteredRows.map((record) => movementLoaded.format === "summary" ? selectMovementSummaryMetric(record, movementSummaryMetric) : record).filter(
+    return movementFilterOptions.filteredRows.filter(
       (record) =>
         movementSelectedAgings.has(record.aging) &&
         movementSelectedStatuses.has(record.status) &&
@@ -5857,34 +5990,20 @@ export function DashboardApp() {
         (!record.date || !movementDateStart || record.date >= movementDateStart) &&
         (!record.date || !movementDateEnd || record.date <= movementDateEnd),
     );
-  }, [movementDateEnd, movementDateStart, movementFilterOptions.filteredRows, movementLoaded, movementSummaryMetric, movementSelectedAgings, movementSelectedOrigins, movementSelectedStatuses]);
+  }, [movementDateEnd, movementDateStart, movementFilterOptions.filteredRows, movementLoaded, movementSelectedAgings, movementSelectedOrigins, movementSelectedStatuses]);
+
+  const movementFilteredRecords = useMemo(() => movementLoaded?.format === "summary"
+    ? movementDimensionFilteredRecords.map((record) => selectMovementSummaryMetric(record, movementSummaryMetric))
+    : movementDimensionFilteredRecords,
+  [movementDimensionFilteredRecords, movementLoaded?.format, movementSummaryMetric]);
 
   const movementSummary = useMemo(() => {
-    const totalStopped = movementFilteredRecords.reduce((sum, record) => sum + record.totalStopped, 0);
-    const inTransit = movementFilteredRecords.reduce((sum, record) => sum + record.inTransit, 0);
-    const over2Days = movementFilteredRecords.reduce((sum, record) => sum + movementFrom2DaysTotal(record), 0);
-    const over14Days = movementFilteredRecords.reduce((sum, record) => sum + record.over14Days, 0);
-    const over30Days = movementFilteredRecords.reduce((sum, record) => sum + record.over30Days, 0);
-    const criticalBases = new Set(movementFilteredRecords.filter((record) => movementFrom2DaysTotal(record) > 0).map((record) => record.base)).size;
-    const activeRegions = new Set(movementFilteredRecords.map((record) => record.region)).size;
-    const topRegion = [...movementFilteredRecords.reduce((map, record) => {
-      const current = map.get(record.region) ?? 0;
-      map.set(record.region, current + movementFrom2DaysTotal(record));
-      return map;
-    }, new Map<string, number>()).entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "pt-BR"))[0];
-
+    const summary = summarizeMovementSnapshot(movementDimensionFilteredRecords);
     return {
-      totalStopped,
-      inTransit,
-      over2Days,
-      over14Days,
-      over30Days,
-      criticalBases,
-      activeRegions,
-      over2Rate: safeRate(over2Days, totalStopped),
-      topRegion,
+      ...summary,
+      over2Rate: safeRate(summary.over2Days, summary.totalStopped),
     };
-  }, [movementFilteredRecords]);
+  }, [movementDimensionFilteredRecords]);
 
   const movementAnalysisText = useMemo(() => {
     const regionals = new Map<string, { region: string; volume: number; bases: Map<string, { base: string; rm: string; volume: number }> }>();
@@ -6233,12 +6352,24 @@ export function DashboardApp() {
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
   const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer);
+  const noMovementFallbackMessage = movementFallbackNotice === "awaiting_v2"
+    ? t("Fonte anterior — aguardando atualização dos dados")
+    : movementFallbackNotice === "v2_unavailable"
+      ? t("V2 indisponível — exibindo dados da fonte anterior")
+      : movementFallbackNotice === "v2_invalid"
+        ? t("V2 não validada — exibindo dados da fonte anterior")
+        : null;
+  const noMovementFallbackIndicator = isMatrixAdminViewer && noMovementFallbackMessage ? (
+    <div className="dashboard-source-file-label" role="status" data-testid="no-movement-legacy-fallback">
+      <Database size={14} /> {noMovementFallbackMessage}
+    </div>
+  ) : null;
   const noMovementV2Diagnostic = isMatrixAdminViewer ? (
     <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="no-movement-v2-diagnostic">
       <div className="filters-card-top">
         <div>
           <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
-          <p>{t("Leitura somente do snapshot vigente; estes registros ainda não alimentam os componentes do painel.")}</p>
+          <p>{t("Snapshot JMS vigente conectado aos cards, filtros e tabelas do painel.")}</p>
         </div>
       </div>
       <div
@@ -6254,13 +6385,15 @@ export function DashboardApp() {
               ? t("Snapshot conectado")
             : noMovementV2State.status === "empty"
               ? noMovementV2State.error
-                ? t("Nenhum snapshot vigente")
+                ? t("Publicação V2 compatível ainda não disponível")
                 : t("Snapshot vigente sem registros")
               : t("Erro de conexão")}</span>
         <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || noMovementV2State.status === "empty" ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
         <span><strong>{t("Colunas:")}</strong> {formatNumber(noMovementV2State.columnCount)}</span>
         <span><strong>{t("Publicação:")}</strong> {noMovementV2State.publicationId ?? "—"}</span>
-        <span><strong>{t("Atualizado em:")}</strong> {noMovementV2State.updatedAt ? formatDateTime(noMovementV2State.updatedAt) : "—"}</span>
+        <span><strong>{t("Data da coleta:")}</strong> {noMovementV2State.collectionDate ? formatDate(noMovementV2State.collectionDate) : "—"}</span>
+        <span><strong>{t("Executada em:")}</strong> {noMovementV2State.updatedAt ? formatDateTime(noMovementV2State.updatedAt) : "—"}</span>
+        <span><strong>{t("Publicada em:")}</strong> {noMovementV2State.publishedAt ? formatDateTime(noMovementV2State.publishedAt) : "—"}</span>
         {noMovementV2State.error ? <span>{t(noMovementV2State.error)}</span> : null}
       </div>
     </section>
@@ -7467,7 +7600,30 @@ export function DashboardApp() {
           !movementLoaded ? (
             <>
               {noMovementV2Diagnostic}
-              <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
+              {noMovementFallbackIndicator}
+              {isMatrixAdminViewer ? (
+                <EmptyDashboardPanel
+                  loading={movementLoading || noMovementV2State.status === "idle" || noMovementV2State.status === "loading"}
+                  error={noMovementV2State.error}
+                  canManageUpload={movementFallbackNotice !== null && viewerIdentity.platform_role === "ADMIN"}
+                  eyebrow="SEM MOVIMENTAÇÃO"
+                  title="Sem movimentação"
+                  sourceLabel={movementFallbackNotice ? "FONTE ANTERIOR" : "SNAPSHOT JMS · DATA FOUNDATION V2"}
+                  emptyTitle={noMovementV2State.publicationId && noMovementV2State.status === "empty" ? "Snapshot oficial sem registros" : "Aguardando snapshot oficial"}
+                  emptyDescription={noMovementV2State.publicationId && noMovementV2State.status === "empty"
+                    ? "O snapshot V2 está publicado e validado, mas não contém registros."
+                    : movementFallbackNotice
+                      ? "Nenhuma fonte anterior está disponível para exibição."
+                      : "O painel será disponibilizado quando houver um snapshot JMS publicado e válido."}
+                  loadingDescription="Carregando o snapshot JMS vigente..."
+                  onDrop={() => setDataSourceDialogId("movement")}
+                  onAddSource={() => setDataSourceDialogId("movement")}
+                  inputId="movement-upload"
+                  t={t}
+                />
+              ) : (
+                <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
+              )}
             </>
           ) : (
             <>
@@ -7482,10 +7638,13 @@ export function DashboardApp() {
                   <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(movementRegionOptions.length) })}</span>
                   <span><Database size={16} /> {t("{count} colunas", { count: formatNumber(movementLoaded.displayColumns.length) })}</span>
                   <span><CircleAlert size={16} /> {t("{count} bases críticas", { count: formatNumber(movementSummary.criticalBases) })}</span>
-                  <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) })}</span>
+                  <span><CalendarDays size={16} /> {movementLoaded.sourceType === "DATA_FOUNDATION_V2"
+                    ? t("Data da coleta: {date}", { date: movementLoaded.collectionDate ? formatDate(movementLoaded.collectionDate) : "—" })
+                    : t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) })}</span>
                 </div>
               </section>
               {noMovementV2Diagnostic}
+              {noMovementFallbackIndicator}
               {dashboardActionBand}
 
               {error ? (
@@ -7801,7 +7960,7 @@ export function DashboardApp() {
                                   className={typeof row.values[column] === "number" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
                                   key={column}
                                 >
-                                  {column === movementLoaded.columns.region ? (
+                                  {column === movementLoaded.columns.region && movementLoaded.sourceType !== "DATA_FOUNDATION_V2" ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
                                     formatMovementCell(
@@ -7825,7 +7984,7 @@ export function DashboardApp() {
                                   className={typeof row.values[column] === "number" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
                                   key={column}
                                 >
-                                  {column === movementLoaded.columns.region ? (
+                                  {column === movementLoaded.columns.region && movementLoaded.sourceType !== "DATA_FOUNDATION_V2" ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
                                     formatMovementCell(
@@ -7867,10 +8026,12 @@ export function DashboardApp() {
               </section>
 
               <footer className="dashboard-footer">
-                <span><ShieldCheck size={15} /> {t("Última movimentação publicada disponível para todos pelo link")}</span>
+                <span><ShieldCheck size={15} /> {t(isMatrixAdminViewer ? "Snapshot oficial V2 disponível para ADMIN/matrix" : "Última movimentação publicada disponível para todos pelo link")}</span>
                 <span>{t("Arquivo: {file} · Atualizado em {date}", {
                   file: movementLoaded.fileName,
-                  date: formatDateTime(movementLoaded.updatedAt),
+                  date: movementLoaded.sourceType === "DATA_FOUNDATION_V2" && movementLoaded.updatedAt
+                    ? formatDateTime(movementLoaded.updatedAt)
+                    : movementLoaded.updatedAt ? formatDateTime(movementLoaded.updatedAt) : "—",
                 })}</span>
               </footer>
             </>

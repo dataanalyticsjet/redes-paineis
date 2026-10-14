@@ -47,7 +47,7 @@ function jsonResponse(body: unknown): Response {
 
 function makeFetcher(
   records: NoMovementV2Record[],
-  options: { publicationIds?: string[]; noPublication?: boolean } = {},
+  options: { publicationIds?: string[]; noPublication?: boolean; contractVersion?: number } = {},
 ) {
   const recordRequests: URL[] = [];
   const metadataRequests = { publications: 0, snapshotCounts: 0 };
@@ -64,7 +64,11 @@ function makeFetcher(
         publications: hasPublication ? [{
           publicationId,
           version: 1,
+          contractVersion: options.contractVersion ?? 2,
           publishedAt: "2026-10-06T13:20:00Z",
+          snapshotAsOf: "2026-10-06T13:15:00Z",
+          periodStart: "2026-10-06",
+          periodEnd: "2026-10-06",
           visibleRowCount: records.length,
         }] : [],
         total: hasPublication ? 1 : 0,
@@ -103,7 +107,9 @@ test("usa o contrato oficial de 18 colunas e preserva base, regional, dados sem 
   assert.equal(snapshot.rowCount, 151);
   assert.equal(snapshot.records.length, 151);
   assert.equal(snapshot.publicationId, PUBLICATION_ID);
-  assert.equal(snapshot.updatedAt, "2026-10-06T13:20:00Z");
+  assert.equal(snapshot.publishedAt, "2026-10-06T13:20:00Z");
+  assert.equal(snapshot.updatedAt, "2026-10-06T13:15:00Z");
+  assert.equal(snapshot.collectionDate, "2026-10-06");
   assert.equal(snapshot.records[0].reported_region, "Regional original");
   assert.equal(snapshot.records[0].source_base_code, "000123");
   assert.equal(snapshot.records[0].source_base_name, "Base sem vínculo");
@@ -166,4 +172,39 @@ test("distingue uma fonte sem publicação e propaga cancelamento da consulta", 
   await loadCurrentNoMovementSnapshot(fetcher, controller.signal);
   assert.equal(requestSignals.length, 5);
   assert.equal(requestSignals.every((signal) => signal === controller.signal), true);
+});
+
+test("não interpreta a publicação V1 preservada como snapshot V2", async () => {
+  const { fetcher, recordRequests } = makeFetcher([noMovementRecord(2)], { contractVersion: 1 });
+
+  await assert.rejects(
+    loadCurrentNoMovementSnapshot(fetcher),
+    (error: unknown) => error instanceof NoMovementV2LoadError && error.kind === "incompatible",
+  );
+  assert.equal(recordRequests.length, 0);
+});
+
+test("recusa metadados sem identificação verificável da versão do contrato", async () => {
+  const { fetcher } = makeFetcher([noMovementRecord(2)], { contractVersion: undefined });
+  const missingVersionFetcher = async (path: string, init?: RequestInit) => {
+    const response = await fetcher(path, init);
+    const url = new URL(path, "http://local.test");
+    if (!url.pathname.endsWith("/publications")) return response;
+    const body = await response.json() as { publications: Array<Record<string, unknown>> };
+    delete body.publications[0]?.contractVersion;
+    return jsonResponse(body);
+  };
+
+  await assert.rejects(
+    loadCurrentNoMovementSnapshot(missingVersionFetcher),
+    (error: unknown) => error instanceof NoMovementV2LoadError && error.kind === "incompatible",
+  );
+});
+
+test("um snapshot V2 válido com zero linhas continua sendo a fonte vigente", async () => {
+  const { fetcher } = makeFetcher([]);
+  const snapshot = await loadCurrentNoMovementSnapshot(fetcher);
+
+  assert.equal(snapshot.rowCount, 0);
+  assert.equal(snapshot.publicationId, PUBLICATION_ID);
 });

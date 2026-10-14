@@ -8,6 +8,7 @@ import {
   initialMovementFilterSelections,
   movementFrom2DaysTotal,
   movementSelectionsAfterChange,
+  summarizeMovementSnapshot,
   movementWeightedRate,
   selectMovementSummaryMetric,
 } from "../src/lib/movement-summary.ts";
@@ -71,4 +72,21 @@ test("missing official responsibility does not invent RM or RM area", () => {
   assert.equal(responsibility.rm, "Sem RM");
   assert.equal(responsibility.rgm, "Sem RGM");
   assert.equal(rmAreaForBase(null, "UNKNOWN BASE"), "Sem região do RM");
+});
+
+test("JMS snapshot cards use the source totals and count critical base codes once", () => {
+  const summary = summarizeMovementSnapshot([
+    { region: "SR", sourceRegion: "RS", code: "DUP-001", totalStopped: 10, inTransit: 100, over2Days: 2, over3Days: 1, over4Days: 0, over5Days: 0, over6Days: 0, over7Days: 0, over10Days: 0, over14Days: 3, over30Days: 4 },
+    { region: "SR", sourceRegion: "SC", code: "DUP-001", totalStopped: 20, inTransit: 200, over2Days: 1, over3Days: 0, over4Days: 0, over5Days: 0, over6Days: 0, over7Days: 0, over10Days: 0, over14Days: 2, over30Days: 1 },
+    { region: "Sem regional", sourceRegion: "PR", code: "—", totalStopped: 5, inTransit: 50, over2Days: 0, over3Days: 0, over4Days: 0, over5Days: 0, over6Days: 0, over7Days: 0, over10Days: 0, over14Days: 0, over30Days: 0 },
+  ]);
+
+  assert.equal(summary.totalStopped, 35);
+  assert.equal(summary.inTransit, 350);
+  assert.equal(summary.over2Days, 14);
+  assert.equal(summary.over14Days, 5);
+  assert.equal(summary.over30Days, 5);
+  assert.equal(summary.criticalBases, 1);
+  assert.equal(summary.activeRegions, 3);
+  assert.deepEqual(summary.topRegion, ["SR", 30]);
 });
