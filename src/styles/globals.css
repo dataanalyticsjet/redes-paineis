@@ -7208,6 +7208,15 @@ tbody tr:hover td {
   row-gap: 14px;
 }
 
+/* The V2 movement filters use native details popovers that must escape this card. */
+.dashboard-main:not(.dashboard-main-presentation-home) section.filters-card.movement-filters-card:not(.upload-ready-card) {
+  overflow: visible;
+}
+
+.dashboard-main:not(.dashboard-main-presentation-home) .movement-filters-card .multi-select[open] {
+  z-index: 110;
+}
+
 .dashboard-main:not(.dashboard-main-presentation-home) .filter-field,
 .dashboard-main:not(.dashboard-main-presentation-home) .multi-select {
   min-width: 0;

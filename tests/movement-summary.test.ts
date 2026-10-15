@@ -46,6 +46,22 @@ test("movement filters initialize ALL and retain dependent options after manual 
   assert.equal(reset.regions.size, 2);
 });
 
+test("selecting the official SPE region filters the snapshot and default selection restores all rows", () => {
+  const regionalRows = [
+    { ...rows[0], region: "SPE", rmArea: "SPE-CAP", base: "SPE-CAP-01" },
+    { ...rows[1], region: "SPS", rmArea: "SPS-CAP", base: "SPS-CAP-01" },
+  ];
+  const all = initialMovementFilterSelections(regionalRows);
+  const spe = movementSelectionsAfterChange(regionalRows, all, "regions", new Set(["SPE"]));
+  const filtered = deriveMovementFilterOptions(regionalRows, spe);
+
+  assert.deepEqual([...spe.regions], ["SPE"]);
+  assert.deepEqual(filtered.filteredRows.map((row) => row.base), ["SPE-CAP-01"]);
+
+  const reset = initialMovementFilterSelections(regionalRows);
+  assert.equal(deriveMovementFilterOptions(regionalRows, reset).filteredRows.length, 2);
+});
+
 test("movement RM and regional tables preserve canonical responsibility fields", () => {
   assert.deepEqual(aggregateMovementByRegion(rows).map(({ region, orders }) => [region, orders]), [["SR", 30], ["PR", 0]]);
   assert.deepEqual(aggregateMovementByRm(rows).map(({ rmArea, rm, rgm, orders }) => [rmArea, rm, rgm, orders]), [
