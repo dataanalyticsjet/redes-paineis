@@ -104,18 +104,21 @@ test("dashboard availability keeps authorization and connection failures distinc
   );
 });
 
-test("review presentation preserves the five dashboard routes and the source metadata check", async () => {
+test("the PDD dashboard uses V2 while other First Mile routes retain the review presentation", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
   const loader = await readFile(new URL("../src/features/dashboards/dashboard-availability.ts", import.meta.url), "utf8");
 
-  assert.match(source, /isFirstMileUnderReview && view !== "movimentacao" \? \(/);
+  assert.match(source, /isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" \? \(/);
   assert.match(source, /<DashboardUnderDevelopment/);
   assert.match(source, /Os indicadores e as fórmulas deste painel estão em revisão/);
   assert.match(source, /view !== "monitoramento" \|\| isFirstMileUnderReview/);
   assert.match(source, /view !== "taxa" \|\| isFirstMileUnderReview/);
   assert.match(source, /view !== "sellers" \|\| isFirstMileUnderReview/);
   assert.match(source, /if \(view !== "movimentacao"\) return undefined/);
-  assert.match(source, /view !== "bipagem" \|\| isFirstMileUnderReview/);
+  assert.match(source, /if \(view !== "bipagem"\) return undefined/);
+  assert.match(source, /loadPublishedPddCollectionFailure\(/);
+  assert.match(source, /<PddCollectionFailureV2Dashboard/);
+  assert.doesNotMatch(source, /view !== "bipagem" \|\| isFirstMileUnderReview/);
   assert.match(loader, /\/publications\?limit=1&offset=0/);
   assert.doesNotMatch(loader, /\/records|export\.csv/);
 });

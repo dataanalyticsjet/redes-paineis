@@ -1288,6 +1288,10 @@ label[for]:focus-visible {
   min-width: 1480px;
 }
 
+.pdd-v2-detail-table {
+  min-width: 1880px;
+}
+
 .bipagem-summary-table th,
 .bipagem-summary-table td,
 .bipagem-detail-table th,

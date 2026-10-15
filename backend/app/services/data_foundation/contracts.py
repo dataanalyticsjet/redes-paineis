@@ -158,6 +158,24 @@ _PDD_COLLECTION_FAILURE = (
     _c("overall_unscanned_rate", "Taxa geral de falta de bipagem", "DECIMAL"),
 )
 
+_PDD_COLLECTION_FAILURE_V2 = (
+    _c("data_date", "Data considerada", "DATE"),
+    _c("source_region_code", "Código da Regional do PDD Responsável", "BASE_CODE", max_length=64, numeric_code_allowed=True),
+    _c("reported_region", "Nome da Regional do PDD Responsável", "TEXT", max_length=64),
+    _c("source_base_code", "Código da base", "BASE_CODE", max_length=64, numeric_code_allowed=True),
+    _c("source_base_name", "Nome do PDD Responsável", "TEXT", max_length=191),
+    _c("order_origin_code", "Código da origem do pedido", "TEXT", max_length=64),
+    _c("order_origin", "Origem do Pedido", "TEXT", max_length=96),
+    _c("total_orders", "Qtd pedidos a bipar", "INTEGER"),
+    _c("orders_unscanned_at_receipt", "Qtd pedidos não bipados no recebimento da coleta", "INTEGER"),
+    _c("rate_unscanned_at_receipt", "Taxa de pedidos não bipados no recebimento da coleta", "DECIMAL"),
+    _c("orders_unscanned_at_collection", "Qtd pedidos não bipados na coleta", "INTEGER"),
+    _c("collection_failure_rate", "Taxa de falta de bipagem na coleta", "DECIMAL"),
+    _c("packages_missing_dispatch_scan", "Qtd de Pacotes com Falta de Bipe de Envio", "INTEGER"),
+    _c("rate_unscanned_at_dispatch", "Taxa de pedidos não bipados na expedição", "DECIMAL"),
+    _c("overall_unscanned_rate", "Taxa geral de falta de bipagem", "DECIMAL"),
+)
+
 _BASE_MAPPING = (
     _c("regional_name", "Regional", "TEXT", nullable=True, max_length=64),
     _c("uf_code", "UF", "TEXT", nullable=True, max_length=8),
@@ -244,12 +262,42 @@ CONTRACTS: dict[str, SourceContract] = {
     ),
 }
 
+PDD_COLLECTION_FAILURE_V2_CONTRACT = SourceContract(
+    source_id="pdd_collection_failure",
+    display_name="Falha na Coleta PDD",
+    workbook_name="falha_coleta.xlsx",
+    sheet_name="date-named daily sheets",
+    header_row=1,
+    version=2,
+    history_policy="DAILY_REPLACE_DATES",
+    grain_description=(
+        "Uma linha por linha física das abas diárias do Bot 02; cada data importada "
+        "substitui sua partição integral e preserva a aba e a linha de origem."
+    ),
+    columns=_PDD_COLLECTION_FAILURE_V2,
+    expected_sample_rows=None,
+)
 
-def get_contract(source_id: str) -> SourceContract:
-    try:
-        return CONTRACTS[source_id]
-    except KeyError:
-        raise KeyError("data_source_not_supported") from None
+CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
+    (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
+}
+CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CONTRACT
+
+
+def get_contract(source_id: str, version: int | None = None) -> SourceContract:
+    versions = [
+        (contract_version, contract)
+        for (registered_source_id, contract_version), contract in CONTRACT_VERSIONS.items()
+        if registered_source_id == source_id
+    ]
+    if version is not None:
+        contract = CONTRACT_VERSIONS.get((source_id, version))
+        if contract is None:
+            raise KeyError("data_source_contract_version_not_supported")
+        return contract
+    if not versions:
+        raise KeyError("data_source_not_supported")
+    return max(versions, key=lambda item: item[0])[1]
 
 
 def contract_sha256(contract: SourceContract) -> bytes:

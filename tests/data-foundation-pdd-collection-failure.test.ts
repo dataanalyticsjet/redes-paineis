@@ -10,26 +10,32 @@ import {
   type PddCollectionFailureV2Record,
 } from "../src/lib/data-foundation/pdd-collection-failure.ts";
 
-const PUBLICATION_ID = "pdd-failure-publication-v1";
+const PUBLICATION_ID = "pdd-failure-publication-v2";
 
 function pddRecord(sourceRowNo: number, date: string, overrides: Partial<PddCollectionFailureV2Record> = {}): PddCollectionFailureV2Record {
   return {
     data_date: date,
     source_base_code: "000123",
     source_base_name: "Base sem vínculo",
-    source_region_code: "0004",
+    source_region_code: "REG-04",
     reported_region: "Regional original",
-    orders_to_scan: 100,
+    order_origin_code: "WEB",
+    order_origin: "Loja virtual",
+    total_orders: 100,
     orders_unscanned_at_receipt: 10,
     rate_unscanned_at_receipt: "0.1000000000",
-    orders_unscanned_for_delivery: 7,
-    rate_unscanned_for_delivery: "0.0700000000",
+    orders_unscanned_at_collection: 7,
+    collection_failure_rate: "0.0700000000",
+    packages_missing_dispatch_scan: 3,
+    rate_unscanned_at_dispatch: "0.0300000000",
     overall_unscanned_rate: "0.1700000000",
     publication_id: PUBLICATION_ID,
     source_row_no: sourceRowNo,
     resolved_base_code: null,
     mapping_resolution: "UNMAPPED",
     mapped_region: null,
+    source_sheet_name: "05-10-2026",
+    source_sheet_row_no: sourceRowNo,
     ...overrides,
   };
 }
@@ -57,8 +63,10 @@ function makeFetcher(records: PddCollectionFailureV2Record[], options: { publica
         sourceId: PDD_COLLECTION_FAILURE_V2_SOURCE_ID,
         publications: [{
           publicationId: options.publicationIds?.[callIndex] ?? PUBLICATION_ID,
-          version: 1,
+          contractVersion: 2,
+          version: 2,
           publishedAt: "2026-10-06T13:20:00Z",
+          snapshotAsOf: "2026-10-06T12:00:00Z",
           visibleRowCount: records.length,
         }],
         total: 1,
@@ -95,24 +103,27 @@ function makeFetcher(records: PddCollectionFailureV2Record[], options: { publica
   return { fetcher, recordRequests, metadataRequests, requestSignals };
 }
 
-test("preserva o contrato de 11 campos, os códigos e os registros sem mapeamento", async () => {
+test("carrega contrato v2 com 15 campos, códigos e linhas sem mapeamento", async () => {
   const { fetcher } = makeFetcher([pddRecord(2, "2026-10-05")]);
   const published = await loadPublishedPddCollectionFailure({ dateFrom: "2026-10-05", dateTo: "2026-10-05" }, fetcher);
 
   assert.equal(PDD_COLLECTION_FAILURE_V2_SOURCE_ID, "pdd_collection_failure");
-  assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS.length, 11);
-  assert.equal(published.columnCount, 11);
+  assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS.length, 15);
+  assert.equal(published.columnCount, 15);
   assert.equal(published.rowCount, 1);
   assert.equal(published.publicationId, PUBLICATION_ID);
   assert.deepEqual(published.publicationIds, [PUBLICATION_ID]);
-  assert.equal(published.updatedAt, "2026-10-06T13:20:00Z");
+  assert.equal(published.updatedAt, "2026-10-06T12:00:00Z");
+  assert.equal(published.publishedAt, "2026-10-06T13:20:00Z");
   assert.equal(published.records[0].source_base_code, "000123");
-  assert.equal(published.records[0].source_region_code, "0004");
+  assert.equal(published.records[0].source_region_code, "REG-04");
   assert.equal(published.records[0].source_base_name, "Base sem vínculo");
   assert.equal(published.records[0].reported_region, "Regional original");
   assert.equal(published.records[0].mapping_resolution, "UNMAPPED");
   assert.equal(published.records[0].resolved_base_code, null);
   assert.equal(published.records[0].rate_unscanned_at_receipt, "0.1000000000");
+  assert.equal(published.records[0].orders_unscanned_at_collection, 7);
+  assert.equal(published.records[0].source_sheet_name, "05-10-2026");
   assert.equal(published.period.dateFrom, "2026-10-05");
   assert.equal(published.period.dateTo, "2026-10-05");
 });

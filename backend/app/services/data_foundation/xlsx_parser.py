@@ -58,12 +58,15 @@ class ValidImportRow:
     values: dict[str, object]
     resolved_base_code: str | None
     mapping_resolution: str
+    source_sheet_name: str | None = None
+    source_sheet_row_no: int | None = None
 
 
 @dataclass
 class PreviewSummary:
     source_id: str
     file_sha256: str
+    contract_version: int = 1
     input_row_count: int = 0
     valid_row_count: int = 0
     invalid_row_count: int = 0
@@ -82,6 +85,9 @@ class PreviewSummary:
     bot_execution_id: str | None = None
     bot_executed_at: datetime | None = None
     collection_date: date | None = None
+    execution_period_start: date | None = None
+    execution_period_end: date | None = None
+    execution_page_count: int | None = None
     workbook_validation_errors: list[str] = field(default_factory=list)
     error_counts: Counter[str] = field(default_factory=Counter)
     errors: list[dict[str, object]] = field(default_factory=list)
@@ -105,6 +111,7 @@ class PreviewSummary:
     def as_api_dict(self) -> dict[str, object]:
         return {
             "sourceId": self.source_id,
+            "contractVersion": self.contract_version,
             "fileSha256": self.file_sha256,
             "inputRowCount": self.input_row_count,
             "validRowCount": self.valid_row_count,
@@ -124,6 +131,9 @@ class PreviewSummary:
             "botExecutionId": self.bot_execution_id,
             "botExecutedAt": self.bot_executed_at.isoformat(sep=" ") if self.bot_executed_at else None,
             "collectionDate": self.collection_date.isoformat() if self.collection_date else None,
+            "executionPeriodStart": self.execution_period_start.isoformat() if self.execution_period_start else None,
+            "executionPeriodEnd": self.execution_period_end.isoformat() if self.execution_period_end else None,
+            "executionPageCount": self.execution_page_count,
             "errorCounts": dict(sorted(self.error_counts.items())),
             "errors": self.errors,
             "canPublish": self.can_publish,
@@ -203,6 +213,14 @@ def _date_style_ids(archive: zipfile.ZipFile) -> set[int]:
 
 
 def _sheet_path(archive: zipfile.ZipFile, expected_sheet: str) -> str:
+    matches = _sheet_paths(archive)
+    try:
+        return matches[expected_sheet]
+    except KeyError:
+        raise WorkbookValidationError("workbook_sheet_mismatch") from None
+
+
+def _sheet_paths(archive: zipfile.ZipFile) -> dict[str, str]:
     try:
         workbook = ET.fromstring(archive.read("xl/workbook.xml"))
         relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
@@ -214,27 +232,25 @@ def _sheet_path(archive: zipfile.ZipFile, expected_sheet: str) -> str:
         for item in relationships.findall(f"{{{_NS_REL_PKG}}}Relationship")
         if item.attrib.get("Id") and item.attrib.get("Target")
     }
-    matches = [
-        item for item in workbook.findall(f".//{{{_NS_MAIN}}}sheet")
-        if item.attrib.get("name") == expected_sheet
-    ]
-    if len(matches) != 1:
-        raise WorkbookValidationError("workbook_sheet_mismatch")
-    relationship_id = matches[0].attrib.get(f"{{{_NS_REL_DOC}}}id")
-    target = relationship_targets.get(relationship_id or "")
-    if not target:
-        raise WorkbookValidationError("workbook_sheet_unavailable")
-    normalized = PurePosixPath("xl") / PurePosixPath(target)
-    if target.startswith("/"):
-        normalized = PurePosixPath(target.lstrip("/"))
-    path = str(normalized)
-    if path.startswith("../") or not path.startswith("xl/"):
-        raise WorkbookValidationError("workbook_sheet_unavailable")
-    try:
-        archive.getinfo(path)
-    except KeyError:
-        raise WorkbookValidationError("workbook_sheet_unavailable") from None
-    return path
+    paths: dict[str, str] = {}
+    for item in workbook.findall(f".//{{{_NS_MAIN}}}sheet"):
+        name = item.attrib.get("name")
+        relationship_id = item.attrib.get(f"{{{_NS_REL_DOC}}}id")
+        target = relationship_targets.get(relationship_id or "")
+        if not name or not target or name in paths:
+            raise WorkbookValidationError("workbook_sheet_unavailable")
+        normalized = PurePosixPath("xl") / PurePosixPath(target)
+        if target.startswith("/"):
+            normalized = PurePosixPath(target.lstrip("/"))
+        path = str(normalized)
+        if path.startswith("../") or not path.startswith("xl/"):
+            raise WorkbookValidationError("workbook_sheet_unavailable")
+        try:
+            archive.getinfo(path)
+        except KeyError:
+            raise WorkbookValidationError("workbook_sheet_unavailable") from None
+        paths[name] = path
+    return paths
 
 
 def _date_1904(archive: zipfile.ZipFile) -> bool:
@@ -644,6 +660,375 @@ def _resolve_mapping(
     )
 
 
+def _pdd_date_sheet_name(name: str) -> date | None:
+    if not re.fullmatch(r"\d{2}-\d{2}-\d{4}", name):
+        return None
+    try:
+        return datetime.strptime(name, "%d-%m-%Y").date()
+    except ValueError:
+        raise WorkbookValidationError("pdd_daily_sheet_date_invalid") from None
+
+
+def _pdd_header_indexes(
+    header_cells: dict[int, _RawCell],
+    expected_headers: tuple[str, ...],
+    *,
+    error_code: str,
+) -> dict[str, int]:
+    actual = [header_cells.get(index, _RawCell(None)).value for index in range(len(expected_headers))]
+    if any(not isinstance(value, str) for value in actual):
+        raise WorkbookValidationError(error_code)
+    if any(index >= len(expected_headers) and cell.value not in (None, "") for index, cell in header_cells.items()):
+        raise WorkbookValidationError(error_code)
+    if tuple(_normalized_header(value) for value in actual) != tuple(
+        _normalized_header(value) for value in expected_headers
+    ):
+        raise WorkbookValidationError(error_code)
+    return {header: index for index, header in enumerate(expected_headers)}
+
+
+def _pdd_metadata_rows(
+    archive: zipfile.ZipFile,
+    sheet_path: str,
+    shared: list[str],
+    date_styles: set[int],
+) -> tuple[dict[str, int], list[dict[int, _RawCell]]]:
+    rows = iter(_iter_sheet_rows(archive, sheet_path, shared, date_styles))
+    try:
+        header_row_no, header_cells = next(rows)
+    except StopIteration:
+        raise WorkbookValidationError("pdd_metadata_sheet_invalid") from None
+    if header_row_no != 1:
+        raise WorkbookValidationError("pdd_metadata_sheet_invalid")
+    headers = {
+        _metadata_header_key(cell.value): index
+        for index, cell in header_cells.items()
+        if isinstance(cell.value, str)
+    }
+    data_rows = [cells for _row_no, cells in rows if any(cell.value not in (None, "") for cell in cells.values())]
+    return headers, data_rows
+
+
+def _pdd_metadata_integer(cell: _RawCell | None) -> int | None:
+    if cell is None or not isinstance(cell.value, Decimal) or not cell.numeric:
+        return None
+    value = cell.value
+    if not value.is_finite() or value < 0 or value != value.to_integral_value() or value > MAX_UNSIGNED_BIGINT:
+        return None
+    return int(value)
+
+
+def _pdd_metadata_date(cell: _RawCell | None, uses_1904_epoch: bool) -> date | None:
+    if cell is None:
+        return None
+    if isinstance(cell.value, str):
+        try:
+            return date.fromisoformat(cell.value[:10])
+        except ValueError:
+            return None
+    value, error = _cell_as_value(cell, ContractColumn("metadata_date", "Data", "DATE"), uses_1904_epoch)
+    return value if error is None and isinstance(value, date) else None
+
+
+def _validate_pdd_v2_metadata(
+    archive: zipfile.ZipFile,
+    sheet_paths: dict[str, str],
+    shared: list[str],
+    date_styles: set[int],
+    uses_1904_epoch: bool,
+    per_date: dict[date, dict[str, int]],
+    summary: PreviewSummary,
+) -> None:
+    normalized_sheet_names = {_metadata_header_key(name): name for name in sheet_paths}
+    summary_sheet_name = normalized_sheet_names.get("resumodiario")
+    execution_sheet_name = normalized_sheet_names.get("execucao")
+    dictionary_sheet_name = normalized_sheet_names.get("dicionario")
+    if not summary_sheet_name or not execution_sheet_name or not dictionary_sheet_name:
+        summary.add_workbook_error("pdd_required_metadata_sheet_missing")
+        return
+
+    summary_headers, summary_rows = _pdd_metadata_rows(
+        archive, sheet_paths[summary_sheet_name], shared, date_styles
+    )
+    required_summary_headers = {
+        "dataconsiderada": 0,
+        "quantidadederegistros": 1,
+        "qtdpedidosabipar": 2,
+        "qtdpedidosnaobipadosnorecebimentodacoleta": 3,
+        "qtdpedidosnaobipadosnacoleta": 4,
+        "qtddepacotescomfaltadebipedeenvio": 5,
+    }
+    if any(key not in summary_headers for key in required_summary_headers):
+        summary.add_workbook_error("pdd_daily_summary_headers_invalid")
+        return
+
+    expected_dates: dict[date, dict[str, int]] = {}
+    summary_keys = (
+        "rows", "total_orders", "orders_unscanned_at_receipt",
+        "orders_unscanned_at_collection", "packages_missing_dispatch_scan",
+    )
+    header_keys = tuple(required_summary_headers)
+    for cells in summary_rows:
+        data_date = _pdd_metadata_date(cells.get(summary_headers[header_keys[0]]), uses_1904_epoch)
+        values = [
+            _pdd_metadata_integer(cells.get(summary_headers[key]))
+            for key in header_keys[1:]
+        ]
+        if data_date is None or any(value is None for value in values) or data_date in expected_dates:
+            summary.add_workbook_error("pdd_daily_summary_values_invalid")
+            return
+        expected_dates[data_date] = dict(zip(summary_keys, (int(value) for value in values), strict=True))
+    if expected_dates != per_date:
+        summary.add_workbook_error("pdd_daily_summary_reconciliation_mismatch")
+
+    execution_headers, execution_rows = _pdd_metadata_rows(
+        archive, sheet_paths[execution_sheet_name], shared, date_styles
+    )
+    execution_columns = {
+        "last_update": ("ultim aatualizacao".replace(" ", ""), "ultimaatualizacao"),
+        "period_start": ("periodoinicial",),
+        "period_end": ("periodofinal",),
+        "record_count": ("quantidadederegistros",),
+        "page_count": ("quantidadedepaginas",),
+        "status": ("situacaodaexecucao",),
+    }
+    execution_indexes = {
+        key: next((execution_headers[alias] for alias in aliases if alias in execution_headers), None)
+        for key, aliases in execution_columns.items()
+    }
+    if any(index is None for index in execution_indexes.values()) or len(execution_rows) != 1:
+        summary.add_workbook_error("pdd_execution_metadata_invalid")
+        return
+    execution = execution_rows[0]
+    status_cell = execution.get(int(execution_indexes["status"]))
+    status = _metadata_header_key(status_cell.value if status_cell else None)
+    record_count = _pdd_metadata_integer(execution.get(int(execution_indexes["record_count"])))
+    page_count = _pdd_metadata_integer(execution.get(int(execution_indexes["page_count"])))
+    execution_at_cell = execution.get(int(execution_indexes["last_update"]))
+    execution_at_value, execution_at_error = _cell_as_value(
+        execution_at_cell, ContractColumn("executed_at", "Última atualização", "DATETIME"), uses_1904_epoch
+    )
+    period_start_cell = execution.get(int(execution_indexes["period_start"]))
+    period_end_cell = execution.get(int(execution_indexes["period_end"]))
+    period_start = _pdd_metadata_date(period_start_cell, uses_1904_epoch)
+    period_end = _pdd_metadata_date(period_end_cell, uses_1904_epoch)
+    expected_start = min(per_date) if per_date else None
+    expected_end = max(per_date) if per_date else None
+    if (
+        status not in {"sucesso", "success"}
+        or record_count != summary.input_row_count
+        or page_count is None or (record_count and page_count < 1)
+        or execution_at_error or not isinstance(execution_at_value, datetime)
+        or period_start != expected_start or period_end != expected_end
+    ):
+        summary.add_workbook_error("pdd_execution_reconciliation_mismatch")
+        return
+    summary.bot_executed_at = execution_at_value
+    summary.execution_period_start = period_start
+    summary.execution_period_end = period_end
+    summary.execution_page_count = page_count
+
+    dictionary_headers, dictionary_rows = _pdd_metadata_rows(
+        archive, sheet_paths[dictionary_sheet_name], shared, date_styles
+    )
+    if not {"campooriginaldaapi", "traducaoutilizada", "statusdaidentificacao"}.issubset(dictionary_headers):
+        summary.add_workbook_error("pdd_dictionary_headers_invalid")
+        return
+    dictionary_fields_index = dictionary_headers["campooriginaldaapi"]
+    dictionary_translations_index = dictionary_headers["traducaoutilizada"]
+    dictionary_status_index = dictionary_headers["statusdaidentificacao"]
+    expected_dictionary = {
+        "createtime": "dataconsiderada",
+        "agentcode": "codigodaregionaldopddresponsavel",
+        "agentname": "nomedaregionaldopddresponsavel",
+        "networkcode": "codigodabase",
+        "networkname": "nomedopddresponsavel",
+        "ordersourcecode": "codigodaorigemdopedido",
+        "ordersourcename": "origemdopedido",
+        "totalnum": "qtdpedidosabipar",
+        "warehousenum": "qtdpedidosnaobipadosnorecebimentodacoleta",
+        "warehouseratio": "taxadepedidosnaobipadosnorecebimentodacoleta",
+        "takingnum": "qtdpedidosnaobipadosnacoleta",
+        "takingratio": "taxadefaltadebipagemnacoleta",
+        "sendnum": "qtddepacotescomfaltadebipedeenvio",
+        "sendratio": "taxadepedidosnaobipadosnaexpedicao",
+        "totalratio": "taxageraldefaltadebipagem",
+    }
+    dictionary_mapping: dict[str, str] = {}
+    dictionary_confirmed = True
+    for cells in dictionary_rows:
+        source_cell = cells.get(dictionary_fields_index)
+        translated_cell = cells.get(dictionary_translations_index)
+        status_cell = cells.get(dictionary_status_index)
+        source = _metadata_header_key(source_cell.value if source_cell else None)
+        translated = _metadata_header_key(translated_cell.value if translated_cell else None)
+        status = _metadata_header_key(status_cell.value if status_cell else None)
+        if source == "daykey":
+            continue
+        if not source or not translated or source in dictionary_mapping:
+            summary.add_workbook_error("pdd_dictionary_mapping_invalid")
+            return
+        dictionary_mapping[source] = translated
+        dictionary_confirmed = dictionary_confirmed and "confirmad" in status
+    if dictionary_mapping != expected_dictionary or not dictionary_confirmed:
+        summary.add_workbook_error("pdd_dictionary_identification_unconfirmed")
+
+
+def _parse_pdd_v2_workbook(
+    content: bytes,
+    contract: SourceContract,
+    mapping: MappingResolver,
+    summary: PreviewSummary,
+    on_valid_row: Callable[[ValidImportRow], None] | None,
+) -> PreviewSummary:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+    except (zipfile.BadZipFile, OSError):
+        raise WorkbookValidationError("workbook_file_invalid") from None
+    with archive:
+        if sum(info.file_size for info in archive.infolist()) > MAX_UNCOMPRESSED_WORKBOOK_BYTES:
+            raise WorkbookValidationError("workbook_uncompressed_size_exceeded", 413)
+        if any(info.filename.startswith("/") or ".." in PurePosixPath(info.filename).parts for info in archive.infolist()):
+            raise WorkbookValidationError("workbook_archive_path_invalid")
+        sheet_paths = _sheet_paths(archive)
+        shared = _shared_strings(archive)
+        date_styles = _date_style_ids(archive)
+        uses_1904_epoch = _date_1904(archive)
+        daily_sheets = [
+            (sheet_name, _pdd_date_sheet_name(sheet_name), sheet_path)
+            for sheet_name, sheet_path in sheet_paths.items()
+            if _pdd_date_sheet_name(sheet_name) is not None
+        ]
+        if not daily_sheets:
+            raise WorkbookValidationError("pdd_daily_sheets_missing")
+        allowed_names = {"resumodiario", "execucao", "dicionario"}
+        if any(_pdd_date_sheet_name(name) is None and _metadata_header_key(name) not in allowed_names for name in sheet_paths):
+            raise WorkbookValidationError("pdd_unrecognized_sheet")
+        dates = [sheet_date for _name, sheet_date, _path in daily_sheets]
+        if len(set(dates)) != len(dates):
+            raise WorkbookValidationError("pdd_daily_sheet_date_duplicate")
+
+        seen_row_hashes: set[bytes] = set()
+        seen_base_codes: set[str] = set()
+        source_row_no = 0
+        per_date: dict[date, dict[str, int]] = {}
+        for sheet_name, sheet_date, sheet_path in daily_sheets:
+            assert sheet_date is not None
+            row_iterator = iter(_iter_sheet_rows(archive, sheet_path, shared, date_styles))
+            try:
+                header_row_no, header_cells = next(row_iterator)
+            except StopIteration:
+                summary.add_workbook_error("pdd_daily_sheet_empty")
+                continue
+            if header_row_no != contract.header_row:
+                summary.add_workbook_error("workbook_header_row_mismatch")
+                continue
+            try:
+                _pdd_header_indexes(header_cells, contract.headers, error_code="workbook_header_mismatch")
+            except WorkbookValidationError as error:
+                summary.add_workbook_error(error.code)
+                continue
+
+            def process_row(sheet_row_no: int, cells: dict[int, _RawCell]) -> None:
+                nonlocal source_row_no
+                source_row_no += 1
+                summary.input_row_count += 1
+                errors: list[tuple[str | None, str]] = []
+                raw_identity = [
+                    None if cells.get(index) is None else cells[index].value
+                    for index in range(len(contract.columns))
+                ]
+                raw_key = json.dumps(
+                    [str(value) if isinstance(value, Decimal) else value for value in raw_identity],
+                    ensure_ascii=False, separators=(",", ":"), default=str,
+                ).encode("utf-8")
+                digest = hashlib.sha256(raw_key).digest()
+                if digest in seen_row_hashes:
+                    summary.exact_duplicate_count += 1
+                else:
+                    seen_row_hashes.add(digest)
+                if not cells or all(cell.value in (None, "") for cell in cells.values()):
+                    errors.append((None, "empty_row"))
+                if any(cell.formula for cell in cells.values()):
+                    errors.append((None, "formula_not_allowed"))
+                if any(cell.invalid for cell in cells.values()):
+                    errors.append((None, "cell_value_invalid"))
+                if any(index >= len(contract.columns) and cell.value not in (None, "") for index, cell in cells.items()):
+                    errors.append((None, "unexpected_column_value"))
+                values: dict[str, object] = {}
+                for index, column in enumerate(contract.columns):
+                    value, error_code = _cell_as_value(cells.get(index), column, uses_1904_epoch)
+                    if error_code:
+                        errors.append((column.key, error_code))
+                    else:
+                        values[column.key] = value
+                for rate_key in (
+                    "rate_unscanned_at_receipt", "collection_failure_rate",
+                    "rate_unscanned_at_dispatch", "overall_unscanned_rate",
+                ):
+                    rate = values.get(rate_key)
+                    if isinstance(rate, Decimal) and not Decimal(0) <= rate <= Decimal(1):
+                        errors.append((rate_key, "rate_out_of_range"))
+                if values.get("data_date") != sheet_date:
+                    errors.append(("data_date", "pdd_row_date_does_not_match_sheet"))
+                source_code = values.get("source_base_code")
+                if source_code is not None:
+                    seen_base_codes.add(str(source_code))
+                if errors:
+                    summary.invalid_row_count += 1
+                    for column_key, error_code in errors:
+                        summary.add_error(sheet_row_no, column_key, error_code)
+                    return
+
+                summary.valid_row_count += 1
+                date_key = sheet_date.isoformat()
+                summary.per_date_counts[date_key] = summary.per_date_counts.get(date_key, 0) + 1
+                aggregate = per_date.setdefault(sheet_date, {
+                    "rows": 0,
+                    "total_orders": 0,
+                    "orders_unscanned_at_receipt": 0,
+                    "orders_unscanned_at_collection": 0,
+                    "packages_missing_dispatch_scan": 0,
+                })
+                aggregate["rows"] += 1
+                for key in (
+                    "total_orders", "orders_unscanned_at_receipt",
+                    "orders_unscanned_at_collection", "packages_missing_dispatch_scan",
+                ):
+                    aggregate[key] += int(values[key])
+                resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping)
+                if resolved_code is not None:
+                    summary.mapped_row_count += 1
+                else:
+                    summary.unmapped_row_count += 1
+                    if resolution == "UNMAPPED":
+                        summary.no_mapping_match_row_count += 1
+                if on_valid_row:
+                    on_valid_row(ValidImportRow(
+                        source_row_no=source_row_no,
+                        values=values,
+                        resolved_base_code=resolved_code,
+                        mapping_resolution=resolution,
+                        source_sheet_name=sheet_name,
+                        source_sheet_row_no=sheet_row_no,
+                    ))
+
+            expected_row_no = contract.header_row + 1
+            for sheet_row_no, cells in row_iterator:
+                while expected_row_no < sheet_row_no:
+                    process_row(expected_row_no, {})
+                    expected_row_no += 1
+                if sheet_row_no < expected_row_no:
+                    raise WorkbookValidationError("workbook_row_order_invalid")
+                process_row(sheet_row_no, cells)
+                expected_row_no = sheet_row_no + 1
+
+        _validate_pdd_v2_metadata(
+            archive, sheet_paths, shared, date_styles, uses_1904_epoch, per_date, summary
+        )
+    return summary
+
+
 def parse_workbook(
     content: bytes,
     contract: SourceContract,
@@ -654,10 +1039,17 @@ def parse_workbook(
     if not content:
         raise WorkbookValidationError("workbook_empty", 400)
     file_hash = hashlib.sha256(content).hexdigest()
-    summary = PreviewSummary(source_id=contract.source_id, file_sha256=file_hash)
+    summary = PreviewSummary(
+        source_id=contract.source_id,
+        file_sha256=file_hash,
+        contract_version=contract.version,
+    )
     mapping = resolver or MappingResolver()
     summary.mapping_version_available = mapping.map_version_id is not None
     summary.map_version_id = mapping.map_version_id
+
+    if contract.source_id == "pdd_collection_failure" and contract.version == 2:
+        return _parse_pdd_v2_workbook(content, contract, mapping, summary, on_valid_row)
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(content))

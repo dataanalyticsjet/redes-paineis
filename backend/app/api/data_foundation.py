@@ -18,7 +18,7 @@ from sqlalchemy import text
 from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_admin
 from app.core.config import get_settings
 from app.db.session import get_data_database_engine
-from app.services.data_foundation.contracts import CONTRACTS, INITIAL_MAPPING_WORKBOOK_SHA256
+from app.services.data_foundation.contracts import CONTRACTS, INITIAL_MAPPING_WORKBOOK_SHA256, get_contract
 from app.services.data_foundation.queries import (
     export_records,
     get_current_mapping_status,
@@ -117,11 +117,12 @@ def _error(error: DataFoundationError | WorkbookValidationError) -> HTTPExceptio
     return HTTPException(status_code=error.status_code, detail=error.code)
 
 
-def _source_contract(source_id: str):
+def _source_contract(source_id: str, contract_version: int | None = None):
     try:
-        return CONTRACTS[source_id]
+        return get_contract(source_id, contract_version)
     except KeyError:
-        raise HTTPException(status_code=404, detail="data_source_not_found") from None
+        detail = "data_source_contract_version_not_supported" if contract_version is not None else "data_source_not_found"
+        raise HTTPException(status_code=404, detail=detail) from None
 
 
 def _as_csv_value(value: object) -> str:
@@ -173,11 +174,12 @@ def current_base_mapping(
 @router.get("/data-sources/{source_id}/contract")
 def get_source_contract(
     source_id: str,
+    contract_version: int | None = Query(default=None, ge=1, le=65535),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
     _require_matrix_admin(viewer)
     _require_metadata_feature()
-    contract = _source_contract(source_id)
+    contract = _source_contract(source_id, contract_version)
     try:
         with _engine().connect() as connection:
             registered = connection.execute(text("""
@@ -215,13 +217,14 @@ def get_source_contract(
 async def preview_import(
     request: Request,
     source_id: str = Form(..., min_length=1, max_length=64),
+    contract_version: int | None = Form(default=None, ge=1, le=65535),
     file: UploadFile = File(...),
     admin: AuthenticatedViewer = Depends(require_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
     _require_matrix_admin(admin)
     _same_origin(request)
-    contract = _source_contract(source_id)
+    contract = _source_contract(source_id, contract_version)
     if source_id == "base_mapping_official":
         raise HTTPException(status_code=422, detail="use_base_mapping_migration_endpoint")
     file_name = _safe_upload_name(file.filename)
@@ -476,6 +479,7 @@ def import_status(
 @router.get("/data-sources/{source_id}/dates")
 def data_source_dates(
     source_id: str,
+    contract_version: int | None = Query(default=None, ge=1, le=65535),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     base_code: str | None = Query(default=None, max_length=64),
@@ -489,7 +493,7 @@ def data_source_dates(
         return get_date_counts(
             _engine(), source_id=source_id, identity=viewer.identity,
             date_from=date_from, date_to=date_to, base_code=base_code, region=region,
-            publication_id=publication_id,
+            publication_id=publication_id, contract_version=contract_version,
         )
     except DataFoundationError as error:
         raise _error(error) from None
@@ -500,6 +504,7 @@ def data_source_dates(
 @router.get("/data-sources/{source_id}/publications")
 def data_source_publications(
     source_id: str,
+    contract_version: int | None = Query(default=None, ge=1, le=65535),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=10_000_000),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
@@ -509,7 +514,7 @@ def data_source_publications(
     try:
         return get_publications(
             _engine(), source_id=source_id, identity=viewer.identity,
-            limit=limit, offset=offset,
+            limit=limit, offset=offset, contract_version=contract_version,
         )
     except DataFoundationError as error:
         raise _error(error) from None
@@ -520,6 +525,7 @@ def data_source_publications(
 @router.get("/data-sources/{source_id}/records")
 def data_source_records(
     source_id: str,
+    contract_version: int | None = Query(default=None, ge=1, le=65535),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     base_code: str | None = Query(default=None, max_length=64),
@@ -536,6 +542,7 @@ def data_source_records(
             _engine(), source_id=source_id, identity=viewer.identity,
             limit=limit, offset=offset, date_from=date_from, date_to=date_to,
             base_code=base_code, region=region, publication_id=publication_id,
+            contract_version=contract_version,
         )
     except DataFoundationError as error:
         raise _error(error) from None
@@ -546,6 +553,7 @@ def data_source_records(
 @router.get("/data-sources/{source_id}/export.csv")
 def export_data_source(
     source_id: str,
+    contract_version: int | None = Query(default=None, ge=1, le=65535),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     base_code: str | None = Query(default=None, max_length=64),
@@ -562,6 +570,7 @@ def export_data_source(
             _engine(), source_id=source_id, identity=viewer.identity,
             limit=limit, offset=offset, date_from=date_from, date_to=date_to,
             base_code=base_code, region=region, publication_id=publication_id,
+            contract_version=contract_version,
         )
     except DataFoundationError as error:
         raise _error(error) from None

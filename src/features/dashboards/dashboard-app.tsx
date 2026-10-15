@@ -169,8 +169,21 @@ import {
   loadPublishedPddCollectionFailure,
   PDD_COLLECTION_FAILURE_V2_COLUMNS,
   PddCollectionFailureV2LoadError,
+  type PddCollectionFailureV2Period,
   type PddCollectionFailureV2Record,
 } from "../../lib/data-foundation/pdd-collection-failure";
+import {
+  filterPddCollectionFailureV2Records,
+  isPddCollectionFailureV2SingleOperationalDate,
+  pddCollectionFailureV2Dimensions,
+  pddCollectionFailureV2FilterOptions,
+  summarizePddCollectionFailureV2,
+  summarizePddCollectionFailureV2ByBase,
+  summarizePddCollectionFailureV2ByRegion,
+  summarizePddCollectionFailureV2ByRm,
+  PDD_COLLECTION_FAILURE_V2_FIELDS,
+  type PddCollectionFailureV2Filters,
+} from "../../lib/data-foundation/pdd-collection-failure-dashboard";
 import {
   JT_MONITORING_V2_COLUMNS,
   JT_MONITORING_V2_MAX_PREVIEW_ROWS,
@@ -2506,6 +2519,256 @@ function EmptyChart({ message }: { message: string }) {
   );
 }
 
+interface PddCollectionFailureV2DashboardProps {
+  status: "idle" | "loading" | "ready" | "empty" | "error";
+  records: PddCollectionFailureV2Record[];
+  period: PddCollectionFailureV2Period;
+  receivedCount: number;
+  error: string | null;
+  publicationId: string | null;
+  publicationIds: string[];
+  updatedAt: string | null;
+  publishedAt: string | null;
+  onPeriodChange: (period: PddCollectionFailureV2Period) => void;
+  t: DashboardTranslator;
+}
+
+const PDD_FAILURE_DETAIL_PAGE_SIZE = 25;
+const PDD_FAILURE_QUANTITY_FIELDS = new Set([
+  "total_orders",
+  "orders_unscanned_at_receipt",
+  "orders_unscanned_at_collection",
+  "packages_missing_dispatch_scan",
+]);
+const PDD_FAILURE_RATE_FIELDS = new Set([
+  "rate_unscanned_at_receipt",
+  "collection_failure_rate",
+  "rate_unscanned_at_dispatch",
+  "overall_unscanned_rate",
+]);
+
+function PddCollectionFailureV2Dashboard({
+  status,
+  records,
+  period,
+  receivedCount,
+  error,
+  publicationId,
+  publicationIds,
+  updatedAt,
+  publishedAt,
+  onPeriodChange,
+  t,
+}: PddCollectionFailureV2DashboardProps) {
+  const options = useMemo(() => pddCollectionFailureV2FilterOptions(records), [records]);
+  const [selectedRegions, setSelectedRegions] = useState<Set<string> | null>(null);
+  const [selectedRms, setSelectedRms] = useState<Set<string> | null>(null);
+  const [selectedRgms, setSelectedRgms] = useState<Set<string> | null>(null);
+  const [selectedBases, setSelectedBases] = useState<Set<string> | null>(null);
+  const [selectedOrigins, setSelectedOrigins] = useState<Set<string> | null>(null);
+  const [tableQuery, setTableQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  const currentFilters = useMemo<PddCollectionFailureV2Filters>(() => ({
+    regions: selectedRegions ?? new Set(options.regions),
+    rms: selectedRms ?? new Set(options.rms),
+    rgms: selectedRgms ?? new Set(options.rgms),
+    bases: selectedBases ?? new Set(options.bases),
+    origins: selectedOrigins ?? new Set(options.origins),
+  }), [selectedRegions, selectedRms, selectedRgms, selectedBases, selectedOrigins, options]);
+  const filteredRecords = useMemo(
+    () => filterPddCollectionFailureV2Records(records, currentFilters),
+    [records, currentFilters],
+  );
+  const summary = useMemo(() => summarizePddCollectionFailureV2(filteredRecords), [filteredRecords]);
+  const regionalSummary = useMemo(() => summarizePddCollectionFailureV2ByRegion(filteredRecords), [filteredRecords]);
+  const rmSummary = useMemo(() => summarizePddCollectionFailureV2ByRm(filteredRecords), [filteredRecords]);
+  const baseSummary = useMemo(() => summarizePddCollectionFailureV2ByBase(filteredRecords), [filteredRecords]);
+  const searchedRecords = useMemo(() => {
+    const query = normalizeSearchText(tableQuery.trim());
+    if (!query) return filteredRecords;
+    return filteredRecords.filter((record) => {
+      const dimensions = pddCollectionFailureV2Dimensions(record);
+      return normalizeSearchText([
+        ...PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => String(record[field] ?? "")),
+        dimensions.region, dimensions.base, dimensions.baseCode, dimensions.rmArea,
+        dimensions.rm, dimensions.rgm, dimensions.origin,
+      ].join(" ")).includes(query);
+    });
+  }, [filteredRecords, tableQuery]);
+  const detailPageCount = Math.max(1, Math.ceil(searchedRecords.length / PDD_FAILURE_DETAIL_PAGE_SIZE));
+  const activeDetailPage = Math.min(page, detailPageCount);
+  const visibleDetailRecords = searchedRecords.slice(
+    (activeDetailPage - 1) * PDD_FAILURE_DETAIL_PAGE_SIZE,
+    activeDetailPage * PDD_FAILURE_DETAIL_PAGE_SIZE,
+  );
+  const hasData = status === "ready" && records.length > 0;
+  const emptyMessage = status === "loading" || status === "idle"
+    ? t("Carregando…")
+    : status === "error"
+      ? t("Não foi possível consultar os dados publicados.")
+      : status === "empty"
+        ? error ? t("Aguardando primeira importação") : t("Sem dados publicados para o período selecionado.")
+        : t("Nenhum resultado encontrado");
+  const selectionIsDefault = (selected: Set<string> | null, values: string[]) =>
+    selected === null || (selected.size === values.length && values.every((value) => selected.has(value)));
+  const filtersAreDefault = selectionIsDefault(selectedRegions, options.regions) &&
+    selectionIsDefault(selectedRms, options.rms) && selectionIsDefault(selectedRgms, options.rgms) &&
+    selectionIsDefault(selectedBases, options.bases) && selectionIsDefault(selectedOrigins, options.origins);
+  const selectedValues = (selected: Set<string> | null, values: string[]) =>
+    selected === null ? new Set(values) : new Set([...selected].filter((value) => values.includes(value)));
+  const formatCell = (record: PddCollectionFailureV2Record, field: (typeof PDD_COLLECTION_FAILURE_V2_FIELDS)[number]) => {
+    const value = record[field];
+    if (value == null || value === "") return "—";
+    if (field === "data_date") return formatDate(String(value).slice(0, 10));
+    if (PDD_FAILURE_QUANTITY_FIELDS.has(field)) return formatNumber(Number(value));
+    if (PDD_FAILURE_RATE_FIELDS.has(field)) return formatRate(Number(value));
+    return String(value);
+  };
+  const formatExportCell = (record: PddCollectionFailureV2Record, field: (typeof PDD_COLLECTION_FAILURE_V2_FIELDS)[number]): ExcelExportValue => {
+    const value = record[field];
+    if (value == null || value === "") return "";
+    if (PDD_FAILURE_QUANTITY_FIELDS.has(field) || PDD_FAILURE_RATE_FIELDS.has(field)) return parseNumeric(value);
+    return String(value);
+  };
+
+  const clearFilters = () => {
+    setSelectedRegions(null);
+    setSelectedRms(null);
+    setSelectedRgms(null);
+    setSelectedBases(null);
+    setSelectedOrigins(null);
+  };
+
+  const downloadWorkbook = async () => {
+    if (!hasData) return;
+    const XLSXModule = await import("xlsx");
+    const workbook = XLSXModule.utils.book_new();
+    const addSheet = (
+      name: string,
+      headers: string[],
+      rows: ExcelExportValue[][],
+      widths: number[],
+      percentageColumns: number[] = [],
+    ) => {
+      const worksheet = XLSXModule.utils.aoa_to_sheet([headers, ...rows]);
+      worksheet["!cols"] = widths.map((wch) => ({ wch }));
+      if (worksheet["!ref"]) worksheet["!autofilter"] = { ref: worksheet["!ref"] };
+      rows.forEach((_, rowIndex) => percentageColumns.forEach((columnIndex) => {
+        const cell = worksheet[XLSXModule.utils.encode_cell({ r: rowIndex + 1, c: columnIndex })];
+        if (cell) cell.z = "0.0%";
+      }));
+      XLSXModule.utils.book_append_sheet(workbook, worksheet, name.slice(0, 31));
+    };
+    const totals = [summary.totalOrders, summary.ordersUnscannedAtReceipt, summary.ordersUnscannedAtCollection, summary.collectionFailureRate];
+    addSheet("Regional", [t("Regional"), "RGM", t("Bases"), t("Total de pedidos"), t("Não bipados no recebimento"), t("Não bipados na coleta"), t("Falha na coleta PDD")], [
+      ...regionalSummary.map((row) => [row.region, row.rgm, row.baseCount, row.totalOrders, row.ordersUnscannedAtReceipt, row.ordersUnscannedAtCollection, row.collectionFailureRate]),
+      [t("Total geral"), "", new Set(filteredRecords.map((record) => {
+        const dimension = pddCollectionFailureV2Dimensions(record);
+        return `${dimension.region}\u0000${dimension.baseCode}\u0000${dimension.base}`;
+      })).size, ...totals],
+    ], [18, 38, 12, 20, 24, 24, 20], [6]);
+    addSheet("RM", [t("Região do RM"), "RM", "RGM", t("Bases"), t("Total de pedidos"), t("Não bipados no recebimento"), t("Não bipados na coleta"), t("Falha na coleta PDD")], [
+      ...rmSummary.map((row) => [row.rmArea, row.rm, row.rgm, row.baseCount, row.totalOrders, row.ordersUnscannedAtReceipt, row.ordersUnscannedAtCollection, row.collectionFailureRate]),
+      [t("Total geral"), "", "", baseSummary.length, ...totals],
+    ], [22, 38, 38, 12, 20, 24, 24, 20], [7]);
+    addSheet("Base", [t("Regional"), t("Base"), t("Código da base"), t("Região do RM"), "RM", "RGM", t("Total de pedidos"), t("Não bipados no recebimento"), t("Não bipados na coleta"), t("Falha na coleta PDD")], [
+      ...baseSummary.map((row) => [row.region, row.base, row.baseCode, row.rmArea, row.rm, row.rgm, row.totalOrders, row.ordersUnscannedAtReceipt, row.ordersUnscannedAtCollection, row.collectionFailureRate]),
+      [t("Total geral"), "", "", "", "", "", ...totals],
+    ], [18, 26, 18, 22, 38, 38, 20, 24, 24, 20], [9]);
+    addSheet("Dados", PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => t(PDD_COLLECTION_FAILURE_V2_HEADERS_BY_FIELD[field])),
+      searchedRecords.map((record) => PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => formatExportCell(record, field))),
+      PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => field.includes("name") || field.includes("origin") ? 32 : 23),
+      PDD_COLLECTION_FAILURE_V2_FIELDS.flatMap((field, index) => PDD_FAILURE_RATE_FIELDS.has(field) ? [index] : []),
+    );
+    XLSXModule.writeFile(workbook, `falha_coleta_pdd_${period.dateFrom}_${period.dateTo}.xlsx`, { compression: true });
+  };
+
+  const statusMessage = status === "error"
+    ? error ?? t("Não foi possível consultar os dados publicados.")
+    : status === "empty"
+      ? error ? t("Aguardando primeira importação") : t("Sem dados publicados para o período selecionado.")
+      : status === "loading" || status === "idle" ? t("Consultando publicação vigente…") : "";
+
+  return (
+    <div data-testid="pdd-collection-failure-v2-dashboard" data-v2-source="pdd_collection_failure" data-v2-status={status} data-v2-period-start={period.dateFrom} data-v2-period-end={period.dateTo} data-v2-record-count={receivedCount} data-v2-column-count={PDD_COLLECTION_FAILURE_V2_COLUMNS.length}>
+      <section className="dashboard-intro">
+        <div>
+          <div className="eyebrow"><CircleAlert size={15} /> {t("QUALIDADE DA COLETA")}</div>
+          <h1>{t("Falha na coleta PDD")}</h1>
+          <p>{t("Acompanhe pedidos a bipar, falhas de bipagem e taxas por regional, base, RM, RGM, origem e período.")}</p>
+        </div>
+        <div className="dataset-meta" aria-label={t("Resumo da fonte oficial Bot 02")}>
+          <span><Layers3 size={16} /> {t("{count} linhas", { count: formatNumber(receivedCount) })}</span>
+          <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(options.regions.length) })}</span>
+          <span><Database size={16} /> {t("{count} bases", { count: formatNumber(options.bases.length) })}</span>
+          <span><CalendarDays size={16} /> {t("Coleta executada em: {date}", { date: updatedAt ? formatDateTime(updatedAt) : "—" })}</span>
+          <span><CalendarDays size={16} /> {t("Publicada em: {date}", { date: publishedAt ? formatDateTime(publishedAt) : "—" })}</span>
+        </div>
+      </section>
+
+      {statusMessage ? <div className={`inline-alert${status === "error" ? " error" : ""}`} role={status === "error" ? "alert" : "status"} aria-live="polite"><CircleAlert size={18} /><span>{statusMessage}</span></div> : null}
+
+      <section className="filters-card bipagem-filters-card" aria-labelledby="pdd-v2-filters-heading">
+        <div className="filters-card-top">
+          <div><h2 id="pdd-v2-filters-heading"><Filter size={18} /> {t("Filtros operacionais")}</h2><p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p></div>
+          <button type="button" className="reset-button" onClick={clearFilters} disabled={filtersAreDefault}><RotateCcw size={15} /> {t("Limpar filtros")}</button>
+        </div>
+        <div className="filter-grid bipagem-filter-grid">
+          <MultiSelect label={t("Regional")} options={options.regions} selected={selectedValues(selectedRegions, options.regions)} onChange={setSelectedRegions} allLabel={t("Todas as regionais")} singular={t("Regional")} plural={t("Regionais")} searchable t={t} />
+          <MultiSelect label="RM" options={options.rms} selected={selectedValues(selectedRms, options.rms)} onChange={setSelectedRms} allLabel={t("Todos os RM")} singular="RM" plural="RM" searchable t={t} />
+          <MultiSelect label="RGM" options={options.rgms} selected={selectedValues(selectedRgms, options.rgms)} onChange={setSelectedRgms} allLabel={t("Todos os RGM")} singular="RGM" plural="RGM" searchable t={t} />
+          <MultiSelect label={t("Base")} options={options.bases} selected={selectedValues(selectedBases, options.bases)} onChange={setSelectedBases} allLabel={t("Todas as bases")} singular={t("Base")} plural={t("Bases")} searchable t={t} />
+          <div className="filter-field"><label className="filter-label" htmlFor="pdd-v2-date-start">{t("Data inicial")}</label><input className="date-input" id="pdd-v2-date-start" type="date" value={period.dateFrom} onChange={(event) => onPeriodChange({ ...period, dateFrom: event.target.value })} /></div>
+          <div className="filter-field"><label className="filter-label" htmlFor="pdd-v2-date-end">{t("Data final")}</label><input className="date-input" id="pdd-v2-date-end" type="date" min={period.dateFrom || undefined} value={period.dateTo} onChange={(event) => onPeriodChange({ ...period, dateTo: event.target.value })} /></div>
+          <MultiSelect label={t("Origem do pedido")} options={options.origins} selected={selectedValues(selectedOrigins, options.origins)} onChange={setSelectedOrigins} allLabel={t("Todas as origens")} singular={t("Origem")} plural={t("Origens")} searchable t={t} />
+        </div>
+        {period.dateFrom && period.dateTo && period.dateFrom > period.dateTo ? <p className="date-error" role="alert">{t("A data inicial deve ser anterior à data final.")}</p> : null}
+      </section>
+
+      <section className="kpi-grid bipagem-kpi-grid" aria-label={t("Indicadores de falta de bipagem")}>
+        <KpiCard icon={<Layers3 size={20} />} label={t("Total de pedidos")} value={hasData ? formatCompact(summary.totalOrders) : "—"} detail={t("Soma de totalNum no período")}/>
+        <KpiCard icon={<CircleAlert size={20} />} label={t("Não bipados no recebimento")} value={hasData ? formatCompact(summary.ordersUnscannedAtReceipt) : "—"} detail={t("Soma de warehouseNum no período")} tone="orange" />
+        <KpiCard icon={<Target size={20} />} label={t("Falha na Coleta PDD")} value={hasData ? formatRate(summary.collectionFailureRate) : "—"} detail={t("Soma de takingNum ÷ soma de totalNum")} tone="soft" />
+      </section>
+
+      <section className="chart-card bipagem-table-card bipagem-regional-card" aria-labelledby="pdd-v2-regional-heading">
+        <div className="card-heading table-card-heading"><div><span className="card-eyebrow">{t("RESUMO REGIONAL")}</span><h2 id="pdd-v2-regional-heading">{t("Falha na coleta PDD por regional")}</h2><p>{t("Total, pedidos sem bipagem e taxa calculada pelas quantidades filtradas.")}</p></div><span className="comparison-period-badge">{formatDate(period.dateFrom, true)} a {formatDate(period.dateTo, true)}</span></div>
+        <div className="dashboard-table-wrap bipagem-table-wrap"><table className="dashboard-data-table bipagem-summary-table"><thead><tr><th>{t("Regional")}</th><th>RGM</th><th>{t("Bases")}</th><th>{t("Total de pedidos")}</th><th>{t("Não bipados no recebimento")}</th><th>{t("Não bipados na coleta")}</th><th>{t("Falha na Coleta PDD")}</th></tr></thead><tbody>{regionalSummary.map((row) => <tr key={row.region}><td><span className="regional-chip">{t(row.region)}</span></td><td>{t(row.rgm)}</td><td>{formatNumber(row.baseCount)}</td><td>{formatNumber(row.totalOrders)}</td><td>{formatNumber(row.ordersUnscannedAtReceipt)}</td><td className="danger-cell">{formatNumber(row.ordersUnscannedAtCollection)}</td><td>{formatRate(row.collectionFailureRate)}</td></tr>)}</tbody><tfoot><tr><th>{t("Total geral")}</th><th>—</th><th>{formatNumber(baseSummary.length)}</th><td>{formatNumber(summary.totalOrders)}</td><td>{formatNumber(summary.ordersUnscannedAtReceipt)}</td><td>{formatNumber(summary.ordersUnscannedAtCollection)}</td><td>{formatRate(summary.collectionFailureRate)}</td></tr></tfoot></table>{!hasData || regionalSummary.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div>
+      </section>
+
+      <section className="chart-card bipagem-table-card bipagem-detail-card" aria-labelledby="pdd-v2-rm-heading"><div className="card-heading table-card-heading"><div><span className="card-eyebrow">RM</span><h2 id="pdd-v2-rm-heading">{t("Falha na coleta PDD por RM")}</h2></div></div><div className="dashboard-table-wrap bipagem-table-wrap"><table className="dashboard-data-table bipagem-summary-table"><thead><tr><th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Bases")}</th><th>{t("Total de pedidos")}</th><th>{t("Não bipados no recebimento")}</th><th>{t("Não bipados na coleta")}</th><th>{t("Falha na Coleta PDD")}</th></tr></thead><tbody>{rmSummary.map((row) => <tr key={`${row.region}-${row.rmArea}-${row.rm}-${row.rgm}`}><td>{t(row.rmArea)}</td><td>{t(row.rm)}</td><td>{t(row.rgm)}</td><td>{formatNumber(row.baseCount)}</td><td>{formatNumber(row.totalOrders)}</td><td>{formatNumber(row.ordersUnscannedAtReceipt)}</td><td>{formatNumber(row.ordersUnscannedAtCollection)}</td><td>{formatRate(row.collectionFailureRate)}</td></tr>)}</tbody><tfoot><tr><th>{t("Total geral")}</th><th>—</th><th>—</th><th>{formatNumber(baseSummary.length)}</th><td>{formatNumber(summary.totalOrders)}</td><td>{formatNumber(summary.ordersUnscannedAtReceipt)}</td><td>{formatNumber(summary.ordersUnscannedAtCollection)}</td><td>{formatRate(summary.collectionFailureRate)}</td></tr></tfoot></table>{!hasData || rmSummary.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div></section>
+
+      <section className="chart-card bipagem-table-card bipagem-detail-card" aria-labelledby="pdd-v2-base-heading"><div className="card-heading table-card-heading"><div><span className="card-eyebrow">{t("BASE")}</span><h2 id="pdd-v2-base-heading">{t("Falha na coleta PDD por base, RM e RGM")}</h2></div></div><div className="dashboard-table-wrap bipagem-table-wrap"><table className="dashboard-data-table bipagem-summary-table"><thead><tr><th>{t("Regional")}</th><th>{t("Base")}</th><th>{t("Código da base")}</th><th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Total de pedidos")}</th><th>{t("Não bipados no recebimento")}</th><th>{t("Não bipados na coleta")}</th><th>{t("Falha na Coleta PDD")}</th></tr></thead><tbody>{baseSummary.map((row) => <tr key={row.key}><td><span className="regional-chip">{t(row.region)}</span></td><td>{row.base}</td><td>{row.baseCode}</td><td>{t(row.rmArea)}</td><td>{t(row.rm)}</td><td>{t(row.rgm)}</td><td>{formatNumber(row.totalOrders)}</td><td>{formatNumber(row.ordersUnscannedAtReceipt)}</td><td>{formatNumber(row.ordersUnscannedAtCollection)}</td><td>{formatRate(row.collectionFailureRate)}</td></tr>)}</tbody></table>{!hasData || baseSummary.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div></section>
+
+      <section className="chart-card bipagem-table-card bipagem-detail-card" aria-labelledby="pdd-v2-data-heading"><div className="card-heading table-card-heading"><div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2 id="pdd-v2-data-heading">{t("Dados por base — 15 colunas oficiais")}</h2><p>{t("Código original, regional informada e valores do Bot 02 são preservados para conferência.")}</p></div><div className="table-tools bipagem-comparison-tools"><button type="button" className="export-button" onClick={() => void downloadWorkbook()} disabled={!hasData}><FileSpreadsheet size={17} /> {t("Baixar Excel — todas as tabelas")}</button><label className="table-search"><Search size={16} /><input value={tableQuery} onChange={(event) => { setTableQuery(event.target.value); setPage(1); }} placeholder={t("Buscar base, regional ou RM")} /></label></div></div>
+        <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table"><thead><tr>{PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => <th key={field}>{t(PDD_COLLECTION_FAILURE_V2_HEADERS_BY_FIELD[field])}</th>)}</tr></thead><tbody>{visibleDetailRecords.map((record) => <tr key={`${record.publication_id}-${record.source_row_no}`}>{PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => <td key={field}>{formatCell(record, field)}</td>)}</tr>)}</tbody></table>{!hasData || searchedRecords.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div>
+        <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(searchedRecords.length) })}</span><button type="button" className="reset-button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={activeDetailPage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(activeDetailPage), total: formatNumber(detailPageCount) })}</span><button type="button" className="reset-button" onClick={() => setPage((current) => Math.min(detailPageCount, current + 1))} disabled={activeDetailPage >= detailPageCount}>{t("Próxima")}</button></div>
+      </section>
+
+      <div className="filter-summary" role="status" aria-live="polite"><span><strong>{t("Fonte oficial:")}</strong> {t("Data Foundation V2 · Bot 02")}</span><span><strong>{t("Registros recebidos:")}</strong> {formatNumber(receivedCount)}</span><span><strong>{t("Colunas do contrato:")}</strong> {formatNumber(PDD_COLLECTION_FAILURE_V2_COLUMNS.length)}</span><span><strong>{t("Período:")}</strong> {period.dateFrom} a {period.dateTo}</span>{publicationId ? <span><strong>{t("Publicação mais recente:")}</strong> {publicationId}</span> : null}{publicationIds.length > 1 ? <span><strong>{t("Publicações nas linhas:")}</strong> {publicationIds.join(", ")}</span> : null}</div>
+    </div>
+  );
+}
+
+const PDD_COLLECTION_FAILURE_V2_HEADERS_BY_FIELD: Record<(typeof PDD_COLLECTION_FAILURE_V2_FIELDS)[number], string> = {
+  data_date: "Data considerada",
+  source_region_code: "Código da Regional do PDD Responsável",
+  reported_region: "Nome da Regional do PDD Responsável",
+  source_base_code: "Código da base",
+  source_base_name: "Nome do PDD Responsável",
+  order_origin_code: "Código da origem do pedido",
+  order_origin: "Origem do Pedido",
+  total_orders: "Qtd pedidos a bipar",
+  orders_unscanned_at_receipt: "Qtd pedidos não bipados no recebimento da coleta",
+  rate_unscanned_at_receipt: "Taxa de pedidos não bipados no recebimento da coleta",
+  orders_unscanned_at_collection: "Qtd pedidos não bipados na coleta",
+  collection_failure_rate: "Taxa de falta de bipagem na coleta",
+  packages_missing_dispatch_scan: "Qtd de Pacotes com Falta de Bipe de Envio",
+  rate_unscanned_at_dispatch: "Taxa de pedidos não bipados na expedição",
+  overall_unscanned_rate: "Taxa geral de falta de bipagem",
+};
+
 function DashboardUnderDevelopment({
   title,
   description,
@@ -2751,6 +3014,7 @@ export function DashboardApp() {
       publicationId: null as string | null,
       publicationIds: [] as string[],
       updatedAt: null as string | null,
+      publishedAt: null as string | null,
       error: null as string | null,
     };
   });
@@ -2803,7 +3067,7 @@ export function DashboardApp() {
   const statusLabel = useCallback((status: string) => monitoringStatusLabel(status, t), [t]);
 
   useEffect(() => {
-    if (!isFirstMileUnderReview || view === "movimentacao" || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
+    if (!isFirstMileUnderReview || view === "movimentacao" || view === "bipagem" || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
 
     const sourceId = DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel];
     if (!sourceId) return undefined;
@@ -2992,6 +3256,7 @@ export function DashboardApp() {
       publicationId: null,
       publicationIds: [],
       updatedAt: null,
+      publishedAt: null,
       error: null,
     }));
     jtMonitoringV2RequestRef.current?.abort();
@@ -3916,7 +4181,7 @@ export function DashboardApp() {
   }, [applyMovementLoadedData, dashboardSourcesReady, isMatrixAdminViewer, view, viewerAuthorization]);
 
   useEffect(() => {
-    if (view !== "bipagem" || isFirstMileUnderReview) return undefined;
+    if (view !== "bipagem") return undefined;
     if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
       return undefined;
     }
@@ -3935,13 +4200,17 @@ export function DashboardApp() {
           publicationId: null,
           publicationIds: [],
           updatedAt: null,
+          publishedAt: null,
           error: null,
         }));
-        if (!dateFrom || !dateTo || dateFrom > dateTo) {
+        const validDateRange = Boolean(dateFrom && dateTo && dateFrom <= dateTo);
+        if (!validDateRange || !isPddCollectionFailureV2SingleOperationalDate({ dateFrom, dateTo })) {
           setPddCollectionFailureV2State((current) => ({
             ...current,
             status: "error",
-            error: "Informe um intervalo de datas válido para consultar os dados.",
+            error: validDateRange
+              ? t("Selecione um único dia operacional. Os indicadores e tabelas não somam dias diferentes.")
+              : t("Informe um intervalo de datas válido para consultar os dados."),
           }));
           return;
         }
@@ -3967,6 +4236,7 @@ export function DashboardApp() {
             publicationId: published.publicationId,
             publicationIds: published.publicationIds,
             updatedAt: published.updatedAt,
+            publishedAt: published.publishedAt,
             error: null,
           }));
         } catch (cause) {
@@ -3982,6 +4252,7 @@ export function DashboardApp() {
             publicationId: null,
             publicationIds: [],
             updatedAt: null,
+            publishedAt: null,
             error: loadError.message,
           }));
         }
@@ -3993,7 +4264,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, view, viewerAuthorization]);
+  }, [dashboardSourcesReady, isMatrixAdminViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, t, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "sellers" || isFirstMileUnderReview) return undefined;
@@ -6112,7 +6383,7 @@ export function DashboardApp() {
   };
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
-  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao";
+  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao" && view !== "bipagem";
   const noMovementHasPublishedRecords = noMovementV2State.status === "ready" && noMovementV2State.receivedCount > 0;
   const noMovementAvailabilityText = noMovementAvailabilityMessage(noMovementV2State.status, noMovementV2State.publicationId);
   const noMovementV2Diagnostic = isMatrixAdminViewer ? (
@@ -6139,85 +6410,7 @@ export function DashboardApp() {
       </div>
     </section>
   ) : null;
-  const pddCollectionFailureV2Diagnostic = isMatrixAdminViewer ? (
-    <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="pdd-collection-failure-v2-diagnostic">
-      <div className="filters-card-top">
-        <div>
-          <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
-          <p>{t("Consulta da fonte oficial por período; os registros V2 ainda não alimentam indicadores, gráficos ou tabelas.")}</p>
-        </div>
-      </div>
-      <div className="filter-grid taxa-filter-grid">
-        <div className="filter-field date-field">
-          <label className="filter-label" htmlFor="pdd-v2-date-start">{t("Data inicial")}</label>
-          <div className="date-input-wrap">
-            <CalendarDays size={16} />
-            <input
-              id="pdd-v2-date-start"
-              type="date"
-              value={pddCollectionFailureV2State.period.dateFrom}
-              onChange={(event) => {
-                const dateFrom = event.target.value;
-                setPddCollectionFailureV2State((current) => ({
-                  ...current,
-                  period: {
-                    dateFrom,
-                    dateTo: !current.period.dateTo || current.period.dateTo < dateFrom ? dateFrom : current.period.dateTo,
-                  },
-                }));
-              }}
-            />
-          </div>
-        </div>
-        <div className="filter-field date-field">
-          <label className="filter-label" htmlFor="pdd-v2-date-end">{t("Data final")}</label>
-          <div className="date-input-wrap">
-            <CalendarDays size={16} />
-            <input
-              id="pdd-v2-date-end"
-              type="date"
-              value={pddCollectionFailureV2State.period.dateTo}
-              min={pddCollectionFailureV2State.period.dateFrom || undefined}
-              onChange={(event) => {
-                const dateTo = event.target.value;
-                setPddCollectionFailureV2State((current) => ({
-                  ...current,
-                  period: {
-                    dateFrom: current.period.dateFrom || dateTo,
-                    dateTo,
-                  },
-                }));
-              }}
-            />
-          </div>
-        </div>
-      </div>
-      <div
-        className={`filter-summary${pddCollectionFailureV2State.status === "error" ? " invalid" : ""}`}
-        role={pddCollectionFailureV2State.status === "error" ? "alert" : "status"}
-        aria-live="polite"
-      >
-        <span><strong>{t("Status V2:")}</strong> {pddCollectionFailureV2State.status === "idle"
-          ? t("Aguardando consulta")
-          : pddCollectionFailureV2State.status === "loading"
-            ? t("Consultando publicação vigente…")
-            : pddCollectionFailureV2State.status === "ready"
-              ? t("Conexão ativa")
-              : pddCollectionFailureV2State.status === "empty"
-                ? pddCollectionFailureV2State.error
-                  ? t("Sem publicação para a consulta")
-                  : t("Conectado, sem registros para o período")
-                : t("Erro de conexão")}</span>
-        <span><strong>{t("Período:")}</strong> {pddCollectionFailureV2State.period.dateFrom || "—"} a {pddCollectionFailureV2State.period.dateTo || "—"}</span>
-        <span><strong>{t("Registros recebidos:")}</strong> {pddCollectionFailureV2State.status === "ready" || pddCollectionFailureV2State.status === "empty" ? formatNumber(pddCollectionFailureV2State.receivedCount) : "—"}</span>
-        <span><strong>{t("Colunas:")}</strong> {formatNumber(pddCollectionFailureV2State.columnCount)}</span>
-        {pddCollectionFailureV2State.publicationIds.length ? <span><strong>{t("Publicações nas linhas:")}</strong> {pddCollectionFailureV2State.publicationIds.join(", ")}</span> : null}
-        {pddCollectionFailureV2State.publicationId ? <span><strong>{t("Publicação mais recente:")}</strong> {pddCollectionFailureV2State.publicationId}</span> : null}
-        {pddCollectionFailureV2State.updatedAt ? <span><strong>{t("Atualizado em:")}</strong> {formatDateTime(pddCollectionFailureV2State.updatedAt)}</span> : null}
-        {pddCollectionFailureV2State.error ? <span>{t(pddCollectionFailureV2State.error)}</span> : null}
-      </div>
-    </section>
-  ) : null;
+  const pddCollectionFailureV2Diagnostic: ReactNode = null;
   const jtMonitoringV2Diagnostic = isMatrixAdminViewer ? (
     <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="jt-monitoring-v2-diagnostic">
       <div className="filters-card-top">
@@ -6360,10 +6553,16 @@ export function DashboardApp() {
       : view === "epop" ? epopLoaded
         : view === "movimentacao" ? movementLoaded
           : view === "sellers" ? sellerPerformanceLoaded
-            : view === "bipagem" ? bipagemLoaded
+            : view === "bipagem" ? null
               : view === "damage" ? damageLoaded
                 : null;
-  const dataSourceSummary: DataSourceSummary | null = view === "sellers" && sellerManualSource ? {
+  const dataSourceSummary: DataSourceSummary | null = view === "bipagem" ? {
+    sourceType: "DATA_FOUNDATION_V2",
+    fileName: "falha_coleta.xlsx",
+    updatedAt: pddCollectionFailureV2State.updatedAt ?? undefined,
+    rowCount: pddCollectionFailureV2State.receivedCount,
+    period: { start: pddCollectionFailureV2State.period.dateFrom, end: pddCollectionFailureV2State.period.dateTo },
+  } : view === "sellers" && sellerManualSource ? {
     sourceType: "MANUAL_UPLOAD",
     fileName: sellerManualSource.fileName,
     fileSizeBytes: sellerManualSource.fileSizeBytes,
@@ -7031,16 +7230,16 @@ export function DashboardApp() {
       /> : null}
 
       <main
-        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
-        data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : undefined}
-        data-v2-source={view === "movimentacao" && isMatrixAdminViewer ? "no_movement" : view === "taxa" && isMatrixAdminViewer ? "collection_rate" : undefined}
-        data-v2-status={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.status : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : undefined}
-        data-v2-period-start={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateFrom : undefined}
-        data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : undefined}
-        data-v2-record-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.receivedCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : undefined}
-        data-v2-column-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.columnCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : undefined}
-        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.updatedAt ?? undefined : undefined}
-        data-v2-error={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : undefined}
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
+        data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : view === "bipagem" ? "pdd-collection-failure-v2-dashboard-shell" : undefined}
+        data-v2-source={view === "movimentacao" && isMatrixAdminViewer ? "no_movement" : view === "taxa" && isMatrixAdminViewer ? "collection_rate" : view === "bipagem" && isMatrixAdminViewer ? "pdd_collection_failure" : undefined}
+        data-v2-status={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.status : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.status : undefined}
+        data-v2-period-start={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateFrom : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.period.dateFrom : undefined}
+        data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.period.dateTo : undefined}
+        data-v2-record-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.receivedCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.receivedCount : undefined}
+        data-v2-column-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.columnCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.columnCount : undefined}
+        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.updatedAt ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.updatedAt ?? undefined : undefined}
+        data-v2-error={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.error ?? undefined : undefined}
       >
         {view === "home" ? (
           showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
@@ -7053,7 +7252,7 @@ export function DashboardApp() {
             t={t}
             canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
           /> : null
-        ) : isFirstMileUnderReview && view !== "movimentacao" ? (
+        ) : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" ? (
           <DashboardUnderDevelopment
             title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
             description={dashboardCards.find((card) => card.id === view)?.description ?? ""}
@@ -7109,6 +7308,27 @@ export function DashboardApp() {
             </>
           )
         ) : view === "bipagem" ? (
+          !isMatrixAdminViewer ? (
+            <section className="dashboard-source-availability unavailable" role="alert" data-testid="pdd-v2-restricted">
+              <div className="dashboard-intro"><div><div className="eyebrow"><CircleAlert size={15} /> {t("QUALIDADE DA COLETA")}</div><h1>{t("Falha na coleta PDD")}</h1></div></div>
+              <p>{t("A consulta deste dashboard exige perfil ADMIN com escopo matrix.")}</p>
+            </section>
+          ) : (
+            <PddCollectionFailureV2Dashboard
+              status={pddCollectionFailureV2State.status}
+              records={pddCollectionFailureV2State.records}
+              period={pddCollectionFailureV2State.period}
+              receivedCount={pddCollectionFailureV2State.receivedCount}
+              error={pddCollectionFailureV2State.error}
+              publicationId={pddCollectionFailureV2State.publicationId}
+              publicationIds={pddCollectionFailureV2State.publicationIds}
+              updatedAt={pddCollectionFailureV2State.updatedAt}
+              publishedAt={pddCollectionFailureV2State.publishedAt}
+              onPeriodChange={(period) => setPddCollectionFailureV2State((current) => ({ ...current, period }))}
+              t={t}
+            />
+          )
+        ) : String(view) === "bipagem-legacy-disabled" ? (
           !bipagemLoaded ? (
             <>
               {pddCollectionFailureV2Diagnostic}

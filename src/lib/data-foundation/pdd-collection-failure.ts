@@ -6,29 +6,37 @@ export const PDD_COLLECTION_FAILURE_V2_PAGE_SIZE = 250;
 
 export const PDD_COLLECTION_FAILURE_V2_COLUMNS = [
   "data_date",
-  "source_base_code",
-  "source_base_name",
   "source_region_code",
   "reported_region",
-  "orders_to_scan",
+  "source_base_code",
+  "source_base_name",
+  "order_origin_code",
+  "order_origin",
+  "total_orders",
   "orders_unscanned_at_receipt",
   "rate_unscanned_at_receipt",
-  "orders_unscanned_for_delivery",
-  "rate_unscanned_for_delivery",
+  "orders_unscanned_at_collection",
+  "collection_failure_rate",
+  "packages_missing_dispatch_scan",
+  "rate_unscanned_at_dispatch",
   "overall_unscanned_rate",
 ] as const;
 
 export interface PddCollectionFailureV2Record extends Record<string, unknown> {
   data_date: unknown;
-  source_base_code: unknown;
-  source_base_name: unknown;
   source_region_code: unknown;
   reported_region: unknown;
-  orders_to_scan: unknown;
+  source_base_code: unknown;
+  source_base_name: unknown;
+  order_origin_code: unknown;
+  order_origin: unknown;
+  total_orders: unknown;
   orders_unscanned_at_receipt: unknown;
   rate_unscanned_at_receipt: unknown;
-  orders_unscanned_for_delivery: unknown;
-  rate_unscanned_for_delivery: unknown;
+  orders_unscanned_at_collection: unknown;
+  collection_failure_rate: unknown;
+  packages_missing_dispatch_scan: unknown;
+  rate_unscanned_at_dispatch: unknown;
   overall_unscanned_rate: unknown;
   publication_id: unknown;
   source_row_no: unknown;
@@ -38,6 +46,16 @@ export interface PddCollectionFailureV2Record extends Record<string, unknown> {
   mapped_uf?: unknown;
   mapped_rm_area?: unknown;
   mapped_rm?: unknown;
+  source_sheet_name?: unknown;
+  source_sheet_row_no?: unknown;
+  effective_base_name?: unknown;
+  effective_base_code?: unknown;
+  effective_region?: unknown;
+  effective_uf?: unknown;
+  effective_rm_area?: unknown;
+  effective_rm?: unknown;
+  effective_rgm?: unknown;
+  mapping_is_approved?: unknown;
 }
 
 export interface PddCollectionFailureV2Period {
@@ -50,6 +68,7 @@ export interface PublishedPddCollectionFailureData {
   publicationId: string;
   publicationIds: string[];
   updatedAt: string;
+  publishedAt: string;
   period: PddCollectionFailureV2Period;
   records: PddCollectionFailureV2Record[];
   rowCount: number;
@@ -80,8 +99,10 @@ interface DatesResponse {
 
 interface Publication {
   publicationId: string;
+  contractVersion: number;
   version: number;
   publishedAt: string;
+  snapshotAsOf: string | null;
   visibleRowCount: number;
 }
 
@@ -167,7 +188,7 @@ function stableDateSignature(dates: readonly DateCount[]): string {
 
 function latestPublication(response: PublicationsResponse): Publication | null {
   const first = response.publications[0];
-  return first && typeof first.publicationId === "string" ? first : null;
+  return first && first.contractVersion === 2 && typeof first.publicationId === "string" ? first : null;
 }
 
 function rowIdentity(record: PddCollectionFailureV2Record): string {
@@ -196,10 +217,10 @@ export async function loadPublishedPddCollectionFailure(
   }
 
   const base = `/api/v2/data-sources/${PDD_COLLECTION_FAILURE_V2_SOURCE_ID}`;
-  const dateQuery = new URLSearchParams({ date_from: dateFrom, date_to: dateTo }).toString();
+  const dateQuery = new URLSearchParams({ contract_version: "2", date_from: dateFrom, date_to: dateTo }).toString();
   const datesPath = `${base}/dates?${dateQuery}`;
   const [beforePublications, beforeDates] = await Promise.all([
-    requestJson<PublicationsResponse>(`${base}/publications?limit=1&offset=0`, fetcher, signal),
+    requestJson<PublicationsResponse>(`${base}/publications?contract_version=2&limit=1&offset=0`, fetcher, signal),
     requestJson<DatesResponse>(datesPath, fetcher, signal),
   ]);
   if (beforePublications.sourceId !== PDD_COLLECTION_FAILURE_V2_SOURCE_ID || beforeDates.sourceId !== PDD_COLLECTION_FAILURE_V2_SOURCE_ID) {
@@ -224,7 +245,7 @@ export async function loadPublishedPddCollectionFailure(
   const seenRows = new Set<string>();
   for (let offset = 0; offset < expectedCount; offset += PDD_COLLECTION_FAILURE_V2_PAGE_SIZE) {
     const limit = Math.min(PDD_COLLECTION_FAILURE_V2_PAGE_SIZE, expectedCount - offset);
-    const query = new URLSearchParams({ date_from: dateFrom, date_to: dateTo, limit: String(limit), offset: String(offset) });
+    const query = new URLSearchParams({ contract_version: "2", date_from: dateFrom, date_to: dateTo, limit: String(limit), offset: String(offset) });
     // Omitting publication_id makes the API read source_daily_head, the current
     // publication for each selected business date under DAILY_REPLACE_DATES.
     const page = await requestJson<RecordsPage>(`${base}/records?${query}`, fetcher, signal);
@@ -266,7 +287,7 @@ export async function loadPublishedPddCollectionFailure(
   }
 
   const [afterPublications, afterDates] = await Promise.all([
-    requestJson<PublicationsResponse>(`${base}/publications?limit=1&offset=0`, fetcher, signal),
+    requestJson<PublicationsResponse>(`${base}/publications?contract_version=2&limit=1&offset=0`, fetcher, signal),
     requestJson<DatesResponse>(datesPath, fetcher, signal),
   ]);
   if (afterPublications.sourceId !== PDD_COLLECTION_FAILURE_V2_SOURCE_ID || afterDates.sourceId !== PDD_COLLECTION_FAILURE_V2_SOURCE_ID) {
@@ -284,7 +305,8 @@ export async function loadPublishedPddCollectionFailure(
     sourceId: PDD_COLLECTION_FAILURE_V2_SOURCE_ID,
     publicationId: publication.publicationId,
     publicationIds: [...new Set(records.map((record) => String(record.publication_id)))].sort(),
-    updatedAt: publication.publishedAt,
+    updatedAt: publication.snapshotAsOf ?? publication.publishedAt,
+    publishedAt: publication.publishedAt,
     period: { dateFrom, dateTo },
     records: records.map(withPublishedRegionalAssignment),
     rowCount: records.length,

@@ -12,9 +12,11 @@ from sqlalchemy.engine import Connection, RowMapping
 
 from app.services.data_foundation.contracts import (
     CONTRACTS,
+    CONTRACT_VERSIONS,
     INITIAL_MAPPING_WORKBOOK_SHA256,
     SourceContract,
     contract_sha256,
+    get_contract,
 )
 from app.services.data_foundation.mapping_resolution import (
     CODE_RESOLUTION_SOURCES,
@@ -38,6 +40,20 @@ FACT_TABLES = {
     "no_movement": "fact_no_movement_snapshot",
     "pdd_collection_failure": "fact_pdd_collection_failure",
 }
+FACT_TABLES_BY_VERSION: dict[tuple[str, int], str] = {
+    (source_id, contract.version): FACT_TABLES[source_id]
+    for (source_id, _version), contract in CONTRACT_VERSIONS.items()
+    if source_id in FACT_TABLES
+}
+FACT_TABLES_BY_VERSION[("pdd_collection_failure", 2)] = "fact_pdd_collection_failure_v2"
+
+
+def fact_table_for_contract(source_id: str, contract_version: int | None = None) -> str:
+    contract = get_contract(source_id, contract_version)
+    try:
+        return FACT_TABLES_BY_VERSION[(source_id, contract.version)]
+    except KeyError:
+        raise DataFoundationError("data_source_contract_version_not_supported", 404) from None
 DAILY_SOURCES = frozenset({
     "collection_monitoring", "collection_rate", "jt_monitoring", "pdd_collection_failure",
 })
@@ -170,7 +186,7 @@ def get_name_mapping_candidates(
     if hashlib.sha256(content).digest() != bytes(job["file_sha256"]):
         raise DataFoundationError("import_source_hash_mismatch", 409)
     counts: Counter[str] = Counter()
-    contract = CONTRACTS[source_id]
+    contract = get_contract(source_id, int(job["contract_version"]))
 
     def count_source_name(row: ValidImportRow) -> None:
         source_name = row.values.get("source_base_name")
@@ -435,7 +451,7 @@ def create_preview_job(
     summary: PreviewSummary,
     request_id: str | None,
 ) -> str:
-    contract = CONTRACTS[source_id]
+    contract = get_contract(source_id, summary.contract_version)
     job_id = uuid.uuid4()
     status = "VALIDATED" if summary.can_publish else "INVALID"
     with connection.begin():
@@ -522,11 +538,12 @@ def _validate_contract_for_publication(connection: Connection, job: RowMapping) 
         raise DataFoundationError("data_source_not_active", 409)
     if row["contract_state"] != "APPROVED":
         raise DataFoundationError("source_contract_not_approved", 409)
-    if row["contract_sha256"] is None or bytes(row["contract_sha256"]) != contract_sha256(CONTRACTS[str(job["source_id"])]):
+    contract = get_contract(str(job["source_id"]), int(job["contract_version"]))
+    if row["contract_sha256"] is None or bytes(row["contract_sha256"]) != contract_sha256(contract):
         raise DataFoundationError("source_contract_definition_mismatch", 409)
     if row["history_policy"] not in {"DAILY_REPLACE_DATES", "SNAPSHOT_REPLACE_ALL"}:
         raise DataFoundationError("source_history_policy_not_approved", 409)
-    expected_policy = CONTRACTS[str(job["source_id"])].history_policy
+    expected_policy = contract.history_policy
     if row["history_policy"] != expected_policy or row["registry_history_policy"] != expected_policy:
         raise DataFoundationError("source_history_policy_mismatch", 409)
     return dict(row)
@@ -553,6 +570,11 @@ def _fact_row(
         "mapping_resolution": mapping_resolution,
     }
     values.update(row.values)
+    if source_id == "pdd_collection_failure" and contract.version == 2:
+        if row.source_sheet_name is None or row.source_sheet_row_no is None:
+            raise DataFoundationError("import_source_lineage_missing", 409)
+        values["source_sheet_name"] = row.source_sheet_name
+        values["source_sheet_row_no"] = row.source_sheet_row_no
     return values
 
 
@@ -585,11 +607,13 @@ def _insert_fact_batches(
     file_content: bytes,
     resolver: MappingResolver,
 ) -> None:
-    table = FACT_TABLES[source_id]
+    table = fact_table_for_contract(source_id, contract.version)
     fact_columns = [
         "source_id", "publication_id", "map_version_id", "source_row_no",
         *(column.key for column in contract.columns), "resolved_base_code", "mapping_resolution",
     ]
+    if source_id == "pdd_collection_failure" and contract.version == 2:
+        fact_columns[4:4] = ["source_sheet_name", "source_sheet_row_no"]
     column_sql = ", ".join(f"`{column}`" for column in fact_columns)
     value_sql = ", ".join(f":{column}" for column in fact_columns)
     statement = text(f"INSERT INTO `{table}` ({column_sql}) VALUES ({value_sql})")
@@ -704,8 +728,9 @@ def publish_import_job(
         if job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
             raise DataFoundationError("import_job_not_validated", 409)
         source_id = str(job["source_id"])
-        contract = CONTRACTS.get(source_id)
-        if contract is None or int(job["contract_version"]) != contract.version:
+        try:
+            contract = get_contract(source_id, int(job["contract_version"]))
+        except KeyError:
             raise DataFoundationError("source_contract_version_unsupported", 409)
         registry = _validate_contract_for_publication(connection, job)
         map_version_id = bytes(job["validation_map_version_id"] or b"")
@@ -783,6 +808,8 @@ def publish_import_job(
             # time remains published_at and is not a substitute for either.
             period_start = summary.collection_date
             period_end = summary.collection_date
+            snapshot_as_of = summary.bot_executed_at
+        elif source_id == "pdd_collection_failure" and contract.version == 2:
             snapshot_as_of = summary.bot_executed_at
         connection.execute(text("""
             INSERT INTO source_publications
@@ -1114,8 +1141,9 @@ def validate_job_again(
         if job["submitted_by_user_id"] != actor_user_id:
             raise DataFoundationError("import_job_not_found", 404)
         source_id = str(job["source_id"])
-        contract = CONTRACTS.get(source_id)
-        if contract is None or int(job["contract_version"]) != contract.version:
+        try:
+            contract = get_contract(source_id, int(job["contract_version"]))
+        except KeyError:
             raise DataFoundationError("source_contract_version_unsupported", 409)
         resolver = MappingResolver() if source_id == "base_mapping_official" else load_mapping_resolver(
             connection, source_id=source_id

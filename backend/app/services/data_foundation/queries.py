@@ -8,9 +8,9 @@ import uuid
 
 from sqlalchemy import Engine, text
 
-from app.services.data_foundation.contracts import CONTRACTS
+from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS, get_contract
 from app.services.data_foundation.mapping_resolution import build_mapping_query
-from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError
+from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError, fact_table_for_contract
 
 
 @dataclass(frozen=True)
@@ -100,13 +100,23 @@ def _query_plan(
     base_code: str | None = None,
     region: str | None = None,
     publication_id: str | None = None,
+    contract_version: int | None = None,
     sql_dialect: str = "mysql",
 ) -> ScopedQuery:
     _require_matrix_admin_identity(identity)
-    contract = CONTRACTS.get(source_id)
-    table = FACT_TABLES.get(source_id)
-    if contract is None or table is None:
+    selected_version = contract_version
+    if selected_version is None:
+        legacy_contract = CONTRACTS.get(source_id)
+        selected_version = legacy_contract.version if legacy_contract is not None else None
+    try:
+        contract = get_contract(source_id, selected_version)
+        table = fact_table_for_contract(source_id, contract.version)
+    except KeyError:
         raise DataFoundationError("data_source_not_found", 404)
+    except RuntimeError as error:
+        if isinstance(error, DataFoundationError):
+            raise
+        raise DataFoundationError("data_source_contract_version_not_supported", 404) from None
     if source_id == "no_movement" and (date_from or date_to):
         raise DataFoundationError("date_filter_not_supported", 422)
 
@@ -120,8 +130,10 @@ def _query_plan(
             JOIN source_publications AS selected_publication
               ON selected_publication.source_id = fact.source_id
              AND selected_publication.publication_id = fact.publication_id
+             AND selected_publication.contract_version = :contract_version
              AND selected_publication.publication_state = 'PUBLISHED'
         """
+        params["contract_version"] = contract.version
     elif source_id in DAILY_SOURCES:
         head_join = """
             JOIN source_daily_head AS head
@@ -191,6 +203,11 @@ def _query_plan(
         "effective_entry.rm_region AS mapped_rm_area",
         "effective_entry.rm_responsible AS mapped_rm",
     ])
+    if source_id == "pdd_collection_failure" and contract.version == 2:
+        fields.extend([
+            "fact.source_sheet_name AS source_sheet_name",
+            "fact.source_sheet_row_no AS source_sheet_row_no",
+        ])
     return ScopedQuery(
         source_id=source_id,
         where_sql=" AND ".join(part for part in where_parts if part),
@@ -270,6 +287,7 @@ def get_records(
     base_code: str | None = None,
     region: str | None = None,
     publication_id: str | None = None,
+    contract_version: int | None = None,
 ) -> dict[str, object]:
     if date_from and date_to and date_from > date_to:
         raise DataFoundationError("date_range_invalid", 422)
@@ -281,6 +299,7 @@ def get_records(
         base_code=base_code,
         region=region,
         publication_id=publication_id,
+        contract_version=contract_version,
         sql_dialect=engine.dialect.name,
     )
     _assert_map_available(engine)
@@ -316,6 +335,7 @@ def get_date_counts(
     base_code: str | None = None,
     region: str | None = None,
     publication_id: str | None = None,
+    contract_version: int | None = None,
 ) -> dict[str, object]:
     if date_from and date_to and date_from > date_to:
         raise DataFoundationError("date_range_invalid", 422)
@@ -327,6 +347,7 @@ def get_date_counts(
         base_code=base_code,
         region=region,
         publication_id=publication_id,
+        contract_version=contract_version,
         sql_dialect=engine.dialect.name,
     )
     _assert_map_available(engine)
@@ -358,7 +379,12 @@ def export_records(
     base_code: str | None = None,
     region: str | None = None,
     publication_id: str | None = None,
+    contract_version: int | None = None,
 ) -> tuple[list[str], list[dict[str, object]]]:
+    selected_version = contract_version
+    if selected_version is None:
+        legacy_contract = CONTRACTS.get(source_id)
+        selected_version = legacy_contract.version if legacy_contract is not None else None
     result = get_records(
         engine,
         source_id=source_id,
@@ -370,13 +396,17 @@ def export_records(
         base_code=base_code,
         region=region,
         publication_id=publication_id,
+        contract_version=selected_version,
     )
     headers = [
-        *(column.key for column in CONTRACTS[source_id].columns),
+        *(column.key for column in get_contract(source_id, selected_version).columns),
         "publication_id", "source_row_no", "resolved_base_code", "mapping_resolution",
         "effective_base_code", "effective_mapping_resolution", "mapping_match_method",
         "mapped_base_name", "mapped_region", "mapped_uf", "mapped_rm_area", "mapped_rm",
     ]
+    contract = get_contract(source_id, selected_version)
+    if source_id == "pdd_collection_failure" and contract.version == 2:
+        headers.extend(["source_sheet_name", "source_sheet_row_no"])
     return headers, result["records"]
 
 
@@ -387,11 +417,18 @@ def get_publications(
     identity: dict[str, Any],
     limit: int,
     offset: int,
+    contract_version: int | None = None,
 ) -> dict[str, object]:
     _require_matrix_admin_identity(identity)
     if source_id not in FACT_TABLES:
         raise DataFoundationError("data_source_not_found", 404)
-    table = FACT_TABLES[source_id]
+    contracts = [
+        (version, contract)
+        for (registered_source, version), contract in CONTRACT_VERSIONS.items()
+        if registered_source == source_id and (contract_version is None or version == contract_version)
+    ]
+    if not contracts:
+        raise DataFoundationError("data_source_contract_version_not_supported", 404)
     # This endpoint is restricted to ADMIN/matrix above, whose visibility scope
     # is national. Mapping joins cannot narrow its result; they only add
     # candidate-resolution relations to a query that needs publication counts.
@@ -399,6 +436,9 @@ def get_publications(
     _assert_map_available(engine)
     parameters: dict[str, object] = {"source_id": source_id}
     publication_filter = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
+    if contract_version is not None:
+        parameters["contract_version"] = contract_version
+        publication_filter += " AND publication.contract_version = :contract_version"
     if source_id in DAILY_SOURCES:
         date_select = "MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end"
     elif source_id == "no_movement":
@@ -408,28 +448,62 @@ def get_publications(
     else:
         date_select = "NULL AS period_start, NULL AS period_end"
     with engine.connect() as connection:
+        published_versions = {
+            int(row[0])
+            for row in connection.execute(text("""
+                SELECT DISTINCT contract_version
+                FROM source_publications
+                WHERE source_id = :source_id
+                  AND publication_state = 'PUBLISHED'
+                  AND (:contract_version IS NULL OR contract_version = :contract_version)
+            """), {"source_id": source_id, "contract_version": contract_version})
+        }
+        # A new contract may be registered before its fact table is created.
+        # Do not reference that table until a PUBLISHED publication exists;
+        # the publication transaction inserts its facts before exposing it.
+        published_contracts = [
+            (version, contract) for version, contract in contracts
+            if version in published_versions
+        ]
+        if not published_contracts:
+            return {"sourceId": source_id, "publications": [], "total": 0, "limit": limit, "offset": offset}
+
+        fact_aggregates = []
+        for version, _contract in published_contracts:
+            table = fact_table_for_contract(source_id, version)
+            if source_id in DAILY_SOURCES:
+                period_columns = "MIN(data_date) AS period_start, MAX(data_date) AS period_end"
+            else:
+                period_columns = "NULL AS period_start, NULL AS period_end"
+            fact_aggregates.append(f"""
+                SELECT source_id, publication_id, COUNT(*) AS visible_row_count,
+                       {period_columns}, {version} AS contract_version
+                FROM `{table}`
+                WHERE source_id = :source_id
+                GROUP BY source_id, publication_id
+            """)
+        fact_counts_sql = " UNION ALL ".join(fact_aggregates)
         total = int(connection.execute(text(f"""
             SELECT COUNT(*)
             FROM source_publications AS publication
             WHERE {publication_filter}
               AND EXISTS (
-                  SELECT 1
-                  FROM `{table}` AS fact
+                  SELECT 1 FROM ({fact_counts_sql}) AS fact
                   WHERE fact.source_id = publication.source_id
                     AND fact.publication_id = publication.publication_id
+                    AND fact.contract_version = publication.contract_version
               )
         """), parameters).scalar_one())
         result = connection.execute(text(f"""
             SELECT publication.publication_id, publication.version_no, publication.contract_version, publication.published_at,
-                   publication.snapshot_as_of, COUNT(fact.source_row_no) AS visible_row_count, {date_select}
+                   publication.snapshot_as_of, fact.visible_row_count,
+                   {date_select.replace('MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end', 'fact.period_start, fact.period_end')}
             FROM source_publications AS publication
-            JOIN `{table}` AS fact
+            JOIN ({fact_counts_sql}) AS fact
               ON fact.source_id = publication.source_id
              AND fact.publication_id = publication.publication_id
+             AND fact.contract_version = publication.contract_version
             WHERE {publication_filter}
-            GROUP BY publication.publication_id, publication.version_no, publication.contract_version,
-                     publication.published_at,
-                     publication.snapshot_as_of, publication.period_start, publication.period_end
             ORDER BY publication.version_no DESC
             LIMIT :page_limit OFFSET :page_offset
         """), {**parameters, "page_limit": limit, "page_offset": offset}).mappings()
