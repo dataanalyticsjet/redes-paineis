@@ -392,56 +392,44 @@ def get_publications(
     if source_id not in FACT_TABLES:
         raise DataFoundationError("data_source_not_found", 404)
     table = FACT_TABLES[source_id]
+    # This endpoint is restricted to ADMIN/matrix above, whose visibility scope
+    # is national. Mapping joins cannot narrow its result; they only add
+    # candidate-resolution relations to a query that needs publication counts.
+    # Keep the published-map prerequisite and count the facts directly.
+    _assert_map_available(engine)
     parameters: dict[str, object] = {"source_id": source_id}
-    scope = _scope_clause(identity, parameters)
-    column_keys = {column.key for column in CONTRACTS[source_id].columns}
-    mapping_query = build_mapping_query(
-        source_id=source_id,
-        has_source_base_code="source_base_code" in column_keys,
-        has_source_base_name="source_base_name" in column_keys,
-        dialect=engine.dialect.name,
-    )
-    from_sql = f"""
-        FROM source_publications AS publication
-        JOIN {chr(96)}{table}{chr(96)} AS fact
-          ON fact.source_id = publication.source_id
-         AND fact.publication_id = publication.publication_id
-        JOIN base_mapping_current AS current_map
-          ON current_map.current_key = 'OFFICIAL'
-        JOIN base_mapping_versions AS current_version
-          ON current_version.map_version_id = current_map.map_version_id
-         AND current_version.version_state = 'PUBLISHED'
-        {mapping_query.joins}
-    """
-    filters = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
-    if scope:
-        filters += f" AND {scope}"
+    publication_filter = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
     if source_id in DAILY_SOURCES:
         date_select = "MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end"
     elif source_id == "no_movement":
         # For snapshots these fields carry the collection date from the latest
         # successful Bot_NewBI execution, not a business-date range.
-        date_select = "MAX(publication.period_start) AS period_start, MAX(publication.period_end) AS period_end"
+        date_select = "publication.period_start AS period_start, publication.period_end AS period_end"
     else:
         date_select = "NULL AS period_start, NULL AS period_end"
     with engine.connect() as connection:
         total = int(connection.execute(text(f"""
-            SELECT COUNT(*) FROM (
-                SELECT publication.publication_id
-                {from_sql}
-                WHERE {filters}
-                GROUP BY publication.publication_id
-            ) AS visible_publications
+            SELECT COUNT(*)
+            FROM source_publications AS publication
+            WHERE {publication_filter}
+              AND EXISTS (
+                  SELECT 1
+                  FROM `{table}` AS fact
+                  WHERE fact.source_id = publication.source_id
+                    AND fact.publication_id = publication.publication_id
+              )
         """), parameters).scalar_one())
         result = connection.execute(text(f"""
             SELECT publication.publication_id, publication.version_no, publication.contract_version, publication.published_at,
-                   publication.snapshot_as_of,
-                   COUNT(*) AS visible_row_count, {date_select}
-            {from_sql}
-            WHERE {filters}
+                   publication.snapshot_as_of, COUNT(fact.source_row_no) AS visible_row_count, {date_select}
+            FROM source_publications AS publication
+            JOIN `{table}` AS fact
+              ON fact.source_id = publication.source_id
+             AND fact.publication_id = publication.publication_id
+            WHERE {publication_filter}
             GROUP BY publication.publication_id, publication.version_no, publication.contract_version,
                      publication.published_at,
-                     publication.snapshot_as_of
+                     publication.snapshot_as_of, publication.period_start, publication.period_end
             ORDER BY publication.version_no DESC
             LIMIT :page_limit OFFSET :page_offset
         """), {**parameters, "page_limit": limit, "page_offset": offset}).mappings()

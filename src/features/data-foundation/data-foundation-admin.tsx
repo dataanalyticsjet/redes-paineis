@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiFetch } from "../../lib/api-url";
+import { loadIndependently } from "../../lib/data-foundation/admin-metadata";
 import type { DashboardTranslator } from "../../lib/i18n";
 import { AlertTriangle, Check, Clock3, Database, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
 
@@ -146,7 +147,11 @@ export function DataFoundationAdmin({
   const [sources, setSources] = useState<Source[]>([]);
   const [contracts, setContracts] = useState<Record<string, Contract>>({});
   const [publications, setPublications] = useState<Record<string, Publication[]>>({});
+  const [contractErrors, setContractErrors] = useState<Record<string, string>>({});
+  const [publicationErrors, setPublicationErrors] = useState<Record<string, string>>({});
   const [mapping, setMapping] = useState<MappingStatus | null>(null);
+  const [mappingError, setMappingError] = useState<string | null>(null);
+  const [mappingLoading, setMappingLoading] = useState(false);
   const [selectedSource, setSelectedSource] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [mappingFile, setMappingFile] = useState<File | null>(null);
@@ -161,35 +166,113 @@ export function DataFoundationAdmin({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const metadataLoadGeneration = useRef(0);
+  const metadataAbortController = useRef<AbortController | null>(null);
 
   const loadMetadata = useCallback(async () => {
+    metadataAbortController.current?.abort();
+    const controller = new AbortController();
+    metadataAbortController.current = controller;
+    const loadGeneration = ++metadataLoadGeneration.current;
+    const isCurrentLoad = () => (
+      metadataLoadGeneration.current === loadGeneration && !controller.signal.aborted
+    );
     setLoading(true);
     setError(null);
     setNotice(null);
+    setContracts({});
+    setPublications({});
+    setContractErrors({});
+    setPublicationErrors({});
+    setMapping(null);
+    setMappingError(null);
+    setMappingLoading(true);
     try {
-      const result = await requestJson<{ sources: Source[] }>("/api/v2/data-sources");
+      const result = await requestJson<{ sources: Source[] }>("/api/v2/data-sources", { signal: controller.signal });
+      if (!isCurrentLoad()) return;
       setSources(result.sources);
       setSelectedSource((current) => current || result.sources[0]?.source_id || "");
-      const [mapStatus, sourceMetadata] = await Promise.all([
-        requestJson<MappingStatus>("/api/v2/base-mapping/current"),
-        Promise.all(result.sources.map(async (source) => {
-          const contractRequest = requestJson<Contract>(`/api/v2/data-sources/${encodeURIComponent(source.source_id)}/contract`);
-          const historyRequest = requestJson<{ publications: Publication[] }>(`/api/v2/data-sources/${encodeURIComponent(source.source_id)}/publications?limit=50`)
-            .catch((caught) => {
-              if (caught instanceof Error && caught.message === "data_foundation_v2_disabled") return { publications: [] };
-              throw caught;
-            });
-          const [contract, history] = await Promise.all([contractRequest, historyRequest]);
-          return [source.source_id, { contract, publications: history.publications }] as const;
-        })),
-      ]);
-      setMapping(mapStatus);
-      setContracts(Object.fromEntries(sourceMetadata.map(([id, data]) => [id, data.contract])));
-      setPublications(Object.fromEntries(sourceMetadata.map(([id, data]) => [id, data.publications])));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "data_foundation_request_failed");
-    } finally {
       setLoading(false);
+
+      void requestJson<MappingStatus>("/api/v2/base-mapping/current", { signal: controller.signal })
+        .then((status) => {
+          if (!isCurrentLoad()) return;
+          setMapping(status);
+          setMappingError(null);
+        })
+        .catch((caught: unknown) => {
+          if (!isCurrentLoad()) return;
+          setMappingError(caught instanceof Error ? caught.message : "data_foundation_request_failed");
+        })
+        .finally(() => {
+          if (isCurrentLoad()) setMappingLoading(false);
+        });
+
+      void loadIndependently(
+        result.sources,
+        (source) => requestJson<Contract>(
+          `/api/v2/data-sources/${encodeURIComponent(source.source_id)}/contract`,
+          { signal: controller.signal },
+        ),
+        (source, contract) => {
+          if (!isCurrentLoad()) return;
+          setContracts((current) => ({ ...current, [source.source_id]: contract }));
+          setContractErrors((current) => {
+            if (!current[source.source_id]) return current;
+            const next = { ...current };
+            delete next[source.source_id];
+            return next;
+          });
+        },
+        (source, caught) => {
+          if (!isCurrentLoad()) return;
+          setContractErrors((current) => ({
+            ...current,
+            [source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+          }));
+        },
+      );
+
+      void loadIndependently(
+        result.sources,
+        async (source) => {
+          try {
+            return await requestJson<{ publications: Publication[] }>(
+              `/api/v2/data-sources/${encodeURIComponent(source.source_id)}/publications?limit=50`,
+              { signal: controller.signal },
+            );
+          } catch (caught) {
+            if (caught instanceof Error && caught.message === "data_foundation_v2_disabled") {
+              return { publications: [] };
+            }
+            throw caught;
+          }
+        },
+        (source, history) => {
+          if (!isCurrentLoad()) return;
+          setPublications((current) => ({ ...current, [source.source_id]: history.publications }));
+          setPublicationErrors((current) => {
+            if (!current[source.source_id]) return current;
+            const next = { ...current };
+            delete next[source.source_id];
+            return next;
+          });
+        },
+        (source, caught) => {
+          if (!isCurrentLoad()) return;
+          setPublicationErrors((current) => ({
+            ...current,
+            [source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+          }));
+        },
+      );
+    } catch (caught) {
+      if (isCurrentLoad()) {
+        setError(caught instanceof Error ? caught.message : "data_foundation_request_failed");
+        setMappingLoading(false);
+      }
+    } finally {
+      if (isCurrentLoad()) setLoading(false);
     }
   }, []);
 
@@ -197,7 +280,11 @@ export function DataFoundationAdmin({
     const frame = window.requestAnimationFrame(() => {
       void loadMetadata();
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      metadataAbortController.current?.abort();
+      metadataLoadGeneration.current += 1;
+    };
   }, [loadMetadata]);
 
   const contract = contracts[selectedSource];
@@ -394,7 +481,12 @@ export function DataFoundationAdmin({
           <span>{t("{count} bases visíveis", { count: formatCount(mapping.visibleBaseCount) })}</span>
           {mapping.publishedAt ? <small>{formatDateTime(mapping.publishedAt)}</small> : null}
         </div>
-      ) : null}
+      ) : mappingError ? (
+        <div className="data-foundation-alert is-error" role="alert">
+          <AlertTriangle size={18} />
+          <span>{t("Não foi possível verificar o de-para vigente.")} {displayApiError(mappingError, t)}</span>
+        </div>
+      ) : mappingLoading ? <p className="data-foundation-loading">{t("Verificando de-para vigente…")}</p> : null}
 
       {error ? (
         <div className={`data-foundation-alert ${error === "data_foundation_v2_disabled" ? "is-disabled" : "is-error"}`} role="alert">
@@ -423,8 +515,8 @@ export function DataFoundationAdmin({
                   onClick={() => { setSelectedSource(source.source_id); setPreview(null); setCandidates([]); setMappingReviewDirty(false); setFile(null); }}
                 >
                   <FileSpreadsheet size={18} />
-                  <span><strong>{t(source.display_name)}</strong><small>{sourceContract ? `${sourceContract.columns.length} ${t("colunas")} · v${sourceContract.version}` : t("Contrato indisponível")}</small></span>
-                  <small>{last ? `v${last.version}` : t("Sem publicação")}</small>
+                  <span><strong>{t(source.display_name)}</strong><small>{sourceContract ? `${sourceContract.columns.length} ${t("colunas")} · v${sourceContract.version}` : contractErrors[source.source_id] ? t("Contrato indisponível") : t("Carregando contrato…")}</small></span>
+                  <small>{last ? `v${last.version}` : publicationErrors[source.source_id] ? t("Histórico indisponível") : publications[source.source_id] ? t("Sem publicação") : t("Carregando…")}</small>
                 </button>
               );
             })}
@@ -448,30 +540,32 @@ export function DataFoundationAdmin({
                 <section className="data-foundation-card">
                   <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PUBLICAÇÕES")}</span><h2>{t("Última publicação e histórico")}</h2></div>{latestPublication ? <span className="data-foundation-state is-ready">{t("Versão {version}", { version: latestPublication.version })}</span> : <span className="data-foundation-state">{t("Sem publicação")}</span>}</div>
                   {latestPublication ? <p className="data-foundation-latest"><Clock3 size={15} /> {formatDateTime(latestPublication.publishedAt)} · {formatCount(latestPublication.visibleRowCount)} {t("registros visíveis")}{latestPublication.periodStart ? ` · ${latestPublication.periodStart} – ${latestPublication.periodEnd}` : ""}</p> : null}
-                  {sourcePublications.length ? <div className="data-foundation-history">{sourcePublications.map((publication) => <div key={publication.publicationId}><span>{t("Versão {version}", { version: publication.version })}</span><span>{formatDateTime(publication.publishedAt)}</span><strong>{formatCount(publication.visibleRowCount)} {t("registros")}</strong><small>{publication.periodStart ? `${publication.periodStart} – ${publication.periodEnd}` : t("Snapshot")}</small></div>)}</div> : <p className="data-foundation-empty">{t("Ainda não há publicações visíveis para este escopo.")}</p>}
+                  {publicationErrors[selectedSource] ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o histórico desta fonte.")} {displayApiError(publicationErrors[selectedSource], t)}</span></div> : sourcePublications.length ? <div className="data-foundation-history">{sourcePublications.map((publication) => <div key={publication.publicationId}><span>{t("Versão {version}", { version: publication.version })}</span><span>{formatDateTime(publication.publishedAt)}</span><strong>{formatCount(publication.visibleRowCount)} {t("registros")}</strong><small>{publication.periodStart ? `${publication.periodStart} – ${publication.periodEnd}` : t("Snapshot")}</small></div>)}</div> : publications[selectedSource] ? <p className="data-foundation-empty">{t("Ainda não há publicações visíveis para este escopo.")}</p> : <p className="data-foundation-loading">{t("Carregando histórico…")}</p>}
                 </section>
 
                 <section className="data-foundation-card">
                   <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("NOVA CARGA")}</span><h2>{t("Validar arquivo Excel")}</h2></div></div>
                   <form className="data-foundation-upload-form" onSubmit={(event) => void makePreview(event)}>
-                    <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || busy} /></label>
-                    <button type="submit" disabled={!importActionsEnabled || !file || busy}><Upload size={16} />{t("Gerar prévia")}</button>
+                    <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || !contract || busy} /></label>
+                    <button type="submit" disabled={!importActionsEnabled || !contract || !file || busy}><Upload size={16} />{t("Gerar prévia")}</button>
                   </form>
                 </section>
 
                 {preview && !isMappingPreview ? <PreviewPanel preview={preview} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state, targetCode) => void saveDecision(candidate, state, targetCode)} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
               </>
-            ) : null}
+            ) : contractErrors[selectedSource] ? (
+              <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o contrato desta fonte.")} {displayApiError(contractErrors[selectedSource], t)}</span></div>
+            ) : <p className="data-foundation-loading">{t("Carregando contrato…")}</p>}
           </div>
         </div>
       ) : null}
 
       {canImport ? (
         <section className="data-foundation-card data-foundation-initial-map">
-          <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("MIGRAÇÃO INICIAL")}</span><h2>{t("De-para oficial DoomsDay")}</h2><p>{t("A migração preserva o arquivo original como versão 1 e só atualiza o ponteiro após validação e confirmação.")}</p></div><span className={`data-foundation-state ${mapping?.state === "PUBLISHED" ? "is-ready" : ""}`}>{mapping?.state === "PUBLISHED" ? t("Publicado") : t("Pendente")}</span></div>
+          <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("MIGRAÇÃO INICIAL")}</span><h2>{t("De-para oficial DoomsDay")}</h2><p>{t("A migração preserva o arquivo original como versão 1 e só atualiza o ponteiro após validação e confirmação.")}</p></div><span className={`data-foundation-state ${mapping?.state === "PUBLISHED" ? "is-ready" : ""}`}>{mapping ? mapping.state === "PUBLISHED" ? t("Publicado") : t("Pendente") : mappingError ? t("Estado indisponível") : t("Verificando…")}</span></div>
           <form className="data-foundation-upload-form" onSubmit={(event) => void makeMappingPreview(event)}>
-            <label>{t("De_para DoomsDay.xlsx · aba Ativas")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setMappingFile(event.target.files?.[0] ?? null); setPreview(null); }} disabled={!importActionsEnabled || busy || mapping?.state === "PUBLISHED"} /></label>
-            <button type="submit" disabled={!importActionsEnabled || !mappingFile || busy || mapping?.state === "PUBLISHED"}><Upload size={16} />{t("Validar de-para")}</button>
+            <label>{t("De_para DoomsDay.xlsx · aba Ativas")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setMappingFile(event.target.files?.[0] ?? null); setPreview(null); }} disabled={!importActionsEnabled || !mapping || Boolean(mappingError) || busy || mapping.state === "PUBLISHED"} /></label>
+            <button type="submit" disabled={!importActionsEnabled || !mapping || Boolean(mappingError) || !mappingFile || busy || mapping.state === "PUBLISHED"}><Upload size={16} />{t("Validar de-para")}</button>
           </form>
         </section>
       ) : null}
