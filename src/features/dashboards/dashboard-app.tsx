@@ -93,7 +93,6 @@ import {
   REFERENCE_BASE_TEST_NAMES,
 } from "../../lib/data-foundation/reference-base-test";
 import { getMonitoringSource } from "../../lib/data-sources/monitoring";
-import { getMovementSource } from "../../lib/data-sources/movement";
 import { getTaxaSource } from "../../lib/data-sources/taxa";
 import { initialRegionSelection } from "../../lib/initial-region-selection";
 import { DASHBOARD_DATA_SOURCES } from "../../lib/data-sources/catalog";
@@ -108,7 +107,6 @@ import {
   MOVEMENT_SUMMARY_METRICS,
   movementSelectionsAfterChange,
   summarizeMovementSnapshot,
-  movementWeightedRate,
   selectMovementSummaryMetric,
 } from "../../lib/movement-summary";
 import {
@@ -155,14 +153,14 @@ import {
 } from "../../lib/data-foundation/collection-rate";
 import {
   loadCurrentNoMovementSnapshot,
+  NoMovementV2LoadError,
   NO_MOVEMENT_V2_COLUMNS,
   type NoMovementV2Record,
 } from "../../lib/data-foundation/no-movement";
 import {
   mapNoMovementV2Record,
   NO_MOVEMENT_SOURCE_HEADERS,
-  selectNoMovementSource,
-  type NoMovementFallbackReason,
+  noMovementAvailabilityMessage,
 } from "../../lib/data-foundation/no-movement-dashboard";
 import {
   loadPublishedPddCollectionFailure,
@@ -307,7 +305,6 @@ const SOURCE_ID_BY_VIEW: Partial<Record<DashboardView, DashboardSourceId>> = {
   monitoramento: "monitoring",
   taxa: "taxa",
   epop: "epop",
-  movimentacao: "movement",
   sellers: "sellerPerformance",
   bipagem: "bipagem",
   damage: "damage",
@@ -592,7 +589,7 @@ interface MovementLoadedData {
   format: "summary" | "list";
   parsed: ParsedWorkbook;
   fileName: string;
-  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD" | "DATA_FOUNDATION_V2";
+  sourceType: "DATA_FOUNDATION_V2";
   fileSizeBytes?: number;
   contentType?: string;
   columns: MovementColumns;
@@ -1171,19 +1168,6 @@ function findRequiredHeader(headers: string[], label: string, candidates: string
   throw new Error(`Não encontramos a coluna obrigatória para “${String(label)}”.`);
 }
 
-function findOptionalHeader(headers: string[], candidates: string[]): string {
-  const normalizedCandidates = candidates.map(normalizeHeaderText);
-  return headers.find((header) => normalizedCandidates.includes(normalizeHeaderText(header))) ??
-    headers.find((header) => {
-      const normalized = normalizeHeaderText(header);
-      return normalizedCandidates.some((candidate) => normalized.includes(candidate) || candidate.includes(normalized));
-    }) ?? "";
-}
-
-function movementValue(row: WorkbookRow, column: string): number {
-  return parseNumeric(row[column]);
-}
-
 function formatMovementCell(value: unknown, percentageColumn = false): string {
   if (percentageColumn) {
     const parsed = typeof value === "number" ? value : value == null || value === "" ? null : Number(String(value));
@@ -1544,154 +1528,12 @@ function buildEpopLoadedData(parsed: ParsedWorkbook, fileName: string, updatedAt
   return { parsed, fileName, updatedAt, records, dates, regions: [...new Set(records.map((record) => record.region))].sort(), bases: [...new Set(records.map((record) => record.base))].sort() };
 }
 
-function buildMovementLoadedData(
-  parsed: ParsedWorkbook,
-  fileName: string,
-  updatedAt?: string,
-  responsibility: ResponsibilityData | null = null,
-  sourceType?: "DEMONSTRATION" | "MANUAL_UPLOAD",
-  fileSizeBytes?: number,
-  contentType?: string,
-): MovementLoadedData {
-  const headers = parsed.headers;
-  const listAging = findOptionalHeader(headers, ["Aging"]);
-  const listStatus = findOptionalHeader(headers, ["Tipo da última operação", "Tipo da ultima operacao", "Status"]);
-  const listOrigin = findOptionalHeader(headers, ["Origem do Pedido", "Origem do pedido", "Origem"]);
-  const listQuantity = findOptionalHeader(headers, ["Pedidos", "Quantidade de pedidos", "Qtd pedidos"]);
-  const listDate = findOptionalHeader(headers, ["Horário da última operação", "Horario da ultima operacao"]);
-  const isListFormat = Boolean(listAging && listStatus && listDate);
-  const columns: MovementColumns = {
-    region: findRequiredHeader(headers, "Regional responsável", ["Regional responsável", "Regional responsavel", "Regional mais recente", "Regional Remetente", "Regional"]),
-    code: findRequiredHeader(headers, "Código da unidade responsável", ["Código da unidade responsável", "Codigo da unidade responsavel", "Código da base mais recente", "Código da Base Remetente", "Código da unidade", "Codigo da unidade"]),
-    base: findRequiredHeader(headers, "Nome da unidade responsável", ["Unidade responsável", "Unidade responsavel", "Nome da unidade responsável", "Nome da unidade responsavel", "Nome da base mais recente", "Nome da Base Remetente", "Nome da unidade", "Base", "Unidade"]),
-    totalStopped: isListFormat ? listQuantity : findRequiredHeader(headers, "Total de pedidos sem movimentação", ["Total de pedidos sem movimentação", "Total de pedidos sem movimentacao", "Pedidos sem movimentação"]),
-    inTransit: isListFormat ? listQuantity : findRequiredHeader(headers, "Qtd pedidos em trânsito", ["Qtd pedidos em trânsito", "Qtd pedidos em transito", "Pedidos em trânsito"]),
-    over1Day: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 1 dia", ["Sem mov. há mais de 1 dia", "Sem mov ha mais de 1 dia"]),
-    over2Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 2 dias", ["Sem mov. há mais de 2 dias", "Sem mov ha mais de 2 dias"]),
-    over3Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 3 dias", ["Sem mov. há mais de 3 dias", "Sem mov ha mais de 3 dias"]),
-    over4Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 4 dias", ["Sem mov. há mais de 4 dias", "Sem mov ha mais de 4 dias"]),
-    over5Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 5 dias", ["Sem mov. há mais de 5 dias", "Sem mov ha mais de 5 dias"]),
-    over6Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 6 dias", ["Sem mov. há mais de 6 dias", "Sem mov ha mais de 6 dias"]),
-    over7Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 7 dias", ["Sem mov. há mais de 7 dias", "Sem mov ha mais de 7 dias"]),
-    over10Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 10 dias", ["Sem mov. há mais de 10 dias", "Sem mov ha mais de 10 dias"]),
-    over14Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 14 dias", ["Sem mov. há mais de 14 dias", "Sem mov ha mais de 14 dias"]),
-    over30Days: isListFormat ? "" : findRequiredHeader(headers, "Sem mov. há mais de 30 dias", ["Sem mov. há mais de 30 dias", "Sem mov ha mais de 30 dias"]),
-    lastOperation: listDate || findRequiredHeader(headers, "Horário da última operação", ["Horário da última operação", "Horario da ultima operacao", "Última operação", "Ultima operacao"]),
-    rate14Days: isListFormat ? "" : findRequiredHeader(headers, "Taxa de sem mov 14+dias", ["Taxa de sem mov 14+dias", "Taxa sem mov 14 dias"]),
-    rate30Days: isListFormat ? "" : findRequiredHeader(headers, "Taxa de sem mov 30+dias", ["Taxa de sem mov 30+dias", "Taxa sem mov 30 dias"]),
-    date: isListFormat ? listDate : "",
-    aging: listAging,
-    status: listStatus,
-    origin: listOrigin,
-    quantity: listQuantity,
-  };
-
-  const canonicalRows = parsed.rows.map((sourceRow) => {
-    const base = String(sourceRow[columns.base] ?? "").trim() || "Sem base";
-    const rawRegion = String(sourceRow[columns.region] ?? "").trim() || "Sem regional";
-    const region = registeredRegionForBase(responsibility, base, rawRegion);
-    return { ...sourceRow, [columns.region]: region };
-  });
-  const canonicalParsed: ParsedWorkbook = {
-    ...parsed,
-    rows: canonicalRows,
-    regionColumn: columns.region,
-    baseColumn: columns.base,
-    dateColumn: isListFormat ? listDate : undefined,
-    metadata: { ...parsed.metadata, rowCount: canonicalRows.length, dateRange: undefined },
-  };
-
-  const records = canonicalParsed.rows.map((row, index) => {
-    const region = String(row[columns.region] ?? "").trim() || "Sem regional";
-    const base = String(row[columns.base] ?? "").trim() || "Sem base";
-    const assignment = responsibilityForBase(responsibility, base);
-    const rmArea = rmAreaForBase(responsibility, base);
-    const rm = assignment.rm;
-    const rgm = officialRgmForRegion(region) ?? assignment.rgm;
-    const code = String(row[columns.code] ?? "").trim() || "—";
-    const quantity = isListFormat ? Math.max(0, movementValue(row, listQuantity) || 1) : movementValue(row, columns.totalStopped);
-    const aging = String(row[columns.aging] ?? "").trim() || "Todas as faixas";
-    const agingDays = Number(aging.match(/(\d+)\s*(?:day|dia)/i)?.[1] ?? 0);
-    const bucket = (day: number) => isListFormat && agingDays === day ? quantity : 0;
-    const over14Days = isListFormat ? bucket(14) : movementValue(row, columns.over14Days);
-    const over30Days = isListFormat ? (agingDays >= 30 ? quantity : 0) : movementValue(row, columns.over30Days);
-    const rate14Days = isListFormat ? null : movementWeightedRate(over14Days, quantity);
-    const rate30Days = isListFormat ? null : movementWeightedRate(over30Days, quantity);
-    const values = Object.fromEntries(headers.map((header) => [header, row[header]]));
-    if (!isListFormat) {
-      values[columns.rate14Days] = rate14Days;
-      values[columns.rate30Days] = rate30Days;
-    }
-    return {
-      key: `${region}::${base}::${code}::${index}`,
-      region,
-      rmArea,
-      rm,
-      rgm,
-      code,
-      base,
-      totalStopped: quantity,
-      inTransit: isListFormat ? quantity : movementValue(row, columns.inTransit),
-      over1Day: isListFormat ? bucket(1) : movementValue(row, columns.over1Day),
-      over2Days: isListFormat ? bucket(2) : movementValue(row, columns.over2Days),
-      over3Days: isListFormat ? bucket(3) : movementValue(row, columns.over3Days),
-      over4Days: isListFormat ? bucket(4) : movementValue(row, columns.over4Days),
-      over5Days: isListFormat ? bucket(5) : movementValue(row, columns.over5Days),
-      over6Days: isListFormat ? bucket(6) : movementValue(row, columns.over6Days),
-      over7Days: isListFormat ? bucket(7) : movementValue(row, columns.over7Days),
-      over10Days: isListFormat ? bucket(10) : movementValue(row, columns.over10Days),
-      over14Days,
-      over30Days,
-      lastOperation: formatMovementCell(row[columns.lastOperation]),
-      rate14Days,
-      rate30Days,
-      date: toDashboardISODate(row[columns.date]),
-      aging,
-      status: String(row[columns.status] ?? row[columns.lastOperation] ?? "").trim() || "Sem status",
-      origin: String(row[columns.origin] ?? "").trim() || "Sem origem",
-      quantity,
-      values,
-    } satisfies MovementRecord;
-  });
-
-  // A restricted regional account may legitimately have no rows in this snapshot.
-
-  const bases = Array.from(new Set(records.map((record) => record.base))).sort((a, b) =>
-    a.localeCompare(b, "pt-BR", { numeric: true }),
-  );
-  const regions = Array.from(new Set(records.map((record) => record.region))).sort((a, b) =>
-    a.localeCompare(b, "pt-BR", { numeric: true }),
-  );
-  const dates = isListFormat ? Array.from(new Set(records.map((record) => record.date).filter(Boolean))).sort() : [];
-  const agings = Array.from(new Set(records.map((record) => record.aging))).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
-  const statuses = Array.from(new Set(records.map((record) => record.status))).sort((a, b) => a.localeCompare(b, "pt-BR"));
-  const origins = Array.from(new Set(records.map((record) => record.origin))).sort((a, b) => a.localeCompare(b, "pt-BR"));
-
-  return {
-    parsed: canonicalParsed,
-    fileName,
-    sourceType,
-    fileSizeBytes,
-    contentType,
-    columns,
-    records,
-    bases,
-    regions,
-    dates,
-    agings,
-    statuses,
-    origins,
-    initialStart: dates[0] ?? "",
-    initialEnd: dates[dates.length - 1] ?? "",
-    displayColumns: headers,
-    format: isListFormat ? "list" : "summary",
-    blankBaseRows: canonicalParsed.rows.filter((row) => !String(row[columns.base] ?? "").trim()).length,
-    blankRegionRows: canonicalParsed.rows.filter((row) => !String(row[columns.region] ?? "").trim()).length,
-    updatedAt,
-  };
-}
-
-function buildNoMovementV2LoadedData(snapshot: Awaited<ReturnType<typeof loadCurrentNoMovementSnapshot>>): MovementLoadedData {
+function buildNoMovementV2LoadedData(snapshot: {
+  records: NoMovementV2Record[];
+  updatedAt: string | null;
+  collectionDate: string | null;
+  publishedAt: string | null;
+}): MovementLoadedData {
   const sourceHeaders = Object.values(NO_MOVEMENT_SOURCE_HEADERS);
   const records = snapshot.records.map(mapNoMovementV2Record);
   const rawRows = records.map((record) => record.values);
@@ -1768,6 +1610,10 @@ function buildNoMovementV2LoadedData(snapshot: Awaited<ReturnType<typeof loadCur
     collectionDate: snapshot.collectionDate,
     publishedAt: snapshot.publishedAt,
   };
+}
+
+function buildEmptyNoMovementV2LoadedData(): MovementLoadedData {
+  return buildNoMovementV2LoadedData({ records: [], updatedAt: null, collectionDate: null, publishedAt: null });
 }
 
 function taxaBasesForRegions(data: TaxaLoadedData, regions: Set<string>): string[] {
@@ -2838,7 +2684,7 @@ export function DashboardApp() {
   const [taxaTableQuery, setTaxaTableQuery] = useState("");
   const [taxaPage, setTaxaPage] = useState(1);
   const [taxaHistoryNotice, setTaxaHistoryNotice] = useState<TaxaHistoryNotice | null>(null);
-  const [movementLoaded, setMovementLoaded] = useState<MovementLoadedData | null>(null);
+  const [movementLoaded, setMovementLoaded] = useState<MovementLoadedData | null>(() => buildEmptyNoMovementV2LoadedData());
   const [movementSelectedBases, setMovementSelectedBases] = useState<Set<string>>(new Set());
   const [movementSelectedRegions, setMovementSelectedRegions] = useState<Set<string>>(new Set());
   const [movementSelectedRms, setMovementSelectedRms] = useState<Set<string>>(new Set());
@@ -2850,8 +2696,6 @@ export function DashboardApp() {
   const [movementDateStart, setMovementDateStart] = useState("");
   const [movementDateEnd, setMovementDateEnd] = useState("");
   const [movementSummaryMetric, setMovementSummaryMetric] = useState("totalStopped");
-  const [movementLoading, setMovementLoading] = useState(true);
-  const [movementFallbackNotice, setMovementFallbackNotice] = useState<NoMovementFallbackReason | null>(null);
   const [noMovementV2State, setNoMovementV2State] = useState(() => ({
     status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
     records: [] as NoMovementV2Record[],
@@ -2984,7 +2828,7 @@ export function DashboardApp() {
   const statusLabel = useCallback((status: string) => monitoringStatusLabel(status, t), [t]);
 
   useEffect(() => {
-    if (!isFirstMileUnderReview || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
+    if (!isFirstMileUnderReview || view === "movimentacao" || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
 
     const sourceId = DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel];
     if (!sourceId) return undefined;
@@ -3135,7 +2979,7 @@ export function DashboardApp() {
     setLoaded(null);
     setTaxaLoaded(null);
     setEpopLoaded(null);
-    setMovementLoaded(null);
+    setMovementLoaded(buildEmptyNoMovementV2LoadedData());
     setSellerPerformanceLoaded(null);
     setSellerReferenceLoaded(null);
     setSpecialSellerLoaded(null);
@@ -3449,7 +3293,6 @@ export function DashboardApp() {
         setDashboardSourcesReady(true);
         setLoading(false);
         setTaxaLoading(false);
-        setMovementLoading(false);
         setSellerLoading(false);
         setBipagemLoading(false);
         setDamageLoading(false);
@@ -3466,9 +3309,7 @@ export function DashboardApp() {
       let primaryWorkbookLoaded = false;
       setLoading(true);
       setTaxaLoading(true);
-      setMovementLoading(true);
-      if (isMatrixAdminViewer) setMovementLoaded(null);
-      if (isMatrixAdminViewer) setMovementFallbackNotice(null);
+      setMovementLoaded(buildEmptyNoMovementV2LoadedData());
       setSellerLoading(true);
       setBipagemLoading(true);
       setDamageLoading(true);
@@ -3545,20 +3386,7 @@ export function DashboardApp() {
             // Keep the existing scoped demo fixture when no local taxa source is stored.
           }
           const epop = buildEpopLoadedData(scopeDemoWorkbook(fixtures.epop, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt);
-          if (!isMatrixAdminViewer) {
-            let movement = buildMovementLoadedData(scopeDemoWorkbook(fixtures.movement, viewerIdentity), DEMO_WORKBOOK_NAME, demoUpdatedAt, responsibility);
-            try {
-              const localSource = (await getMovementSource()).source;
-              if (active && localSource) {
-                movement = buildMovementLoadedData(localSource.parsed, localSource.fileName, localSource.importedAt, responsibility, "MANUAL_UPLOAD", localSource.fileSizeBytes, localSource.contentType);
-              }
-            } catch {
-              // Keep the scoped demo fixture for profiles outside ADMIN/matrix.
-            }
-            if (active) applyMovementLoadedData(movement);
-          } else {
-            setMovementLoaded(null);
-          }
+          setMovementLoaded(buildEmptyNoMovementV2LoadedData());
           const sellerPerformanceParsed = scopeDemoWorkbook(fixtures.sellerPerformance, viewerIdentity);
           const sellerListParsed = scopeDemoSellerReference(fixtures.sellerList, sellerPerformanceParsed, viewerIdentity, false);
           const specialSellerParsed = scopeDemoSellerReference(fixtures.sellerSpecialList, sellerPerformanceParsed, viewerIdentity, true);
@@ -3721,27 +3549,7 @@ export function DashboardApp() {
             setEpopDateStart(epop.dates[0] ?? ""); setEpopDateEnd(epop.dates[epop.dates.length - 1] ?? "");
           }
         }
-        if (!isMatrixAdminViewer) {
-          try {
-            const movementSource = (await getMovementSource()).source;
-            if (!active) return;
-            if (movementSource) {
-              applyMovementLoadedData(buildMovementLoadedData(
-                movementSource.parsed,
-                movementSource.fileName,
-                movementSource.importedAt,
-                responsibility,
-                "MANUAL_UPLOAD",
-                movementSource.fileSizeBytes,
-                movementSource.contentType,
-              ));
-            }
-          } catch {
-            // The dashboard remains empty when no shared movement snapshot exists.
-          }
-        } else {
-          setMovementLoaded(null);
-        }
+        setMovementLoaded(buildEmptyNoMovementV2LoadedData());
         const sellerSpecialListResponse = await fetchOptionalWorkbook("sellerSpecialList");
         let sellerReference: SellerReferenceData | null = null;
         let specialSeller: SpecialSellerData | null = null;
@@ -3847,7 +3655,6 @@ export function DashboardApp() {
           if (primaryWorkbookLoaded) loadedDashboardDataViewerRef.current = viewerIdentity.username;
           setLoading(false);
           setTaxaLoading(false);
-          if (!isMatrixAdminViewer) setMovementLoading(false);
           setSellerLoading(false);
         setBipagemLoading(false);
         setDamageLoading(false);
@@ -4059,7 +3866,7 @@ export function DashboardApp() {
   }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
 
   useEffect(() => {
-    if (view !== "movimentacao" || isFirstMileUnderReview) return undefined;
+    if (view !== "movimentacao") return undefined;
     if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
       return undefined;
     }
@@ -4068,9 +3875,7 @@ export function DashboardApp() {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void (async () => {
-        setMovementLoading(true);
-        setMovementLoaded(null);
-        setMovementFallbackNotice(null);
+        applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
         setNoMovementV2State((current) => ({
           ...current,
           status: "loading",
@@ -4087,32 +3892,13 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
-        const selection = await selectNoMovementSource(
-          () => loadCurrentNoMovementSnapshot(
+        try {
+          const snapshot = await loadCurrentNoMovementSnapshot(
             (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
             controller.signal,
-          ),
-          async () => {
-            const legacySource = (await getMovementSource()).source;
-            return legacySource
-              ? buildMovementLoadedData(
-                legacySource.parsed,
-                legacySource.fileName,
-                legacySource.importedAt,
-                responsibilityLoaded,
-                "MANUAL_UPLOAD",
-                legacySource.fileSizeBytes,
-                legacySource.contentType,
-              )
-              : null;
-          },
-        );
-        if (!active || controller.signal.aborted) return;
-        setMovementLoading(false);
-        if (selection.source === "V2") {
-          const snapshot = selection.data;
-          setMovementFallbackNotice(null);
-          if (snapshot.rowCount > 0) applyMovementLoadedData(buildNoMovementV2LoadedData(snapshot));
+          );
+          if (!active || controller.signal.aborted) return;
+          applyMovementLoadedData(buildNoMovementV2LoadedData(snapshot));
           setNoMovementV2State((current) => ({
             ...current,
             status: snapshot.rowCount === 0 ? "empty" : "ready",
@@ -4125,25 +3911,25 @@ export function DashboardApp() {
             publishedAt: snapshot.publishedAt,
             error: null,
           }));
-          return;
+        } catch (cause) {
+          if (!active || controller.signal.aborted) return;
+          const loadError = cause instanceof NoMovementV2LoadError
+            ? cause
+            : new NoMovementV2LoadError("invalid_data", "Não foi possível validar a publicação da Data Foundation V2.");
+          const awaitingV2Publication = loadError.kind === "empty" || loadError.kind === "incompatible";
+          applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
+          setNoMovementV2State((current) => ({
+            ...current,
+            status: awaitingV2Publication ? "empty" : "error",
+            records: [],
+            receivedCount: 0,
+            publicationId: null,
+            updatedAt: null,
+            collectionDate: null,
+            publishedAt: null,
+            error: awaitingV2Publication ? null : loadError.message,
+          }));
         }
-
-        setMovementFallbackNotice(selection.reason);
-        if (selection.legacyUnavailable) {
-          console.warn("[Redes Painéis] Não foi possível carregar a fonte anterior de Sem Movimentação durante a transição V2.");
-        }
-        if (selection.data) applyMovementLoadedData(selection.data);
-        setNoMovementV2State((current) => ({
-          ...current,
-          status: selection.reason === "awaiting_v2" ? "empty" : "error",
-          records: [],
-          receivedCount: 0,
-          publicationId: null,
-          updatedAt: null,
-          collectionDate: null,
-          publishedAt: null,
-          error: selection.v2Error,
-        }));
       })();
     }, 180);
 
@@ -4152,7 +3938,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [applyMovementLoadedData, dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, responsibilityLoaded, view, viewerAuthorization]);
+  }, [applyMovementLoadedData, dashboardSourcesReady, isMatrixAdminViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "bipagem" || isFirstMileUnderReview) return undefined;
@@ -6351,44 +6137,24 @@ export function DashboardApp() {
   };
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
-  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer);
-  const noMovementFallbackMessage = movementFallbackNotice === "awaiting_v2"
-    ? t("Fonte anterior — aguardando atualização dos dados")
-    : movementFallbackNotice === "v2_unavailable"
-      ? t("V2 indisponível — exibindo dados da fonte anterior")
-      : movementFallbackNotice === "v2_invalid"
-        ? t("V2 não validada — exibindo dados da fonte anterior")
-        : null;
-  const noMovementFallbackIndicator = isMatrixAdminViewer && noMovementFallbackMessage ? (
-    <div className="dashboard-source-file-label" role="status" data-testid="no-movement-legacy-fallback">
-      <Database size={14} /> {noMovementFallbackMessage}
-    </div>
-  ) : null;
+  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao";
+  const noMovementHasPublishedRecords = noMovementV2State.status === "ready" && noMovementV2State.receivedCount > 0;
+  const noMovementAvailabilityText = noMovementAvailabilityMessage(noMovementV2State.status, noMovementV2State.publicationId);
   const noMovementV2Diagnostic = isMatrixAdminViewer ? (
-    <section className="filters-card taxa-filters-card" aria-label={t("Diagnóstico temporário da Data Foundation V2")} data-testid="no-movement-v2-diagnostic">
+    <section className="filters-card taxa-filters-card" aria-label={t("Status da fonte oficial Sem Movimentação")} data-testid="no-movement-v2-diagnostic">
       <div className="filters-card-top">
         <div>
-          <span className="card-eyebrow">{t("DIAGNÓSTICO TEMPORÁRIO · DATA FOUNDATION V2")}</span>
-          <p>{t("Snapshot JMS vigente conectado aos cards, filtros e tabelas do painel.")}</p>
+          <span className="card-eyebrow">{t("FONTE OFICIAL · DATA FOUNDATION V2")}</span>
+          <p>{t("Indicadores, filtros e tabelas utilizam exclusivamente o snapshot JMS vigente.")}</p>
         </div>
       </div>
       <div
         className={`filter-summary${noMovementV2State.status === "error" ? " invalid" : ""}`}
-        role={noMovementV2State.status === "error" ? "alert" : "status"}
+        role="status"
         aria-live="polite"
       >
-        <span><strong>{t("Status V2:")}</strong> {noMovementV2State.status === "idle"
-          ? t("Aguardando consulta")
-          : noMovementV2State.status === "loading"
-            ? t("Consultando snapshot vigente…")
-            : noMovementV2State.status === "ready"
-              ? t("Snapshot conectado")
-            : noMovementV2State.status === "empty"
-              ? noMovementV2State.error
-                ? t("Publicação V2 compatível ainda não disponível")
-                : t("Snapshot vigente sem registros")
-              : t("Erro de conexão")}</span>
-        <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || noMovementV2State.status === "empty" ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
+        <span><strong>{t("Status V2:")}</strong> {t(noMovementAvailabilityText)}</span>
+        <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || (noMovementV2State.status === "empty" && noMovementV2State.publicationId) ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
         <span><strong>{t("Colunas:")}</strong> {formatNumber(noMovementV2State.columnCount)}</span>
         <span><strong>{t("Publicação:")}</strong> {noMovementV2State.publicationId ?? "—"}</span>
         <span><strong>{t("Data da coleta:")}</strong> {noMovementV2State.collectionDate ? formatDate(noMovementV2State.collectionDate) : "—"}</span>
@@ -6601,7 +6367,7 @@ export function DashboardApp() {
   const dashboardActionBand = (
     <DashboardActionBand
       reportDate={reportGeneratedAt}
-      demoMode={LOCAL_DASHBOARD_DEMO_MODE && !(
+        demoMode={view !== "movimentacao" && LOCAL_DASHBOARD_DEMO_MODE && !(
         (view === "monitoramento" && loaded?.sourceType === "MANUAL_UPLOAD") ||
         (view === "taxa" && taxaLoaded?.sourceType === "MANUAL_UPLOAD")
       )}
@@ -7247,17 +7013,6 @@ export function DashboardApp() {
                 buildTaxaLoadedData(source.parsed, source.fileName, source.importedAt, "MANUAL_UPLOAD", source.fileSizeBytes, source.contentType),
               );
               setView("taxa");
-            } else if (dataSourceDialogId === "movement") {
-              applyMovementLoadedData(buildMovementLoadedData(
-                source.parsed,
-                source.fileName,
-                source.importedAt,
-                responsibilityLoaded,
-                "MANUAL_UPLOAD",
-                source.fileSizeBytes,
-                source.contentType,
-              ));
-              setView("movimentacao");
             } else if (dataSourceDialogId === "sellerPerformance") {
               setSellerManualSource(source);
               applySellerPerformanceLoadedData(
@@ -7287,11 +7042,6 @@ export function DashboardApp() {
                 buildTaxaLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", "DEMONSTRATION"),
               );
             } else setTaxaLoaded(null);
-          } else if (dataSourceDialogId === "movement") {
-            if (LOCAL_DASHBOARD_DEMO_MODE && viewerIdentity) {
-              const fixture = scopeDemoWorkbook(DASHBOARD_DEMO_FIXTURES.movement, viewerIdentity);
-              applyMovementLoadedData(buildMovementLoadedData(fixture, DEMO_WORKBOOK_NAME, "2026-09-23T12:00:00.000Z", responsibilityLoaded, "DEMONSTRATION"));
-            } else setMovementLoaded(null);
           } else if (dataSourceDialogId === "sellerPerformance") {
             setSellerManualSource(null);
             setSellerPerformanceLoaded(null);
@@ -7302,15 +7052,16 @@ export function DashboardApp() {
       /> : null}
 
       <main
-        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
-        data-v2-source={view === "taxa" && isMatrixAdminViewer ? "collection_rate" : undefined}
-        data-v2-status={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : undefined}
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
+        data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : undefined}
+        data-v2-source={view === "movimentacao" && isMatrixAdminViewer ? "no_movement" : view === "taxa" && isMatrixAdminViewer ? "collection_rate" : undefined}
+        data-v2-status={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.status : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : undefined}
         data-v2-period-start={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateFrom : undefined}
         data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : undefined}
-        data-v2-record-count={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : undefined}
-        data-v2-column-count={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : undefined}
+        data-v2-record-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.receivedCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : undefined}
+        data-v2-column-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.columnCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : undefined}
         data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.updatedAt ?? undefined : undefined}
-        data-v2-error={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : undefined}
+        data-v2-error={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : undefined}
       >
         {view === "home" ? (
           showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
@@ -7323,7 +7074,7 @@ export function DashboardApp() {
             t={t}
             canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
           /> : null
-        ) : isFirstMileUnderReview ? (
+        ) : isFirstMileUnderReview && view !== "movimentacao" ? (
           <DashboardUnderDevelopment
             title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
             description={dashboardCards.find((card) => card.id === view)?.description ?? ""}
@@ -7597,34 +7348,20 @@ export function DashboardApp() {
             </>
           )
         ) : view === "movimentacao" ? (
-          !movementLoaded ? (
-            <>
-              {noMovementV2Diagnostic}
-              {noMovementFallbackIndicator}
-              {isMatrixAdminViewer ? (
-                <EmptyDashboardPanel
-                  loading={movementLoading || noMovementV2State.status === "idle" || noMovementV2State.status === "loading"}
-                  error={noMovementV2State.error}
-                  canManageUpload={movementFallbackNotice !== null && viewerIdentity.platform_role === "ADMIN"}
-                  eyebrow="SEM MOVIMENTAÇÃO"
-                  title="Sem movimentação"
-                  sourceLabel={movementFallbackNotice ? "FONTE ANTERIOR" : "SNAPSHOT JMS · DATA FOUNDATION V2"}
-                  emptyTitle={noMovementV2State.publicationId && noMovementV2State.status === "empty" ? "Snapshot oficial sem registros" : "Aguardando snapshot oficial"}
-                  emptyDescription={noMovementV2State.publicationId && noMovementV2State.status === "empty"
-                    ? "O snapshot V2 está publicado e validado, mas não contém registros."
-                    : movementFallbackNotice
-                      ? "Nenhuma fonte anterior está disponível para exibição."
-                      : "O painel será disponibilizado quando houver um snapshot JMS publicado e válido."}
-                  loadingDescription="Carregando o snapshot JMS vigente..."
-                  onDrop={() => setDataSourceDialogId("movement")}
-                  onAddSource={() => setDataSourceDialogId("movement")}
-                  inputId="movement-upload"
-                  t={t}
-                />
-              ) : (
-                <EmptyDashboardPanel loading={movementLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={() => setDataSourceDialogId("movement")} onAddSource={() => setDataSourceDialogId("movement")} inputId="movement-upload" eyebrow="SEM MOVIMENTAÇÃO" title="Sem movimentação" sourceLabel="Fonte de dados" t={t} />
-              )}
-            </>
+          !isMatrixAdminViewer ? (
+            <section className="dashboard-source-availability unavailable" role="alert" data-testid="no-movement-v2-restricted">
+              <div className="dashboard-intro">
+                <div><div className="eyebrow"><Activity size={15} /> {t("SEM MOVIMENTAÇÃO")}</div><h1>{t("Sem movimentação")}</h1></div>
+              </div>
+              <p>{t("A consulta deste dashboard exige perfil ADMIN com escopo matrix.")}</p>
+            </section>
+          ) : !movementLoaded ? (
+            <section className="dashboard-source-availability" role="status" aria-live="polite">
+              <div className="dashboard-intro">
+                <div><div className="eyebrow"><Activity size={15} /> {t("SEM MOVIMENTAÇÃO")}</div><h1>{t("Sem movimentação")}</h1></div>
+              </div>
+              <p>{t(noMovementAvailabilityText)}</p>
+            </section>
           ) : (
             <>
               <section className="dashboard-intro">
@@ -7633,25 +7370,23 @@ export function DashboardApp() {
                   <h1>{t("Sem movimentação")}</h1>
                   <p>{t(movementLoaded.format === "summary" ? "Total sem movimentação por regional, base, RM, RGM e região do RM." : "Pedidos sem movimentação por AGING, regional, RM, base, status, origem e período.")}</p>
                 </div>
-                <div className="dataset-meta" aria-label={t("Resumo do arquivo de movimentação")}>
-                  <span><Layers3 size={16} /> {t("{count} pedidos", { count: formatNumber(movementSummary.totalStopped) })}</span>
-                  <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(movementRegionOptions.length) })}</span>
+                <div className="dataset-meta" aria-label={t("Resumo da fonte oficial de movimentação")}>
+                  <span><Layers3 size={16} /> {noMovementHasPublishedRecords ? t("{count} pedidos", { count: formatNumber(movementSummary.totalStopped) }) : t(noMovementAvailabilityText)}</span>
+                  <span><MapPin size={16} /> {noMovementHasPublishedRecords ? t("{count} regionais", { count: formatNumber(movementRegionOptions.length) }) : t(noMovementAvailabilityText)}</span>
                   <span><Database size={16} /> {t("{count} colunas", { count: formatNumber(movementLoaded.displayColumns.length) })}</span>
-                  <span><CircleAlert size={16} /> {t("{count} bases críticas", { count: formatNumber(movementSummary.criticalBases) })}</span>
-                  <span><CalendarDays size={16} /> {movementLoaded.sourceType === "DATA_FOUNDATION_V2"
+                  <span><CircleAlert size={16} /> {noMovementHasPublishedRecords ? t("{count} bases críticas", { count: formatNumber(movementSummary.criticalBases) }) : t(noMovementAvailabilityText)}</span>
+                  <span><CalendarDays size={16} /> {noMovementHasPublishedRecords && movementLoaded.sourceType === "DATA_FOUNDATION_V2"
                     ? t("Data da coleta: {date}", { date: movementLoaded.collectionDate ? formatDate(movementLoaded.collectionDate) : "—" })
-                    : t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) })}</span>
+                    : noMovementHasPublishedRecords ? t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) }) : t(noMovementAvailabilityText)}</span>
                 </div>
               </section>
               {noMovementV2Diagnostic}
-              {noMovementFallbackIndicator}
-              {dashboardActionBand}
+              {noMovementHasPublishedRecords ? dashboardActionBand : null}
 
-              {error ? (
+              {noMovementV2State.status === "error" && noMovementV2State.error ? (
                 <div className="inline-alert error" role="alert">
                   <CircleAlert size={18} />
-                  <span>{t(error)}</span>
-                  <button type="button" onClick={() => setError(null)} aria-label={t("Fechar aviso")}><X size={16} /></button>
+                  <span><strong>{t("Erro ao consultar a Data Foundation V2.")}</strong> {noMovementV2State.error}</span>
                 </div>
               ) : null}
 
@@ -7680,6 +7415,8 @@ export function DashboardApp() {
                     singular={t("regional")}
                     plural={t("regionais")}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect
@@ -7692,6 +7429,8 @@ export function DashboardApp() {
                     plural="RM"
                     getOptionLabel={(option) => t(option)}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect
@@ -7703,6 +7442,8 @@ export function DashboardApp() {
                     singular={t("região do RM")}
                     plural={t("regiões do RM")}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect
@@ -7714,15 +7455,19 @@ export function DashboardApp() {
                     singular={t("base")}
                     plural={t("bases")}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect label="RGM" options={movementRgmOptions} selected={movementSelectedRgms}
                     onChange={(value) => applyMovementFilterSelection("rgms", value)} allLabel={t("Todos os RGM")}
-                    singular="RGM" plural="RGM" searchable t={t} />
+                    singular="RGM" plural="RGM" searchable disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)} t={t} />
                   {movementLoaded.format === "summary" ? (
                     <div className="filter-field">
                       <label className="filter-label" htmlFor="movement-metric">{t("Indicador / AGING")}</label>
                       <select className="date-input" id="movement-metric" value={movementSummaryMetric}
+                        disabled={!noMovementHasPublishedRecords}
                         onChange={(event) => { setMovementSummaryMetric(event.target.value); setMovementPage(1); }}>
                         {MOVEMENT_SUMMARY_METRICS.map(([key, label]) => <option key={key} value={key}>{t(label)}</option>)}
                       </select>
@@ -7730,11 +7475,11 @@ export function DashboardApp() {
                   ) : (<>
                   <div className="filter-field">
                     <label className="filter-label" htmlFor="movement-date-start">{t("Data inicial")}</label>
-                    <input className="date-input" id="movement-date-start" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateStart} onChange={(event) => { setMovementDateStart(event.target.value); setMovementPage(1); }} />
+                    <input className="date-input" id="movement-date-start" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateStart} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateStart(event.target.value); setMovementPage(1); }} />
                   </div>
                   <div className="filter-field">
                     <label className="filter-label" htmlFor="movement-date-end">{t("Data final")}</label>
-                    <input className="date-input" id="movement-date-end" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateEnd} onChange={(event) => { setMovementDateEnd(event.target.value); setMovementPage(1); }} />
+                    <input className="date-input" id="movement-date-end" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateEnd} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateEnd(event.target.value); setMovementPage(1); }} />
                   </div>
                   <MultiSelect
                     label={t("Origem do pedido")}
@@ -7745,6 +7490,8 @@ export function DashboardApp() {
                     singular={t("Origem")}
                     plural={t("Origens")}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect
@@ -7756,6 +7503,8 @@ export function DashboardApp() {
                     singular="AGING"
                     plural="AGING"
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   <MultiSelect
@@ -7767,6 +7516,8 @@ export function DashboardApp() {
                     singular={t("status")}
                     plural={t("status")}
                     searchable
+                    disabled={!noMovementHasPublishedRecords}
+                    disabledLabel={t(noMovementAvailabilityText)}
                     t={t}
                   />
                   </>)}
@@ -7789,28 +7540,28 @@ export function DashboardApp() {
                 <KpiCard
                   icon={<Layers3 size={20} />}
                   label={t("Total sem movimentação")}
-                  value={formatCompact(movementSummary.totalStopped)}
-                  detail={t("{count} pedidos sem movimentação", { count: formatNumber(movementSummary.totalStopped) })}
+                  value={noMovementHasPublishedRecords ? formatCompact(movementSummary.totalStopped) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{count} pedidos sem movimentação", { count: formatNumber(movementSummary.totalStopped) }) : t(noMovementAvailabilityText)}
                 />
                 <KpiCard
                   icon={<Database size={20} />}
                   label={t(movementLoaded.format === "summary" ? "Pedidos em trânsito" : "Pedidos no período")}
-                  value={formatCompact(movementSummary.inTransit)}
-                  detail={t("{count} pedidos no filtro", { count: formatNumber(movementSummary.inTransit) })}
+                  value={noMovementHasPublishedRecords ? formatCompact(movementSummary.inTransit) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{count} pedidos no filtro", { count: formatNumber(movementSummary.inTransit) }) : t(noMovementAvailabilityText)}
                   tone="orange"
                 />
                 <KpiCard
                   icon={<CircleAlert size={20} />}
                   label={t("Acima de 2 dias")}
-                  value={formatCompact(movementSummary.over2Days)}
-                  detail={t("{rate} dos pedidos sem movimentação", { rate: formatRate(movementSummary.over2Rate) })}
+                  value={noMovementHasPublishedRecords ? formatCompact(movementSummary.over2Days) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{rate} dos pedidos sem movimentação", { rate: formatRate(movementSummary.over2Rate) }) : t(noMovementAvailabilityText)}
                   tone="dark"
                 />
                 <KpiCard
                   icon={<MapPin size={20} />}
                   label={t("Bases críticas")}
-                  value={formatNumber(movementSummary.criticalBases)}
-                  detail={t("com volume sem movimentação acima de 2 dias")}
+                  value={noMovementHasPublishedRecords ? formatNumber(movementSummary.criticalBases) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("com volume sem movimentação acima de 2 dias") : t(noMovementAvailabilityText)}
                   tone="soft"
                 />
               </section>
@@ -7819,28 +7570,28 @@ export function DashboardApp() {
                 <KpiCard
                   icon={<Activity size={20} />}
                   label={t("Acima de 14 dias")}
-                  value={formatCompact(movementSummary.over14Days)}
-                  detail={t("{count} pedidos mais antigos", { count: formatNumber(movementSummary.over14Days) })}
+                  value={noMovementHasPublishedRecords ? formatCompact(movementSummary.over14Days) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{count} pedidos mais antigos", { count: formatNumber(movementSummary.over14Days) }) : t(noMovementAvailabilityText)}
                 />
                 <KpiCard
                   icon={<ShieldCheck size={20} />}
                   label={t("Acima de 30 dias")}
-                  value={formatCompact(movementSummary.over30Days)}
-                  detail={t("{count} pedidos críticos", { count: formatNumber(movementSummary.over30Days) })}
+                  value={noMovementHasPublishedRecords ? formatCompact(movementSummary.over30Days) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{count} pedidos críticos", { count: formatNumber(movementSummary.over30Days) }) : t(noMovementAvailabilityText)}
                   tone="orange"
                 />
                 <KpiCard
                   icon={<MapPin size={20} />}
-                  label={t("Regional")}
-                  value={formatNumber(movementSummary.activeRegions)}
-                  detail={t("{count} selecionado(s)", { count: movementSelectedRegions.size })}
+                  label={t("Total de regionais")}
+                  value={noMovementHasPublishedRecords ? formatNumber(movementSummary.activeRegions) : "—"}
+                  detail={noMovementHasPublishedRecords ? t("{count} selecionado(s)", { count: movementSelectedRegions.size }) : t(noMovementAvailabilityText)}
                   tone="dark"
                 />
                 <KpiCard
                   icon={<PackageCheck size={20} />}
                   label={t("Regional mais crítica")}
-                  value={movementSummary.topRegion ? formatCompact(movementSummary.topRegion[1]) : "0"}
-                  detail={movementSummary.topRegion?.[0] ?? t("Sem volume crítico")}
+                  value={noMovementHasPublishedRecords ? movementSummary.topRegion ? formatCompact(movementSummary.topRegion[1]) : "0" : "—"}
+                  detail={noMovementHasPublishedRecords ? movementSummary.topRegion?.[0] ?? t("Sem volume crítico") : t(noMovementAvailabilityText)}
                   tone="soft"
                 />
               </section>
@@ -7875,7 +7626,7 @@ export function DashboardApp() {
                       </table>
                     </div>
                   ) : (
-                    <EmptyChart message={t("Não há pedidos sem movimentação para os filtros selecionados.")} />
+                    <EmptyChart message={t(noMovementHasPublishedRecords ? "Não há pedidos sem movimentação para os filtros selecionados." : noMovementAvailabilityText)} />
                   )}
                 </article>
 
@@ -7909,7 +7660,7 @@ export function DashboardApp() {
                       </table>
                     </div>
                   ) : (
-                    <EmptyChart message={t("Não há pedidos sem movimentação para os filtros selecionados.")} />
+                    <EmptyChart message={t(noMovementHasPublishedRecords ? "Não há pedidos sem movimentação para os filtros selecionados." : noMovementAvailabilityText)} />
                   )}
                 </article>
               </section>
@@ -7919,7 +7670,7 @@ export function DashboardApp() {
                   <div>
                     <span className="card-eyebrow">{t("DETALHAMENTO")}</span>
                     <h2 id="movement-detail-heading">{t("Dados por base")}</h2>
-                    <p>{t("Todas as colunas do arquivo, ordenadas pelo total sem movimentação.")}</p>
+                    <p>{t("Todas as 18 colunas do contrato oficial, ordenadas pelo total sem movimentação.")}</p>
                   </div>
                   <div className="table-detail-actions">
                     <button className="table-download-button" type="button" onClick={downloadMovementTableExcel} disabled={movementTableRows.length === 0}>
@@ -8015,24 +7766,45 @@ export function DashboardApp() {
                       </div>
                     </div>
                   </>
-                ) : (
+                ) : noMovementHasPublishedRecords ? (
                   <div className="table-empty">
                     <Database size={28} />
                     <h3>{t("Nenhum dado encontrado")}</h3>
                     <p>{t("Ajuste a busca ou os filtros para visualizar os registros.")}</p>
                     <button type="button" onClick={() => resetMovementFilters()}>{t("Limpar filtros")}</button>
                   </div>
+                ) : (
+                  <div className="table-scroll movement-table-scroll" data-testid="no-movement-v2-empty-contract-table">
+                    <table className="dashboard-data-table">
+                      <thead>
+                        <tr>
+                          {movementLoaded.displayColumns.map((column) => <th key={column}>{t(column)}</th>)}
+                          <th>{t("Região do RM")}</th>
+                          <th>RM</th>
+                          <th>RGM</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td colSpan={movementLoaded.displayColumns.length + 3}>
+                            <div className="table-empty" role={noMovementV2State.status === "error" ? "alert" : "status"}>
+                              <Database size={28} />
+                              <h3>{t(noMovementAvailabilityText)}</h3>
+                              {noMovementV2State.error ? <p>{noMovementV2State.error}</p> : null}
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </section>
 
               <footer className="dashboard-footer">
-                <span><ShieldCheck size={15} /> {t(isMatrixAdminViewer ? "Snapshot oficial V2 disponível para ADMIN/matrix" : "Última movimentação publicada disponível para todos pelo link")}</span>
-                <span>{t("Arquivo: {file} · Atualizado em {date}", {
-                  file: movementLoaded.fileName,
-                  date: movementLoaded.sourceType === "DATA_FOUNDATION_V2" && movementLoaded.updatedAt
-                    ? formatDateTime(movementLoaded.updatedAt)
-                    : movementLoaded.updatedAt ? formatDateTime(movementLoaded.updatedAt) : "—",
-                })}</span>
+                <span><ShieldCheck size={15} /> {t("Fonte exclusiva Data Foundation V2 · acesso ADMIN/matrix")}</span>
+                <span>{noMovementHasPublishedRecords && movementLoaded.collectionDate
+                  ? t("Data da coleta: {date} · Publicada em: {publishedAt}", { date: formatDate(movementLoaded.collectionDate), publishedAt: movementLoaded.publishedAt ? formatDateTime(movementLoaded.publishedAt) : "—" })
+                  : t(noMovementAvailabilityText)}</span>
               </footer>
             </>
           )

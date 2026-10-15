@@ -35,9 +35,9 @@ test("modern source actions share one component and are limited to configured so
   for (const mapping of [
     'monitoramento: "monitoring"',
     'taxa: "taxa"',
-    'movimentacao: "movement"',
     'sellers: "sellerPerformance"',
   ]) assert.ok(frontend.includes(mapping), `missing configured dashboard source mapping: ${mapping}`);
+  assert.ok(!frontend.includes('movimentacao: "movement"'), "Sem Movimentação must not expose a legacy source action");
   assert.match(catalog, /bipagem: pendingSource\("bipagem", "Falha na coleta PDD"\)/);
 });
 

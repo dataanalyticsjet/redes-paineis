@@ -1,53 +1,18 @@
 import { UNASSIGNED_RGM, UNASSIGNED_RM, UNASSIGNED_RM_AREA, officialRgmForRegion } from "../responsibility.ts";
-import { NoMovementV2LoadError, type NoMovementV2Record } from "./no-movement.ts";
+import type { NoMovementV2Record } from "./no-movement.ts";
 
-export type NoMovementFallbackReason = "awaiting_v2" | "v2_unavailable" | "v2_invalid";
+export type NoMovementAvailabilityStatus = "idle" | "loading" | "ready" | "empty" | "error";
 
-export type NoMovementSourceSelection<TV2, TLegacy> =
-  | { source: "V2"; data: TV2 }
-  | {
-      source: "LEGACY";
-      data: TLegacy | null;
-      reason: NoMovementFallbackReason;
-      v2Error: string;
-      legacyUnavailable: boolean;
-    };
-
-export async function selectNoMovementSource<TV2, TLegacy>(
-  loadV2: () => Promise<TV2>,
-  loadLegacy: () => Promise<TLegacy | null>,
-): Promise<NoMovementSourceSelection<TV2, TLegacy>> {
-  try {
-    return { source: "V2", data: await loadV2() };
-  } catch (cause) {
-    const reason: NoMovementFallbackReason = cause instanceof NoMovementV2LoadError
-      ? cause.kind === "empty" || cause.kind === "incompatible"
-        ? "awaiting_v2"
-        : cause.kind === "request"
-          ? "v2_unavailable"
-          : "v2_invalid"
-      : "v2_unavailable";
-    const v2Error = cause instanceof NoMovementV2LoadError
-      ? cause.message
-      : "Não foi possível validar a publicação da Data Foundation V2.";
-    try {
-      return {
-        source: "LEGACY",
-        data: await loadLegacy(),
-        reason,
-        v2Error,
-        legacyUnavailable: false,
-      };
-    } catch {
-      return {
-        source: "LEGACY",
-        data: null,
-        reason,
-        v2Error,
-        legacyUnavailable: true,
-      };
-    }
+export function noMovementAvailabilityMessage(
+  status: NoMovementAvailabilityStatus,
+  publicationId: string | null,
+): string {
+  if (status === "empty") {
+    return publicationId ? "Publicação V2 sem registros" : "Aguardando primeira importação";
   }
+  if (status === "error") return "Erro ao consultar a Data Foundation V2.";
+  if (status === "ready") return "Dados da Data Foundation V2 carregados";
+  return "Carregando publicação vigente da Data Foundation V2…";
 }
 
 export const NO_MOVEMENT_SOURCE_HEADERS = {

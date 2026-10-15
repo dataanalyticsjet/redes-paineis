@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NoMovementV2LoadError } from "../src/lib/data-foundation/no-movement.ts";
 import {
   mapNoMovementV2Record,
   NO_MOVEMENT_SOURCE_HEADERS,
-  selectNoMovementSource,
+  noMovementAvailabilityMessage,
 } from "../src/lib/data-foundation/no-movement-dashboard.ts";
 
 const record = (sourceRowNo: number) => ({
@@ -74,85 +73,10 @@ test("unmapped JMS rows remain visible with original region and no invented resp
   assert.equal(unmapped.totalStopped, 100);
 });
 
-test("sem publicação compatível, preserva integralmente a fonte legada", async () => {
-  const legacy = { sourceType: "MANUAL_UPLOAD", rows: [{ id: "legacy-row", total: 17 }] };
-  let legacyLoadCount = 0;
-  const selected = await selectNoMovementSource(
-    async () => { throw new NoMovementV2LoadError("empty", "Ainda não existe snapshot V2."); },
-    async () => { legacyLoadCount += 1; return legacy; },
-  );
-
-  assert.equal(selected.source, "LEGACY");
-  if (selected.source !== "LEGACY") throw new Error("A fonte legada deveria ter sido escolhida.");
-  assert.strictEqual(selected.data, legacy);
-  assert.equal(selected.reason, "awaiting_v2");
-  assert.equal(legacyLoadCount, 1);
-});
-
-test("publicação V1 ou contrato V2 ainda não aprovado não substitui a fonte legada", async () => {
-  const legacy = { sourceType: "MANUAL_UPLOAD", rows: [{ id: "legacy-row", total: 19 }] };
-  const selected = await selectNoMovementSource(
-    async () => { throw new NoMovementV2LoadError("incompatible", "A publicação vigente usa o contrato V1."); },
-    async () => legacy,
-  );
-
-  assert.equal(selected.source, "LEGACY");
-  if (selected.source !== "LEGACY") throw new Error("A publicação V1 não pode ser usada como V2.");
-  assert.strictEqual(selected.data, legacy);
-  assert.equal(selected.reason, "awaiting_v2");
-  assert.match(selected.v2Error, /contrato V1/);
-});
-
-test("usa somente V2 após validar a publicação completa, sem carregar o legado", async () => {
-  const snapshot = { publicationId: "v2", rowCount: 0, records: [] };
-  let legacyLoadCount = 0;
-  const selected = await selectNoMovementSource(
-    async () => snapshot,
-    async () => { legacyLoadCount += 1; return { sourceType: "MANUAL_UPLOAD" }; },
-  );
-
-  assert.equal(selected.source, "V2");
-  if (selected.source !== "V2") throw new Error("A publicação V2 validada deveria ser escolhida.");
-  assert.strictEqual(selected.data, snapshot);
-  assert.equal(legacyLoadCount, 0);
-});
-
-test("falha de rede mantém dados anteriores identificados como legados", async () => {
-  const legacy = { sourceType: "MANUAL_UPLOAD", rows: [{ id: "legacy-row", total: 23 }] };
-  const selected = await selectNoMovementSource(
-    async () => { throw new NoMovementV2LoadError("request", "A API V2 está indisponível."); },
-    async () => legacy,
-  );
-
-  assert.equal(selected.source, "LEGACY");
-  if (selected.source !== "LEGACY") throw new Error("A fonte anterior deveria permanecer disponível.");
-  assert.strictEqual(selected.data, legacy);
-  assert.equal(selected.reason, "v2_unavailable");
-  assert.match(selected.v2Error, /API V2 está indisponível/);
-});
-
-test("dados V2 incompletos são descartados integralmente e usam a fonte anterior", async () => {
-  const legacy = { sourceType: "MANUAL_UPLOAD", rows: [{ id: "legacy-row", total: 29 }] };
-  const selected = await selectNoMovementSource(
-    async () => { throw new NoMovementV2LoadError("inconsistent", "A paginação V2 ficou incompleta."); },
-    async () => legacy,
-  );
-
-  assert.equal(selected.source, "LEGACY");
-  if (selected.source !== "LEGACY") throw new Error("Dados V2 parciais não podem ser apresentados.");
-  assert.strictEqual(selected.data, legacy);
-  assert.equal(selected.reason, "v2_invalid");
-});
-
-test("se a fonte legada também falhar, não apresenta dados parciais nem mistura fontes", async () => {
-  const selected = await selectNoMovementSource(
-    async () => { throw new NoMovementV2LoadError("invalid_data", "A publicação V2 é incompatível."); },
-    async () => { throw new Error("legacy failure"); },
-  );
-
-  assert.equal(selected.source, "LEGACY");
-  if (selected.source !== "LEGACY") throw new Error("A contingência deveria permanecer explícita.");
-  assert.equal(selected.data, null);
-  assert.equal(selected.legacyUnavailable, true);
-  assert.equal(selected.reason, "v2_invalid");
+test("painel sem publicação V2 informa primeira importação sem recorrer à fonte legada", () => {
+  assert.equal(noMovementAvailabilityMessage("idle", null), "Carregando publicação vigente da Data Foundation V2…");
+  assert.equal(noMovementAvailabilityMessage("loading", null), "Carregando publicação vigente da Data Foundation V2…");
+  assert.equal(noMovementAvailabilityMessage("empty", null), "Aguardando primeira importação");
+  assert.equal(noMovementAvailabilityMessage("empty", "publication-1"), "Publicação V2 sem registros");
+  assert.equal(noMovementAvailabilityMessage("error", null), "Erro ao consultar a Data Foundation V2.");
 });

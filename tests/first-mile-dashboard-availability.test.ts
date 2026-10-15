@@ -108,14 +108,40 @@ test("review presentation preserves the five dashboard routes and the source met
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
   const loader = await readFile(new URL("../src/features/dashboards/dashboard-availability.ts", import.meta.url), "utf8");
 
-  assert.match(source, /isFirstMileUnderReview \? \(/);
+  assert.match(source, /isFirstMileUnderReview && view !== "movimentacao" \? \(/);
   assert.match(source, /<DashboardUnderDevelopment/);
   assert.match(source, /Os indicadores e as fórmulas deste painel estão em revisão/);
   assert.match(source, /view !== "monitoramento" \|\| isFirstMileUnderReview/);
   assert.match(source, /view !== "taxa" \|\| isFirstMileUnderReview/);
   assert.match(source, /view !== "sellers" \|\| isFirstMileUnderReview/);
-  assert.match(source, /view !== "movimentacao" \|\| isFirstMileUnderReview/);
+  assert.match(source, /if \(view !== "movimentacao"\) return undefined/);
   assert.match(source, /view !== "bipagem" \|\| isFirstMileUnderReview/);
   assert.match(loader, /\/publications\?limit=1&offset=0/);
   assert.doesNotMatch(loader, /\/records|export\.csv/);
+});
+
+test("Sem Movimentação abre o dashboard V2 oficial e nunca consulta uma fonte legada", async () => {
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const adapter = await readFile(new URL("../src/lib/data-foundation/no-movement-dashboard.ts", import.meta.url), "utf8");
+
+  assert.match(source, /data-testid=\{view === "movimentacao" \? "no-movement-v2-dashboard"/);
+  assert.match(source, /loadCurrentNoMovementSnapshot\(/);
+  assert.match(source, /noMovementV2State\.status === "error" && noMovementV2State\.error/);
+  assert.match(source, /noMovementHasPublishedRecords \? formatCompact\(movementSummary\.totalStopped\) : "—"/);
+  assert.match(adapter, /Aguardando primeira importação/);
+  assert.match(source, /"Total sem movimentação"/);
+  assert.match(source, /"Pedidos em trânsito"/);
+  assert.match(source, /"Acima de 2 dias"/);
+  assert.match(source, /"Bases críticas"/);
+  assert.match(source, /"Acima de 14 dias"/);
+  assert.match(source, /"Acima de 30 dias"/);
+  assert.match(source, /"Total de regionais"/);
+  assert.match(source, /"Regional mais crítica"/);
+  assert.match(source, /"Sem movimentação por regional"/);
+  assert.match(source, /"Sem movimentação por RM"/);
+  assert.match(source, /"Dados por base"/);
+  assert.match(source, /Todas as 18 colunas do contrato oficial/);
+  assert.match(source, /disabled=\{!noMovementHasPublishedRecords\}/);
+  assert.doesNotMatch(source, /getMovementSource\(|selectNoMovementSource|noMovementFallback|movementFallbackNotice/);
+  assert.doesNotMatch(adapter, /LEGACY|selectNoMovementSource|fallback/i);
 });
