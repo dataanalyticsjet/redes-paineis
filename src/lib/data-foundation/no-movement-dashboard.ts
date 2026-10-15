@@ -1,5 +1,6 @@
 import { UNASSIGNED_RGM, UNASSIGNED_RM, UNASSIGNED_RM_AREA, officialRgmForRegion } from "../responsibility.ts";
 import type { NoMovementV2Record } from "./no-movement.ts";
+import { formatMovementRate } from "../movement-summary.ts";
 
 export type NoMovementAvailabilityStatus = "idle" | "loading" | "ready" | "empty" | "error";
 
@@ -41,6 +42,111 @@ export const NO_MOVEMENT_SOURCE_HEADERS = {
   | "stopped_over_10_days" | "stopped_over_14_days" | "stopped_over_30_days" | "last_operation_at"
   | "stopped_14_plus_days_rate" | "stopped_30_plus_days_rate"
 >, string>;
+
+type NoMovementSourceField = keyof typeof NO_MOVEMENT_SOURCE_HEADERS;
+export type NoMovementSourceColumnKind = "text" | "quantity" | "datetime" | "percentage";
+
+export const NO_MOVEMENT_SOURCE_COLUMN_KINDS = {
+  reported_region: "text",
+  source_base_code: "text",
+  source_base_name: "text",
+  stopped_orders: "quantity",
+  orders_in_transit: "quantity",
+  stopped_over_1_day: "quantity",
+  stopped_over_2_days: "quantity",
+  stopped_over_3_days: "quantity",
+  stopped_over_4_days: "quantity",
+  stopped_over_5_days: "quantity",
+  stopped_over_6_days: "quantity",
+  stopped_over_7_days: "quantity",
+  stopped_over_10_days: "quantity",
+  stopped_over_14_days: "quantity",
+  stopped_over_30_days: "quantity",
+  last_operation_at: "datetime",
+  stopped_14_plus_days_rate: "percentage",
+  stopped_30_plus_days_rate: "percentage",
+} as const satisfies Record<NoMovementSourceField, NoMovementSourceColumnKind>;
+
+const NO_MOVEMENT_SOURCE_FIELD_BY_HEADER = new Map<string, NoMovementSourceField>(
+  Object.entries(NO_MOVEMENT_SOURCE_HEADERS).map(([field, header]) => [header, field as NoMovementSourceField]),
+);
+
+function numericCellValue(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatExcelDateTime(value: number, locale: string): string {
+  const maxExcelSerial = 2_958_465;
+  if (value < 0 || value > maxExcelSerial) return String(value);
+  const wholeDays = Math.floor(value);
+  const fraction = value - wholeDays;
+  const timestamp = Date.UTC(1899, 11, 30) + wholeDays * 86_400_000 + Math.round(fraction * 86_400_000);
+  return new Intl.DateTimeFormat(locale, {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+  }).format(new Date(timestamp));
+}
+
+export function noMovementSourceColumnKind(header: string): NoMovementSourceColumnKind {
+  const field = NO_MOVEMENT_SOURCE_FIELD_BY_HEADER.get(header);
+  return field ? NO_MOVEMENT_SOURCE_COLUMN_KINDS[field] : "text";
+}
+
+export function formatNoMovementSourceCell(value: unknown, header: string, locale: string): string {
+  const kind = noMovementSourceColumnKind(header);
+  if (kind === "percentage") {
+    return formatMovementRate(numericCellValue(value), locale);
+  }
+  if (kind === "datetime") {
+    if (value instanceof Date && Number.isFinite(value.getTime())) {
+      return new Intl.DateTimeFormat(locale, {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "UTC",
+      }).format(value);
+    }
+    if (typeof value === "number" && Number.isFinite(value)) return formatExcelDateTime(value, locale);
+    return String(value ?? "").trim() || "—";
+  }
+  if (kind === "quantity") {
+    const parsed = numericCellValue(value);
+    if (parsed !== null) {
+      return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(Math.round(parsed));
+    }
+  }
+  return String(value ?? "").trim() || "—";
+}
+
+export function noMovementSourceExcelValue(value: unknown, header: string): string | number | boolean | null | undefined {
+  if (noMovementSourceColumnKind(header) === "quantity") {
+    const parsed = numericCellValue(value);
+    if (parsed !== null && Number.isSafeInteger(parsed)) return parsed;
+  }
+  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  return String(value);
+}
+
+export function noMovementSourceExcelNumberFormat(header: string): string | undefined {
+  switch (noMovementSourceColumnKind(header)) {
+    case "quantity": return "#,##0";
+    case "datetime": return "dd/mm/yyyy hh:mm";
+    case "percentage": return "0.0%";
+    case "text": return undefined;
+  }
+}
 
 export interface NoMovementDashboardRecord {
   key: string;

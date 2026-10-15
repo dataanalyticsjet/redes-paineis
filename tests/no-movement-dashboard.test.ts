@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import * as XLSX from "xlsx";
 import {
+  formatNoMovementSourceCell,
   mapNoMovementV2Record,
+  noMovementSourceColumnKind,
+  noMovementSourceExcelNumberFormat,
+  noMovementSourceExcelValue,
+  NO_MOVEMENT_SOURCE_COLUMN_KINDS,
   NO_MOVEMENT_SOURCE_HEADERS,
   noMovementAvailabilityMessage,
 } from "../src/lib/data-foundation/no-movement-dashboard.ts";
+import { NO_MOVEMENT_V2_COLUMNS } from "../src/lib/data-foundation/no-movement.ts";
 
 const record = (sourceRowNo: number) => ({
   reported_region: "Regional original",
@@ -79,4 +87,44 @@ test("painel sem publicação V2 informa primeira importação sem recorrer à f
   assert.equal(noMovementAvailabilityMessage("empty", null), "Aguardando primeira importação");
   assert.equal(noMovementAvailabilityMessage("empty", "publication-1"), "Publicação V2 sem registros");
   assert.equal(noMovementAvailabilityMessage("error", null), "Erro ao consultar a Data Foundation V2.");
+});
+
+test("quantidades são formatadas por tipo de coluna e não confundidas com seriais de data", () => {
+  const transit = NO_MOVEMENT_SOURCE_HEADERS.orders_in_transit;
+
+  assert.equal(formatNoMovementSourceCell(40_185, transit, "pt-BR"), "40.185");
+  assert.equal(formatNoMovementSourceCell(40_185, transit, "en-US"), "40,185");
+  assert.equal(formatNoMovementSourceCell(40_185, transit, "zh-CN"), "40,185");
+  assert.equal(formatNoMovementSourceCell(0, transit, "pt-BR"), "0");
+  assert.equal(formatNoMovementSourceCell(1_234_567, transit, "pt-BR"), "1.234.567");
+  assert.equal(formatNoMovementSourceCell(40_185, NO_MOVEMENT_SOURCE_HEADERS.source_base_code, "pt-BR"), "40185");
+  assert.equal(formatNoMovementSourceCell(40_185, NO_MOVEMENT_SOURCE_HEADERS.last_operation_at, "pt-BR"), "07/01/2010, 00:00");
+  assert.equal(formatNoMovementSourceCell("2026-10-14 14:25:00", NO_MOVEMENT_SOURCE_HEADERS.last_operation_at, "pt-BR"), "2026-10-14 14:25:00");
+});
+
+test("classificação tipada cobre exatamente as 18 colunas oficiais", () => {
+  const headers = Object.values(NO_MOVEMENT_SOURCE_HEADERS);
+  assert.equal(headers.length, 18);
+  assert.equal(Object.keys(NO_MOVEMENT_SOURCE_COLUMN_KINDS).length, 18);
+  assert.deepEqual(Object.keys(NO_MOVEMENT_SOURCE_HEADERS), NO_MOVEMENT_V2_COLUMNS);
+  assert.deepEqual(headers.map(noMovementSourceColumnKind), [
+    "text", "text", "text", "quantity", "quantity", "quantity", "quantity", "quantity", "quantity",
+    "quantity", "quantity", "quantity", "quantity", "quantity", "quantity", "datetime", "percentage", "percentage",
+  ]);
+});
+
+test("exportação mantém quantidades numéricas e aplica formato inteiro na coluna", async () => {
+  const header = NO_MOVEMENT_SOURCE_HEADERS.orders_in_transit;
+  const exportedValue = noMovementSourceExcelValue("40185", header);
+  const worksheet = XLSX.utils.aoa_to_sheet([[header], [exportedValue]]);
+  const cell = worksheet.A2;
+  assert.equal(cell.t, "n");
+  assert.equal(cell.v, 40_185);
+  assert.equal(noMovementSourceExcelNumberFormat(header), "#,##0");
+  assert.equal(noMovementSourceExcelNumberFormat(NO_MOVEMENT_SOURCE_HEADERS.last_operation_at), "dd/mm/yyyy hh:mm");
+  assert.equal(noMovementSourceExcelNumberFormat(NO_MOVEMENT_SOURCE_HEADERS.stopped_14_plus_days_rate), "0.0%");
+
+  const appSource = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  assert.match(appSource, /noMovementSourceExcelValue\(row\.values\[column\], column\)/);
+  assert.match(appSource, /movementLoaded\.displayColumns\.map\(noMovementSourceExcelNumberFormat\)/);
 });

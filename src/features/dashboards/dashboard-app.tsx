@@ -102,7 +102,6 @@ import {
   aggregateMovementByRegion,
   aggregateMovementByRm,
   deriveMovementFilterOptions,
-  formatMovementRate,
   initialMovementFilterSelections,
   MOVEMENT_SUMMARY_METRICS,
   movementSelectionsAfterChange,
@@ -158,7 +157,11 @@ import {
   type NoMovementV2Record,
 } from "../../lib/data-foundation/no-movement";
 import {
+  formatNoMovementSourceCell,
   mapNoMovementV2Record,
+  noMovementSourceColumnKind,
+  noMovementSourceExcelNumberFormat,
+  noMovementSourceExcelValue,
   NO_MOVEMENT_SOURCE_HEADERS,
   noMovementAvailabilityMessage,
 } from "../../lib/data-foundation/no-movement-dashboard";
@@ -1168,23 +1171,6 @@ function findRequiredHeader(headers: string[], label: string, candidates: string
   throw new Error(`Não encontramos a coluna obrigatória para “${String(label)}”.`);
 }
 
-function formatMovementCell(value: unknown, percentageColumn = false): string {
-  if (percentageColumn) {
-    const parsed = typeof value === "number" ? value : value == null || value === "" ? null : Number(String(value));
-    return formatMovementRate(
-      parsed != null && Number.isFinite(parsed) ? parsed : null,
-      dashboardLocale(activeDashboardLanguage()),
-    );
-  }
-  if (typeof value === "number") {
-    if (value > 20_000 && value < 80_000) return formatExcelDateTime(value);
-    if (Math.abs(value) > 0 && Math.abs(value) < 1) return formatRate(value);
-    return formatNumber(value);
-  }
-  const text = String(value ?? "").trim();
-  return text || "—";
-}
-
 type ExcelExportValue = string | number | boolean | null | undefined;
 
 interface ExcelExportColumn<Row> {
@@ -1237,6 +1223,7 @@ interface ManagementExcelSheet {
   performanceColumn: number;
   targetRate: number | null;
   totalMergeEndColumn?: number;
+  columnNumberFormats?: readonly (string | undefined)[];
 }
 
 async function downloadTaxaManagementExcel(
@@ -1302,6 +1289,8 @@ async function downloadTaxaManagementExcel(
           },
         };
         if (sheet.percentageColumns.includes(columnIndex) && rowIndex >= 2) cell.z = "0.0%";
+        const numberFormat = sheet.columnNumberFormats?.[columnIndex];
+        if (rowIndex >= 2 && numberFormat && typeof cell.v === "number") cell.z = numberFormat;
         if (rowIndex >= 2 && typeof cell.v === "number" && /^valor(?: da arbitragem)?(?:\s|$|\()/i.test(sheet.headers[columnIndex] ?? "")) {
           cell.z = '"R$" #,##0.00';
         }
@@ -1329,20 +1318,6 @@ async function downloadTaxaManagementExcel(
   }
 
   XLSX.writeFile(workbook, fileName, { compression: true, cellStyles: true });
-}
-
-function formatExcelDateTime(value: number): string {
-  const wholeDays = Math.floor(value);
-  const fraction = value - wholeDays;
-  const timestamp = Date.UTC(1899, 11, 30) + wholeDays * 86_400_000 + Math.round(fraction * 86_400_000);
-  return new Intl.DateTimeFormat(dashboardLocale(activeDashboardLanguage()), {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "UTC",
-  }).format(new Date(timestamp));
 }
 
 function formatSellerExcelPeriod(dateStart: string, dateEnd: string): string {
@@ -6517,7 +6492,7 @@ export function DashboardApp() {
         t("Total de pedidos sem movimentação"),
       ];
       const detailRows: ExcelExportValue[][] = movementTableRows.map((row) => [
-        ...movementLoaded.displayColumns.map((column) => row.values[column] as ExcelExportValue),
+        ...movementLoaded.displayColumns.map((column) => noMovementSourceExcelValue(row.values[column], column)),
         row.rmArea,
         row.rm,
         row.rgm,
@@ -6572,6 +6547,10 @@ export function DashboardApp() {
             performanceColumn: -1,
             targetRate: null,
             totalMergeEndColumn: detailHeaders.length - 2,
+            columnNumberFormats: [
+              ...movementLoaded.displayColumns.map(noMovementSourceExcelNumberFormat),
+              undefined, undefined, undefined, undefined,
+            ],
           },
         ],
         summaryFormat ? "sem_movimentacao_resumo_atual.xlsx" : `sem_movimentacao_consolidado_${movementDateStart || "inicio"}_${movementDateEnd || "fim"}.xlsx`,
@@ -7708,16 +7687,13 @@ export function DashboardApp() {
                             <tr key={row.key}>
                               {movementLoaded.displayColumns.map((column) => (
                                 <td
-                                  className={typeof row.values[column] === "number" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
+                                  className={noMovementSourceColumnKind(column) === "quantity" || noMovementSourceColumnKind(column) === "percentage" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
                                   key={column}
                                 >
                                   {column === movementLoaded.columns.region && movementLoaded.sourceType !== "DATA_FOUNDATION_V2" ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
-                                    formatMovementCell(
-                                      row.values[column],
-                                      column === movementLoaded.columns.rate14Days || column === movementLoaded.columns.rate30Days,
-                                    )
+                                    formatNoMovementSourceCell(row.values[column], column, dashboardLocale(activeDashboardLanguage()))
                                   )}
                                 </td>
                               ))}
@@ -7732,16 +7708,13 @@ export function DashboardApp() {
                             <tr key={row.key}>
                               {movementLoaded.displayColumns.map((column) => (
                                 <td
-                                  className={typeof row.values[column] === "number" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
+                                  className={noMovementSourceColumnKind(column) === "quantity" || noMovementSourceColumnKind(column) === "percentage" ? "number-cell" : column === movementLoaded.columns.base ? "base-cell" : undefined}
                                   key={column}
                                 >
                                   {column === movementLoaded.columns.region && movementLoaded.sourceType !== "DATA_FOUNDATION_V2" ? (
                                     <span className="regional-chip">{row.region}</span>
                                   ) : (
-                                    formatMovementCell(
-                                      row.values[column],
-                                      column === movementLoaded.columns.rate14Days || column === movementLoaded.columns.rate30Days,
-                                    )
+                                    formatNoMovementSourceCell(row.values[column], column, dashboardLocale(activeDashboardLanguage()))
                                   )}
                                 </td>
                               ))}
