@@ -4044,7 +4044,7 @@ export function DashboardApp() {
   }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
 
   useEffect(() => {
-    if (view !== "taxa" || isFirstMileUnderReview) return undefined;
+    if (view !== "taxa") return undefined;
     if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
       return undefined;
     }
@@ -4124,7 +4124,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, dashboardSourcesReady, isMatrixAdminViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "movimentacao") return undefined;
@@ -7271,7 +7271,7 @@ export function DashboardApp() {
       /> : null}
 
       <main
-        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
         data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : view === "bipagem" ? "pdd-collection-failure-v2-dashboard-shell" : undefined}
         data-v2-source={view === "movimentacao" && isMatrixAdminViewer ? "no_movement" : view === "taxa" && isMatrixAdminViewer ? "collection_rate" : view === "bipagem" && isMatrixAdminViewer ? "pdd_collection_failure" : undefined}
         data-v2-status={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.status : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.status : undefined}
@@ -7293,7 +7293,7 @@ export function DashboardApp() {
             t={t}
             canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
           /> : null
-        ) : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" ? (
+        ) : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? (
           <DashboardUnderDevelopment
             title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
             description={dashboardCards.find((card) => card.id === view)?.description ?? ""}

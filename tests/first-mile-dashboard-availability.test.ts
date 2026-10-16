@@ -104,25 +104,27 @@ test("dashboard availability keeps authorization and connection failures distinc
   );
 });
 
-test("the PDD dashboard uses V2 while other First Mile routes retain the review presentation", async () => {
+test("Taxa V2 renders its published dashboard while unfinished First Mile panels remain in review", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
   const loader = await readFile(new URL("../src/features/dashboards/dashboard-availability.ts", import.meta.url), "utf8");
 
-  assert.match(source, /isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" \? \(/);
-  assert.match(source, /<DashboardUnderDevelopment/);
-  assert.match(source, /Os indicadores e as fórmulas deste painel estão em revisão/);
+  assert.match(source, /isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" \? \(/);
+  assert.match(source, /className=\{view === "home" \? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" \? "dashboard-main dashboard-main-under-development"/);
+  assert.match(source, /if \(view !== "taxa"\) return undefined;\s+if \(!viewerAuthorization/);
+  assert.match(source, /loadPublishedCollectionRateV2\(/);
+  assert.match(source, /\) : view === "taxa" \? \(\s+isMatrixAdminViewer \? \(/);
+  assert.match(source, /data-testid="taxa-v2-kpi-grid"/);
+  assert.match(source, /label=\{t\("Taxa com tentativa"\)\} value=\{t\("Pendente de validação"\)\}/);
+  assert.match(source, /label=\{t\("Aguardando coleta"\)\} value=\{t\("Pendente de validação"\)\}/);
   assert.match(source, /view !== "monitoramento" \|\| isFirstMileUnderReview/);
-  assert.match(source, /view !== "taxa" \|\| isFirstMileUnderReview/);
   assert.match(source, /view !== "sellers" \|\| isFirstMileUnderReview/);
   assert.match(source, /if \(view !== "movimentacao"\) return undefined/);
   assert.match(source, /if \(view !== "bipagem"\) return undefined/);
   assert.match(source, /loadPublishedPddCollectionFailure\(/);
   assert.match(source, /<PddCollectionFailureV2Dashboard/);
-  assert.doesNotMatch(source, /view !== "bipagem" \|\| isFirstMileUnderReview/);
   assert.match(loader, /\/publications\?limit=1&offset=0/);
   assert.doesNotMatch(loader, /\/records|export\.csv/);
 });
-
 test("Sem Movimentação abre o dashboard V2 oficial e nunca consulta uma fonte legada", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
   const adapter = await readFile(new URL("../src/lib/data-foundation/no-movement-dashboard.ts", import.meta.url), "utf8");
