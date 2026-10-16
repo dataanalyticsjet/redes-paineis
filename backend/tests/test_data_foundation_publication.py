@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import uuid
 import zipfile
 from datetime import date, datetime
 from decimal import Decimal
@@ -13,8 +14,13 @@ from xml.sax.saxutils import escape
 import pytest
 from sqlalchemy import create_engine, event, text
 
-from app.services.data_foundation.contracts import CONTRACTS, contract_sha256
-from app.services.data_foundation.queries import get_current_mapping_status
+from app.services.data_foundation.contracts import (
+    COLLECTION_RATE_V2_CONTRACT,
+    CONTRACTS,
+    CONTRACT_VERSIONS,
+    contract_sha256,
+)
+from app.services.data_foundation.queries import _query_plan, get_current_mapping_status
 from app.services.data_foundation import repository as data_foundation_repository
 from app.services.data_foundation.repository import (
     DataFoundationError,
@@ -222,7 +228,49 @@ def _xlsx_bytes(
             f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
         )
 
-    if contract.source_id == "no_movement" and contract.version >= 2:
+    if contract.source_id == "collection_rate" and contract.version == 2:
+        data_headers = list(contract.headers)
+        execution_headers = [
+            "Nome do bot", "Data e horário da coleta", "Data inicial consultada",
+            "Data final consultada", "Total de registros", "Total de páginas",
+            "Status", "Duração (segundos)",
+        ]
+        execution_row = {
+            "Nome do bot": "Taxa de Coleta",
+            "Data e horário da coleta": datetime(2026, 10, 14, 11, 5, 22, 329733),
+            "Data inicial consultada": date(2026, 10, 13),
+            "Data final consultada": date(2026, 10, 14),
+            "Total de registros": len(rows),
+            "Total de páginas": max(1, (len(rows) + 19) // 20),
+            "Status": "SUCESSO",
+            "Duração (segundos)": Decimal("13.963"),
+        }
+        execution_row.update(execution_overrides or {})
+        source_fields = (
+            "datetime", "proxyAreaCode", "proxyAreaName", "pickNetworkCode", "pickNetworkName",
+            "orderSourceCode", "orderSourcename", "expressTypeCode", "expressTypeName", "totalCount",
+            "shouldTakingNum", "cancelTotalCount", "pickRateTotal", "pickcount", "nopickcount",
+            "agingNoTakingNum", "timelyTakingNum", "overtimeNoTakingNum", "overtimeTakingNum",
+            "timelyPickRateTotal", "timelyTryTakingNum", "timelyRate", "averageTakingNum",
+            "problemNum", "noProblemNum", "shopRate", "shouldShopNum", "noShouldShopNum",
+        )
+        pending_fields = {"agingNoTakingNum", "timelyTryTakingNum", "averageTakingNum", "shopRate", "shouldShopNum", "noShouldShopNum"}
+        dictionary_headers = ["Campo original", "Nome traduzido", "Descrição", "Situação da tradução"]
+        dictionary_rows = [
+            {
+                "Campo original": source,
+                "Nome traduzido": header,
+                "Descrição": "Campo oficial JMS do Bot 03.",
+                "Situação da tradução": "Pendente" if source in pending_fields else "Confirmada",
+            }
+            for source, header in zip(source_fields, contract.headers, strict=True)
+        ]
+        sheets = [
+            ("Dados", data_headers, rows, [column.kind for column in contract.columns], [column.key for column in contract.columns]),
+            ("Execução", execution_headers, [execution_row], ["TEXT", "DATETIME", "DATE", "DATE", "INTEGER", "INTEGER", "TEXT", "DECIMAL"], None),
+            ("Dicionário", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
+        ]
+    elif contract.source_id == "no_movement" and contract.version >= 2:
         data_headers = list(contract.headers)
         data_kinds = [column.kind for column in contract.columns]
         execution_headers = [
@@ -327,6 +375,108 @@ def _snapshot_row(code: str, name: str) -> dict[str, object]:
             values[column.key] = 1
     values["stopped_orders"] = 10
     return values
+
+
+def _collection_rate_v2_row(data_date: date, base_code: str, base_name: str | None) -> dict[str, object]:
+    values: dict[str, object] = {
+        "data_date": data_date,
+        "source_region_code": "REG-01",
+        "reported_region": "Regional de origem",
+        "source_base_code": base_code,
+        "source_base_name": base_name,
+        "order_origin_code": "D67",
+        "order_origin": "TikTok",
+        "product_type_code": "EZ",
+        "product_type": "EZ",
+        "collection_rate_reported": Decimal("0.5"),
+        "collection_on_time_rate_reported": Decimal("0.45"),
+        "punctuality_rate_pending": Decimal("0.6"),
+        "average_collection_pending": Decimal("1.25"),
+        "seller_collection_rate_pending": Decimal("0.3"),
+    }
+    for column in COLLECTION_RATE_V2_CONTRACT.columns:
+        if column.kind == "INTEGER":
+            values[column.key] = 0
+    values.update({
+        "total_orders": 100,
+        "quantity_to_collect": 80,
+        "collected_quantity": 40,
+        "not_collected_quantity": 40,
+        "collected_on_time_quantity": 36,
+        "attempts_on_time_pending": 48,
+    })
+    return values
+
+
+def test_collection_rate_v2_contract_preserves_v1_and_uses_official_fingerprint():
+    assert CONTRACTS["collection_rate"].version == 1
+    assert len(CONTRACTS["collection_rate"].columns) == 22
+    assert CONTRACT_VERSIONS[("collection_rate", 2)] is COLLECTION_RATE_V2_CONTRACT
+    assert len(COLLECTION_RATE_V2_CONTRACT.columns) == 28
+    assert contract_sha256(COLLECTION_RATE_V2_CONTRACT).hex() == "0868bd5df41a2cca1d581da7f2e4b429478b5c44e9b75a79744cc93029053482"
+
+
+def test_collection_rate_v2_parser_preserves_rows_and_uses_code_only_doomsday_mapping():
+    rows = [
+        _collection_rate_v2_row(date(2026, 10, 13), "123", "Nome original da base"),
+        _collection_rate_v2_row(date(2026, 10, 14), "-", None),
+        _collection_rate_v2_row(date(2026, 10, 14), None, "Nome original da base"),
+    ]
+    resolved_rows: list[ValidImportRow] = []
+    resolver = MappingResolver(
+        map_version_id=uuid.UUID("12345678-1234-5678-1234-567812345678").bytes,
+        base_codes=frozenset({"123"}),
+        exact_base_name_candidates={"Nome original da base": ("999",)},
+        normalized_base_name_candidates={"nome original da base": ("999",)},
+        name_decisions={"Nome original da base": ("LINKED", "999")},
+    )
+    summary = parse_workbook(
+        _xlsx_bytes(COLLECTION_RATE_V2_CONTRACT, rows),
+        COLLECTION_RATE_V2_CONTRACT,
+        resolver,
+        on_valid_row=resolved_rows.append,
+    )
+    assert summary.input_row_count == 3
+    assert summary.valid_row_count == 3
+    assert summary.invalid_row_count == 0
+    assert summary.per_date_counts == {"2026-10-13": 1, "2026-10-14": 2}
+    assert summary.mapped_row_count == 1
+    assert summary.missing_identifier_row_count == 2
+    assert resolved_rows[0].resolved_base_code == "123"
+    assert resolved_rows[0].mapping_resolution == "CODE_MATCH"
+    assert resolved_rows[1].resolved_base_code is None
+    assert resolved_rows[1].mapping_resolution == "MISSING_IDENTIFIER"
+    assert resolved_rows[2].resolved_base_code is None
+    assert resolved_rows[2].mapping_resolution == "MISSING_IDENTIFIER"
+    assert summary.bot_executed_at == datetime(2026, 10, 14, 11, 5, 22, 329733)
+    assert summary.execution_period_start == date(2026, 10, 13)
+    assert summary.execution_period_end == date(2026, 10, 14)
+    assert len(summary.semantic_warnings) == 6
+    assert summary.can_publish
+
+
+def test_collection_rate_versions_select_daily_heads_independently():
+    identity = {"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "matrix"}
+    v1_plan = _query_plan(
+        "collection_rate", identity, contract_version=1,
+        date_from=date(2026, 10, 13), date_to=date(2026, 10, 14),
+    )
+    v2_plan = _query_plan(
+        "collection_rate", identity, contract_version=2,
+        date_from=date(2026, 10, 13), date_to=date(2026, 10, 14),
+    )
+    for plan in (v1_plan, v2_plan):
+        assert "source_publication_dates AS publication_dates" in plan.from_sql
+        assert "daily_publication.contract_version = :contract_version" in plan.from_sql
+        assert "ROW_NUMBER() OVER" in plan.from_sql
+        assert "publication_dates.data_date >= :date_from" in plan.from_sql
+        assert "publication_dates.data_date <= :date_to" in plan.from_sql
+        assert "source_daily_head" not in plan.from_sql
+        assert plan.parameters["contract_version"] in {1, 2}
+        assert plan.parameters["date_from"] == date(2026, 10, 13)
+        assert plan.parameters["date_to"] == date(2026, 10, 14)
+    assert "exact_name_candidates" in v1_plan.from_sql
+    assert "exact_name_candidates" not in v2_plan.from_sql
 
 
 def test_no_movement_v2_parser_preserves_duplicate_base_codes_at_row_grain():

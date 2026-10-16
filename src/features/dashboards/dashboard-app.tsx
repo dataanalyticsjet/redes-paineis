@@ -116,12 +116,20 @@ import {
   taxaRate,
 } from "../../lib/taxa-summary";
 import {
-  filterTaxaV2CardRecords,
-  mapTaxaV2CardRecords,
-  summarizeTaxaV2Cards,
-  taxaV2FilterOptions,
-  type TaxaV2DimensionFilters,
-} from "../../lib/taxa-v2-cards.ts";
+  collectionRateV2FilterOptions,
+  filterCollectionRateV2Rows,
+  groupCollectionRateV2Rows,
+  mapCollectionRateV2Record,
+  summarizeCollectionRateV2,
+  summarizeCollectionRateV2Daily,
+  summarizeCollectionRateV2Monthly,
+  summarizeCollectionRateV2Origins,
+  collectionRateV2ExcelNumberFormat,
+  collectionRateV2ExcelValue,
+  formatCollectionRateV2Cell,
+  type CollectionRateV2DashboardRow,
+  type CollectionRateV2Filters,
+} from "../../lib/data-foundation/collection-rate-v2-dashboard.ts";
 import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
@@ -146,10 +154,11 @@ import {
 import type { DashboardAvailabilityState } from "../../lib/data-foundation/dashboard-availability.ts";
 import {
   COLLECTION_RATE_V2_COLUMNS,
+  COLLECTION_RATE_V2_HEADERS,
   CollectionRateV2LoadError,
-  loadPublishedCollectionRate,
+  loadPublishedCollectionRateV2,
   type CollectionRateV2Record,
-} from "../../lib/data-foundation/collection-rate";
+} from "../../lib/data-foundation/collection-rate-v2.ts";
 import {
   loadCurrentNoMovementSnapshot,
   NoMovementV2LoadError,
@@ -2884,7 +2893,9 @@ export function DashboardApp() {
       receivedCount: 0,
       columnCount: COLLECTION_RATE_V2_COLUMNS.length,
       publicationId: null as string | null,
-      updatedAt: null as string | null,
+      publicationIds: [] as string[],
+      publishedAt: null as string | null,
+      snapshotAsOf: null as string | null,
       error: null as string | null,
     };
   });
@@ -2913,7 +2924,9 @@ export function DashboardApp() {
   const [taxaSelectedBases, setTaxaSelectedBases] = useState<Set<string>>(new Set());
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
-  const [taxaV2Filters, setTaxaV2Filters] = useState<TaxaV2DimensionFilters>({});
+  const [taxaV2Filters, setTaxaV2Filters] = useState<CollectionRateV2Filters>({});
+  const [taxaV2TableQuery, setTaxaV2TableQuery] = useState("");
+  const [taxaV2Page, setTaxaV2Page] = useState(1);
   const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
   const [taxaRmSelection, setTaxaRmSelection] = useState<RmSelection>({ mode: "all" });
   const [taxaDateStart, setTaxaDateStart] = useState("");
@@ -3236,7 +3249,9 @@ export function DashboardApp() {
       records: [],
       receivedCount: 0,
       publicationId: null,
-      updatedAt: null,
+      publicationIds: [],
+      publishedAt: null,
+      snapshotAsOf: null,
       error: null,
     }));
     setNoMovementV2State((current) => ({
@@ -4046,7 +4061,9 @@ export function DashboardApp() {
           records: [],
           receivedCount: 0,
           publicationId: null,
-          updatedAt: null,
+          publicationIds: [],
+          publishedAt: null,
+          snapshotAsOf: null,
           error: null,
         }));
         if (!dateFrom || !dateTo || dateFrom > dateTo) {
@@ -4063,7 +4080,7 @@ export function DashboardApp() {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
         try {
-          const published = await loadPublishedCollectionRate(
+          const published = await loadPublishedCollectionRateV2(
             { dateFrom, dateTo },
             (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
             controller.signal,
@@ -4077,7 +4094,9 @@ export function DashboardApp() {
             receivedCount: published.rowCount,
             columnCount: published.columnCount,
             publicationId: published.publicationId,
-            updatedAt: published.updatedAt,
+            publicationIds: published.publicationIds,
+            publishedAt: published.publishedAt,
+            snapshotAsOf: published.snapshotAsOf,
             error: published.rowCount === 0 ? "Sem dados publicados para a data selecionada" : null,
           }));
         } catch (cause) {
@@ -4091,7 +4110,9 @@ export function DashboardApp() {
             records: [],
             receivedCount: 0,
             publicationId: null,
-            updatedAt: null,
+            publicationIds: [],
+            publishedAt: null,
+            snapshotAsOf: null,
             error: loadError.kind === "empty" ? "Sem dados publicados para a data selecionada" : loadError.message,
           }));
         }
@@ -5459,18 +5480,38 @@ export function DashboardApp() {
     [taxaFilteredRecords],
   );
 
-  const taxaV2CardRows = useMemo(
-    () => mapTaxaV2CardRecords(collectionRateV2State.records),
+  const taxaV2Rows = useMemo(
+    () => collectionRateV2State.records.map(mapCollectionRateV2Record),
     [collectionRateV2State.records],
   );
-  const taxaV2Options = useMemo(() => taxaV2FilterOptions(taxaV2CardRows), [taxaV2CardRows]);
+  const taxaV2Options = useMemo(() => collectionRateV2FilterOptions(taxaV2Rows), [taxaV2Rows]);
   const taxaV2FilteredRows = useMemo(
-    () => filterTaxaV2CardRecords(taxaV2CardRows, taxaV2Filters),
-    [taxaV2CardRows, taxaV2Filters],
+    () => filterCollectionRateV2Rows(taxaV2Rows, taxaV2Filters),
+    [taxaV2Rows, taxaV2Filters],
   );
   const taxaV2Summary = useMemo(
-    () => summarizeTaxaV2Cards(taxaV2FilteredRows),
+    () => summarizeCollectionRateV2(taxaV2FilteredRows),
     [taxaV2FilteredRows],
+  );
+  const taxaV2ByRegion = useMemo(() => groupCollectionRateV2Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
+  const taxaV2ByRmArea = useMemo(() => groupCollectionRateV2Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
+  const taxaV2Daily = useMemo(() => summarizeCollectionRateV2Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2Monthly = useMemo(() => summarizeCollectionRateV2Monthly(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2ByOrigin = useMemo(() => summarizeCollectionRateV2Origins(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2Dates = useMemo(() => [...new Set(taxaV2FilteredRows.map((row) => String(row.data_date)))].sort(), [taxaV2FilteredRows]);
+  const taxaV2SearchedRows = useMemo(() => {
+    const query = normalizeSearchText(taxaV2TableQuery.trim());
+    if (!query) return taxaV2FilteredRows;
+    return taxaV2FilteredRows.filter((row) => normalizeSearchText(
+      [...COLLECTION_RATE_V2_COLUMNS.map((field) => String(row[field] ?? "")), row.region, row.rm, row.rmArea, row.rgm, row.base]
+        .join(" "),
+    ).includes(query));
+  }, [taxaV2FilteredRows, taxaV2TableQuery]);
+  const taxaV2PageCount = Math.max(1, Math.ceil(taxaV2SearchedRows.length / PDD_FAILURE_DETAIL_PAGE_SIZE));
+  const taxaV2ActivePage = Math.min(taxaV2Page, taxaV2PageCount);
+  const taxaV2VisibleRows = useMemo(
+    () => taxaV2SearchedRows.slice((taxaV2ActivePage - 1) * PDD_FAILURE_DETAIL_PAGE_SIZE, taxaV2ActivePage * PDD_FAILURE_DETAIL_PAGE_SIZE),
+    [taxaV2ActivePage, taxaV2SearchedRows],
   );
 
   const baseAnalysisText = useMemo(() => {
@@ -7238,7 +7279,7 @@ export function DashboardApp() {
         data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.period.dateTo : undefined}
         data-v2-record-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.receivedCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.receivedCount : undefined}
         data-v2-column-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.columnCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.columnCount : undefined}
-        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.updatedAt ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.updatedAt ?? undefined : undefined}
+        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.snapshotAsOf ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.updatedAt ?? undefined : undefined}
         data-v2-error={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.error ?? undefined : undefined}
       >
         {view === "home" ? (
@@ -8762,7 +8803,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <div>
                   <div className="eyebrow"><Target size={15} /> {t("Data Foundation V2")}</div>
                   <h1>{t("Taxa de coleta")}</h1>
-                  <p>{t("Indicadores do período selecionado, calculados com a publicação vigente da fonte collection_rate.")}</p>
+                  <p>{t("Fonte operacional: Excel oficial do Bot 03 JMS. Mapeamentos organizacionais pelo código exato do DoomsDay.")}</p>
                 </div>
                 <div className="dataset-meta" aria-label={t("Fonte oficial V2")}>
                   <span><Database size={16} /> collection_rate</span>
@@ -8771,7 +8812,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(taxaV2Options.regions.length) })}</span>
                   <span><Database size={16} /> {t("{count} bases", { count: formatNumber(taxaV2Options.bases.length) })}</span>
                   <span><PackageCheck size={16} /> {t("{count} origens", { count: formatNumber(taxaV2Options.origins.length) })}</span>
-                  {collectionRateV2State.updatedAt ? <span><CalendarDays size={16} /> {t("Última atualização: {date}", { date: formatDateTime(collectionRateV2State.updatedAt) })}</span> : null}
+                  {collectionRateV2State.snapshotAsOf ? <span><CalendarDays size={16} /> {t("Coleta do bot mais recente usada: {date}", { date: formatDateTime(collectionRateV2State.snapshotAsOf) })}</span> : null}
+                  {collectionRateV2State.publishedAt ? <span><Layers3 size={16} /> {t("Publicação mais recente usada: {date}", { date: formatDateTime(collectionRateV2State.publishedAt) })}</span> : null}
                 </div>
               </section>
               <section className="filters-card taxa-filters-card" aria-labelledby="taxa-v2-filters-heading">
@@ -8786,6 +8828,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     onClick={() => {
                       const yesterday = yesterdayInSaoPaulo();
                       setTaxaV2Filters({});
+                      setTaxaV2TableQuery("");
+                      setTaxaV2Page(1);
                       setCollectionRateV2State((current) => ({
                         ...current,
                         period: { dateFrom: yesterday, dateTo: yesterday },
@@ -8800,7 +8844,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     label={t("Regional")}
                     options={taxaV2Options.regions}
                     selected={taxaV2Filters.regions ?? new Set(taxaV2Options.regions)}
-                    onChange={(regions) => setTaxaV2Filters((current) => ({ ...current, regions }))}
+                    onChange={(regions) => { setTaxaV2Filters((current) => ({ ...current, regions })); setTaxaV2Page(1); }}
                     allLabel={t("Todas as regionais")}
                     singular={t("regional")}
                     plural={t("regionais")}
@@ -8811,7 +8855,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     label="RM"
                     options={taxaV2Options.rms}
                     selected={taxaV2Filters.rms ?? new Set(taxaV2Options.rms)}
-                    onChange={(rms) => setTaxaV2Filters((current) => ({ ...current, rms }))}
+                    onChange={(rms) => { setTaxaV2Filters((current) => ({ ...current, rms })); setTaxaV2Page(1); }}
                     allLabel={t("Todos os RM")}
                     singular="RM"
                     plural="RM"
@@ -8819,10 +8863,21 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     t={t}
                   />
                   <MultiSelect
+                    label="RGM"
+                    options={taxaV2Options.rgms}
+                    selected={taxaV2Filters.rgms ?? new Set(taxaV2Options.rgms)}
+                    onChange={(rgms) => { setTaxaV2Filters((current) => ({ ...current, rgms })); setTaxaV2Page(1); }}
+                    allLabel={t("Todos os RGM")}
+                    singular="RGM"
+                    plural="RGM"
+                    searchable
+                    t={t}
+                  />
+                  <MultiSelect
                     label={t("Região do RM")}
                     options={taxaV2Options.rmAreas}
                     selected={taxaV2Filters.rmAreas ?? new Set(taxaV2Options.rmAreas)}
-                    onChange={(rmAreas) => setTaxaV2Filters((current) => ({ ...current, rmAreas }))}
+                    onChange={(rmAreas) => { setTaxaV2Filters((current) => ({ ...current, rmAreas })); setTaxaV2Page(1); }}
                     allLabel={t("Todas as regiões do RM")}
                     singular={t("região do RM")}
                     plural={t("regiões do RM")}
@@ -8833,7 +8888,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     label={t("Base")}
                     options={taxaV2Options.bases}
                     selected={taxaV2Filters.bases ?? new Set(taxaV2Options.bases)}
-                    onChange={(bases) => setTaxaV2Filters((current) => ({ ...current, bases }))}
+                    onChange={(bases) => { setTaxaV2Filters((current) => ({ ...current, bases })); setTaxaV2Page(1); }}
                     allLabel={t("Todas as bases")}
                     singular={t("base")}
                     plural={t("bases")}
@@ -8850,6 +8905,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                         value={collectionRateV2State.period.dateFrom}
                         onChange={(event) => {
                           const dateFrom = event.target.value;
+                          setTaxaV2Page(1);
                           setCollectionRateV2State((current) => ({
                             ...current,
                             period: {
@@ -8872,6 +8928,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                         min={collectionRateV2State.period.dateFrom || undefined}
                         onChange={(event) => {
                           const dateTo = event.target.value;
+                          setTaxaV2Page(1);
                           setCollectionRateV2State((current) => ({
                             ...current,
                             period: {
@@ -8887,10 +8944,21 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     label={t("Origem do pedido")}
                     options={taxaV2Options.origins}
                     selected={taxaV2Filters.origins ?? new Set(taxaV2Options.origins)}
-                    onChange={(origins) => setTaxaV2Filters((current) => ({ ...current, origins }))}
+                    onChange={(origins) => { setTaxaV2Filters((current) => ({ ...current, origins })); setTaxaV2Page(1); }}
                     allLabel={t("Todas as origens")}
                     singular={t("origem")}
                     plural={t("origens")}
+                    searchable
+                    t={t}
+                  />
+                  <MultiSelect
+                    label={t("Tipo de encomenda")}
+                    options={taxaV2Options.productTypes}
+                    selected={taxaV2Filters.productTypes ?? new Set(taxaV2Options.productTypes)}
+                    onChange={(productTypes) => { setTaxaV2Filters((current) => ({ ...current, productTypes })); setTaxaV2Page(1); }}
+                    allLabel={t("Todos os tipos")}
+                    singular={t("tipo")}
+                    plural={t("tipos")}
                     searchable
                     t={t}
                   />
@@ -8914,41 +8982,81 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <span><strong>{t("Registros recebidos:")}</strong> {formatNumber(collectionRateV2State.receivedCount)}</span>
                   <span><strong>{t("Colunas:")}</strong> {formatNumber(collectionRateV2State.columnCount)}</span>
                   <span><strong>{t("Linhas após filtros:")}</strong> {formatNumber(taxaV2FilteredRows.length)}</span>
-                  {collectionRateV2State.publicationId ? <span><strong>{t("Publicação vigente:")}</strong> {collectionRateV2State.publicationId}</span> : null}
+                  {collectionRateV2State.publicationId ? <span><strong>{t("Publicação utilizada:")}</strong> {collectionRateV2State.publicationId}</span> : collectionRateV2State.publicationIds.length > 1 ? <span><strong>{t("Publicações diárias utilizadas:")}</strong> {formatNumber(collectionRateV2State.publicationIds.length)}</span> : null}
                   {collectionRateV2State.status === "empty" ? <span>{t("Sem dados publicados para a data selecionada")}</span> : null}
                   {collectionRateV2State.status === "error" && collectionRateV2State.error ? <span>{t(collectionRateV2State.error)}</span> : null}
                 </div>
               </section>
               {collectionRateV2State.status === "ready" ? (
-                <section className="kpi-grid" aria-label={t("Indicadores de taxa de coleta")} data-testid="taxa-v2-kpi-grid">
-                  <KpiCard
-                    icon={<CalendarDays size={20} />}
-                    label={t("Taxa de coleta")}
-                    value={formatTaxaRate(taxaV2Summary.onTimeRate)}
-                    detail={t("{count} coletados no prazo", { count: formatNumber(taxaV2Summary.onTime) })}
-                  />
-                  <KpiCard
-                    icon={<TrendingUp size={20} />}
-                    label={t("Taxa com tentativa")}
-                    value={formatTaxaRate(taxaV2Summary.collectionWithAttemptsRate)}
-                    detail={t("{count} com coleta/tentativa", { count: formatNumber(taxaV2Summary.collectedWithAttempts) })}
-                    tone="orange"
-                  />
-                  <KpiCard
-                    icon={<Layers3 size={20} />}
-                    label={t("Previsto a coletar")}
-                    value={formatCompact(taxaV2Summary.toCollect)}
-                    detail={t("Valor previsto no período selecionado")}
-                    tone="dark"
-                  />
-                  <KpiCard
-                    icon={<CircleAlert size={20} />}
-                    label={t("Aguardando coleta")}
-                    value={formatCompact(taxaV2Summary.notCollected)}
-                    detail={t("{rate} do previsto a coletar", { rate: formatTaxaRate(taxaV2Summary.awaitingRate) })}
-                    tone="soft"
-                  />
-                </section>
+                <>
+                  <section className="kpi-grid" aria-label={t("Indicadores de taxa de coleta")} data-testid="taxa-v2-kpi-grid">
+                    <KpiCard icon={<Target size={20} />} label={t("Taxa de coleta")} value={formatTaxaRate(taxaV2Summary.collectionRate)} detail={t("{count} coletados de {planned} previstos", { count: formatNumber(taxaV2Summary.collected), planned: formatNumber(taxaV2Summary.planned) })} />
+                    <KpiCard icon={<TrendingUp size={20} />} label={t("Taxa com tentativa")} value={t("Pendente de validação")} detail={t("A fórmula JMS ainda precisa de confirmação operacional.")} tone="orange" />
+                    <KpiCard icon={<Layers3 size={20} />} label={t("Previsto a coletar")} value={formatCompact(taxaV2Summary.planned)} detail={t("SUM(Quantidade prevista para coleta)")} tone="dark" />
+                    <KpiCard icon={<CircleAlert size={20} />} label={t("Aguardando coleta")} value={t("Pendente de validação")} detail={t("O campo correspondente à regra ainda não foi confirmado.")} tone="soft" />
+                  </section>
+
+                  <section className="charts-grid taxa-v2-summary-grid">
+                    <article className="chart-card">
+                      <div className="card-heading"><div><span className="card-eyebrow">{t("TENDÊNCIA")}</span><h2>{t("Evolução diária — taxas confirmadas")}</h2><p>{t("Cada ponto é recalculado pelas quantidades do dia publicado. Datas sem publicação não são exibidas.")}</p></div></div>
+                      {taxaV2Daily.length > 0 ? (
+                        <div className="taxa-poc-line-chart" data-testid="taxa-v2-daily-chart">
+                          <svg viewBox="0 0 700 190" preserveAspectRatio="xMidYMid meet" role="img" aria-label={t("Evolução diária da Taxa de Coleta e da Taxa no Prazo")}>
+                            <line className="chart-axis-line" x1="40" y1="20" x2="40" y2="150" />
+                            <line className="chart-axis-line" x1="40" y1="150" x2="686" y2="150" />
+                            <polyline className="attempt-line" points={taxaV2Daily.map((point, index) => `${40 + (taxaV2Daily.length <= 1 ? 323 : index * 646 / (taxaV2Daily.length - 1))},${150 - (point.collectionRate ?? 0) * 120}`).join(" ")} />
+                            <polyline className="target-line" points={taxaV2Daily.map((point, index) => `${40 + (taxaV2Daily.length <= 1 ? 323 : index * 646 / (taxaV2Daily.length - 1))},${150 - (point.onTimeRate ?? 0) * 120}`).join(" ")} />
+                            {taxaV2Daily.map((point, index) => {
+                              const x = 40 + (taxaV2Daily.length <= 1 ? 323 : index * 646 / (taxaV2Daily.length - 1));
+                              const collectionY = 150 - (point.collectionRate ?? 0) * 120;
+                              const onTimeY = 150 - (point.onTimeRate ?? 0) * 120;
+                              return <g key={point.date}><circle className="attempt-point alert" cx={x} cy={collectionY} r="4" /><circle className="attempt-point ok" cx={x} cy={onTimeY} r="4" /><text className="attempt-value-label" x={x} y="174" textAnchor="middle">{formatDate(point.date, true)}</text></g>;
+                            })}
+                          </svg>
+                          <div className="dataset-meta"><span><i className="chart-legend-dot collection" />{t("Taxa de coleta")}</span><span><i className="chart-legend-dot on-time" />{t("Taxa de coleta no prazo")}</span></div>
+                        </div>
+                      ) : <EmptyChart message={t("Sem datas publicadas no período.")} />}
+                    </article>
+                    <article className="chart-card">
+                      <div className="card-heading"><div><span className="card-eyebrow">{t("ORIGEM DO PEDIDO")}</span><h2>{t("Performance por origem")}</h2><p>{t("Volume por quantidade prevista; taxa de coleta ponderada pelas quantidades.")}</p></div></div>
+                      <div className="damage-client-bars" data-testid="taxa-v2-origin-summary">
+                        {taxaV2ByOrigin.map((item) => <div className="damage-client-row" key={item.origin}>
+                          <div className="damage-client-label"><span>{item.origin}</span><strong>{formatNumber(item.planned)} {t("previstos")}</strong></div>
+                          <div className="damage-client-track"><span style={{ width: `${Math.max(2, taxaV2ByOrigin[0]?.planned ? item.planned / taxaV2ByOrigin[0].planned * 100 : 0)}%` }} /></div>
+                          <small>{t("Taxa de coleta")}: {formatTaxaRate(item.collectionRate)}</small>
+                        </div>)}
+                        {taxaV2ByOrigin.length === 0 ? <EmptyChart message={t("Não há origens no período filtrado.")} /> : null}
+                      </div>
+                    </article>
+                  </section>
+
+                  <section className="charts-grid taxa-v2-summary-grid">
+                    <article className="chart-card">
+                      <div className="card-heading"><div><span className="card-eyebrow">{t("POR REGIONAL")}</span><h2>{t("Taxa com tentativa por Regional")}</h2><p>{t("A taxa com tentativa e os valores derivados dela estão pendentes; os pedidos usam SUM(totalCount).")}</p></div></div>
+                      <div className="taxa-poc-table-wrap"><table className="dashboard-data-table taxa-poc-table taxa-poc-regional-rgm-table" data-testid="taxa-v2-regional-summary"><thead><tr><th>{t("Regional")}</th><th>RGM</th><th>{t("Bases")}</th>{taxaV2Dates.map((date) => <th className="taxa-poc-date-header" key={date}><span>{formatDate(date, true)}</span><small>{t("Taxa tentativa / pedidos")}</small></th>)}<th>{t("Total de pedidos")}</th><th>{t("Taxa de coleta")}</th></tr></thead><tbody>{taxaV2ByRegion.map((row) => <tr key={row.key}><th><span>{t(row.label)}</span></th><td>{t(row.rgm)}</td><td>{formatNumber(row.baseCount)}</td>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(row.daily.get(date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(row.totalOrders)}</td><td>{formatTaxaRate(row.collectionRate)}</td></tr>)}</tbody><tfoot><tr><th colSpan={3}>{t("Total geral")}</th>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(taxaV2Daily.find((point) => point.date === date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(taxaV2Summary.totalOrders)}</td><td>{formatTaxaRate(taxaV2Summary.collectionRate)}</td></tr></tfoot></table></div>
+                    </article>
+                    <article className="chart-card">
+                      <div className="card-heading"><div><span className="card-eyebrow">RM</span><h2>{t("Taxa com tentativa por RM")}</h2><p>{t("Agrupamento organizacional pelo DoomsDay; a taxa com tentativa permanece pendente.")}</p></div></div>
+                      <div className="taxa-poc-table-wrap"><table className="dashboard-data-table taxa-poc-table epop-rm-table" data-testid="taxa-v2-rm-summary"><thead><tr><th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Bases")}</th>{taxaV2Dates.map((date) => <th className="taxa-poc-date-header" key={date}><span>{formatDate(date, true)}</span><small>{t("Taxa tentativa / pedidos")}</small></th>)}<th>{t("Total de pedidos")}</th><th>{t("Taxa de coleta")}</th></tr></thead><tbody>{taxaV2ByRmArea.map((row) => <tr key={row.key}><th><span>{t(row.label)}</span></th><td>{t(row.rm)}</td><td>{t(row.rgm)}</td><td>{formatNumber(row.baseCount)}</td>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(row.daily.get(date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(row.totalOrders)}</td><td>{formatTaxaRate(row.collectionRate)}</td></tr>)}</tbody><tfoot><tr><th colSpan={4}>{t("Total geral")}</th>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(taxaV2Daily.find((point) => point.date === date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(taxaV2Summary.totalOrders)}</td><td>{formatTaxaRate(taxaV2Summary.collectionRate)}</td></tr></tfoot></table></div>
+                    </article>
+                  </section>
+
+                  <section className="chart-card taxa-v2-monthly-card">
+                    <div className="card-heading"><div><span className="card-eyebrow">{t("HISTÓRICO PUBLICADO")}</span><h2>{t("Taxa de coleta × taxa com tentativa")}</h2><p>{t("Somente meses com linhas publicadas. A série de tentativa não é calculada até a validação da fórmula.")}</p></div></div>
+                    <div className="table-wrap"><table className="dashboard-data-table" data-testid="taxa-v2-monthly-summary"><thead><tr><th>{t("Mês")}</th><th>{t("Pedidos")}</th><th>{t("Previsto a coletar")}</th><th>{t("Taxa de coleta")}</th><th>{t("Taxa de coleta no prazo")}</th><th>{t("Taxa com tentativa")}</th></tr></thead><tbody>{taxaV2Monthly.map((month) => <tr key={month.month}><th>{month.month}</th><td>{formatNumber(month.totalOrders)}</td><td>{formatNumber(month.planned)}</td><td>{formatTaxaRate(month.collectionRate)}</td><td>{formatTaxaRate(month.onTimeRate)}</td><td><strong className="empty">{t("Pendente de validação")}</strong></td></tr>)}</tbody></table></div>
+                  </section>
+
+                  <section className="chart-card taxa-v2-detail-card">
+                    <div className="card-heading table-card-heading">
+                      <div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2>{t("Dados detalhados — 28 colunas oficiais")}</h2><p>{t("Campos e valores originais da aba Dados, sem deduplicação. O mapeamento usa apenas código exato do DoomsDay.")}</p></div>
+                      <div className="table-tools"><button type="button" className="table-download-button" onClick={() => void downloadRowsAsExcel(taxaV2SearchedRows, COLLECTION_RATE_V2_COLUMNS.map((field) => ({ header: t(COLLECTION_RATE_V2_HEADERS[field]), value: (row: CollectionRateV2DashboardRow) => collectionRateV2ExcelValue(row[field], field), width: 20, numberFormat: collectionRateV2ExcelNumberFormat(field) })), t("Taxa de Coleta — dados detalhados"), "taxa_coleta_v2_detalhado.xlsx")} disabled={taxaV2SearchedRows.length === 0}><FileSpreadsheet size={16} /> {t("Baixar Excel")}</button><label className="table-search"><Search size={16} /><input value={taxaV2TableQuery} onChange={(event) => { setTaxaV2TableQuery(event.target.value); setTaxaV2Page(1); }} placeholder={t("Buscar nos dados detalhados")} /></label></div>
+                    </div>
+                    <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap pdd-v2-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table taxa-v2-detail-table"><thead><tr>{COLLECTION_RATE_V2_COLUMNS.map((field) => <th key={field}>{t(COLLECTION_RATE_V2_HEADERS[field])}</th>)}</tr></thead><tbody>{taxaV2VisibleRows.map((row) => <tr key={`${row.publication_id}-${row.source_row_no}`}>{COLLECTION_RATE_V2_COLUMNS.map((field) => <td key={field}>{formatCollectionRateV2Cell(row[field], field, dashboardLocale(activeDashboardLanguage()))}</td>)}</tr>)}</tbody></table>{taxaV2SearchedRows.length === 0 ? <EmptyChart message={t("Não há registros correspondentes aos filtros.")} /> : null}</div>
+                    <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(taxaV2SearchedRows.length) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.max(1, current - 1))} disabled={taxaV2ActivePage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(taxaV2ActivePage), total: formatNumber(taxaV2PageCount) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.min(taxaV2PageCount, current + 1))} disabled={taxaV2ActivePage >= taxaV2PageCount}>{t("Próxima")}</button></div>
+                  </section>
+                  {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência pelo código oficial permanecem nos totais gerais e sem atribuição de regional ou RM.")}</div> : null}
+                  <div className="quality-note" role="status">{t("Taxa com tentativa e Aguardando Coleta estão pendentes de validação semântica; nenhuma fórmula estimada é apresentada.")}</div>
+                </>
               ) : collectionRateV2State.status === "empty" ? (
                 <div className="quality-note" role="status">{t("Sem dados publicados para a data selecionada")}</div>
               ) : collectionRateV2State.status === "error" ? (

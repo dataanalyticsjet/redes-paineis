@@ -9,7 +9,7 @@ import zipfile
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
 from typing import Callable, Iterator
@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET
 from app.services.data_foundation.contracts import ContractColumn, SourceContract
 from app.services.data_foundation.mapping_resolution import (
     CODE_RESOLUTION_SOURCES,
+    code_only_mapping,
     normalize_mapping_name,
     resolve_name_candidates,
 )
@@ -88,6 +89,7 @@ class PreviewSummary:
     execution_period_start: date | None = None
     execution_period_end: date | None = None
     execution_page_count: int | None = None
+    semantic_warnings: list[str] = field(default_factory=list)
     workbook_validation_errors: list[str] = field(default_factory=list)
     error_counts: Counter[str] = field(default_factory=Counter)
     errors: list[dict[str, object]] = field(default_factory=list)
@@ -134,6 +136,7 @@ class PreviewSummary:
             "executionPeriodStart": self.execution_period_start.isoformat() if self.execution_period_start else None,
             "executionPeriodEnd": self.execution_period_end.isoformat() if self.execution_period_end else None,
             "executionPageCount": self.execution_page_count,
+            "semanticWarnings": self.semantic_warnings,
             "errorCounts": dict(sorted(self.error_counts.items())),
             "errors": self.errors,
             "canPublish": self.can_publish,
@@ -479,6 +482,16 @@ def _parse_metadata_datetime(value: object | None) -> datetime | None:
     return None
 
 
+def _collection_rate_execution_datetime(value: object | None) -> datetime | None:
+    if isinstance(value, str) and (value.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", value)):
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
+        except ValueError:
+            return None
+    return _parse_metadata_datetime(value)
+
+
 def _parse_metadata_date(value: object | None) -> date | None:
     if isinstance(value, datetime):
         return value.date()
@@ -630,17 +643,30 @@ def _resolve_mapping(
     source_id: str,
     row: dict[str, object],
     resolver: MappingResolver,
+    contract_version: int = 1,
 ) -> tuple[str | None, str]:
     if source_id == "base_mapping_official":
         return None, "MAP_ENTRY"
+    if code_only_mapping(source_id, contract_version):
+        code = row.get("source_base_code")
+        code_text = str(code).strip() if code is not None else ""
+        if code_text == "-":
+            code_text = ""
+        if code_text and code_text in resolver.base_codes:
+            return code_text, "CODE_MATCH"
+        if code_text:
+            # A supplied but unknown official code is authoritative; do not
+            # silently replace it with a name-based candidate.
+            return None, "UNMAPPED"
+        return None, "MISSING_IDENTIFIER"
+
     if source_id in CODE_RESOLUTION_SOURCES:
         code = row.get("source_base_code")
         code_text = str(code).strip() if code is not None else ""
         if code_text and code_text in resolver.base_codes:
             return code_text, "CODE_MATCH"
         if code_text:
-            # A supplied but unknown official code is authoritative; do not
-            # silently replace it with a name-based candidate.
+            # A supplied but unknown official code remains authoritative.
             return None, "UNMAPPED"
 
     base_name = row.get("source_base_name")
@@ -874,6 +900,268 @@ def _validate_pdd_v2_metadata(
         summary.add_workbook_error("pdd_dictionary_identification_unconfirmed")
 
 
+_COLLECTION_RATE_V2_SOURCE_FIELDS = (
+    "datetime", "proxyAreaCode", "proxyAreaName", "pickNetworkCode", "pickNetworkName",
+    "orderSourceCode", "orderSourcename", "expressTypeCode", "expressTypeName", "totalCount",
+    "shouldTakingNum", "cancelTotalCount", "pickRateTotal", "pickcount", "nopickcount",
+    "agingNoTakingNum", "timelyTakingNum", "overtimeNoTakingNum", "overtimeTakingNum",
+    "timelyPickRateTotal", "timelyTryTakingNum", "timelyRate", "averageTakingNum",
+    "problemNum", "noProblemNum", "shopRate", "shouldShopNum", "noShouldShopNum",
+)
+_COLLECTION_RATE_V2_PENDING_FIELDS = (
+    "agingNoTakingNum", "timelyTryTakingNum", "averageTakingNum",
+    "shopRate", "shouldShopNum", "noShouldShopNum",
+)
+_COLLECTION_RATE_V2_RATE_FIELDS = (
+    "collection_rate_reported", "collection_on_time_rate_reported",
+    "punctuality_rate_pending", "seller_collection_rate_pending",
+)
+
+
+def _collection_rate_v2_value(
+    cell: _RawCell | None,
+    column: ContractColumn,
+    uses_1904_epoch: bool,
+) -> tuple[object | None, str | None]:
+    if column.key == "data_date" and cell is not None and isinstance(cell.value, str):
+        raw = cell.value.strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            return None, "date_type_invalid"
+        try:
+            parsed = date.fromisoformat(raw)
+        except ValueError:
+            return None, "date_invalid"
+        if parsed.isoformat() != raw:
+            return None, "date_invalid"
+        return parsed, None
+    return _cell_as_value(cell, column, uses_1904_epoch)
+
+
+def _parse_collection_rate_v2_workbook(
+    content: bytes,
+    contract: SourceContract,
+    mapping: MappingResolver,
+    summary: PreviewSummary,
+    on_valid_row: Callable[[ValidImportRow], None] | None,
+) -> PreviewSummary:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+    except (zipfile.BadZipFile, OSError):
+        raise WorkbookValidationError("workbook_file_invalid") from None
+
+    with archive:
+        if sum(info.file_size for info in archive.infolist()) > MAX_UNCOMPRESSED_WORKBOOK_BYTES:
+            raise WorkbookValidationError("workbook_uncompressed_size_exceeded", 413)
+        if any(info.filename.startswith("/") or ".." in PurePosixPath(info.filename).parts for info in archive.infolist()):
+            raise WorkbookValidationError("workbook_archive_path_invalid")
+        sheet_paths = _sheet_paths(archive)
+        normalized_sheets = {_metadata_header_key(name): path for name, path in sheet_paths.items()}
+        required_sheets = {"dados", "execucao", "dicionario"}
+        if set(normalized_sheets) != required_sheets:
+            summary.add_workbook_error("collection_rate_required_sheets_invalid")
+            return summary
+        shared = _shared_strings(archive)
+        date_styles = _date_style_ids(archive)
+        uses_1904_epoch = _date_1904(archive)
+
+        data_rows = iter(_iter_sheet_rows(archive, normalized_sheets["dados"], shared, date_styles))
+        try:
+            header_row_no, header_cells = next(data_rows)
+        except StopIteration:
+            summary.add_workbook_error("workbook_header_missing")
+            return summary
+        if header_row_no != contract.header_row:
+            summary.add_workbook_error("workbook_header_row_mismatch")
+            return summary
+        try:
+            _pdd_header_indexes(
+                header_cells, contract.headers, error_code="workbook_header_mismatch"
+            )
+        except WorkbookValidationError as error:
+            summary.add_workbook_error(error.code)
+            return summary
+
+        execution_headers, execution_rows = _pdd_metadata_rows(
+            archive, normalized_sheets["execucao"], shared, date_styles
+        )
+        execution_columns = {
+            "bot_name": "nomedobot",
+            "executed_at": "dataehorariodacoleta",
+            "period_start": "datainicialconsultada",
+            "period_end": "datafinalconsultada",
+            "record_count": "totalderegistros",
+            "page_count": "totaldepaginas",
+            "status": "status",
+            "duration": "duracaosegundos",
+        }
+        if any(key not in execution_headers for key in execution_columns.values()) or not execution_rows:
+            summary.add_workbook_error("collection_rate_execution_metadata_invalid")
+            return summary
+        execution_records = [
+            _metadata_row(
+                cells,
+                {key: execution_headers[header_key] for key, header_key in execution_columns.items()},
+                date_styles,
+                uses_1904_epoch,
+            )
+            for cells in execution_rows
+        ]
+        parsed_records = [
+            (record, _collection_rate_execution_datetime(record["executed_at"]))
+            for record in execution_records
+        ]
+        if any(executed_at is None for _record, executed_at in parsed_records):
+            summary.add_workbook_error("collection_rate_execution_metadata_invalid")
+            return summary
+        latest_execution_at = max(executed_at for _record, executed_at in parsed_records if executed_at is not None)
+        if sum(executed_at == latest_execution_at for _record, executed_at in parsed_records) != 1:
+            summary.add_workbook_error("collection_rate_execution_metadata_ambiguous")
+            return summary
+        execution = next(record for record, executed_at in parsed_records if executed_at == latest_execution_at)
+        execution_name = _metadata_header_key(execution["bot_name"])
+        execution_status = _metadata_header_key(execution["status"])
+        execution_count = _nonnegative_metadata_integer(execution["record_count"])
+        execution_pages = _nonnegative_metadata_integer(execution["page_count"])
+        try:
+            execution_duration = Decimal(str(execution["duration"]).strip())
+        except (InvalidOperation, ValueError, AttributeError):
+            execution_duration = None
+        period_start = _parse_metadata_date(execution["period_start"])
+        period_end = _parse_metadata_date(execution["period_end"])
+        if (
+            execution_name != "taxadecoleta"
+            or execution_status not in {"sucesso", "success", "concluido", "concluida"}
+            or execution_count is None
+            or execution_pages is None
+            or execution_duration is None
+            or not execution_duration.is_finite()
+            or execution_duration < 0
+            or period_start is None
+            or period_end is None
+            or period_start > period_end
+            or (execution_count > 0 and (execution_pages < 1 or execution_pages > execution_count))
+        ):
+            summary.add_workbook_error("collection_rate_execution_reconciliation_mismatch")
+            return summary
+
+        dictionary_headers, dictionary_rows = _pdd_metadata_rows(
+            archive, normalized_sheets["dicionario"], shared, date_styles
+        )
+        dictionary_columns = {
+            "source": "campooriginal",
+            "translation": "nometraduzido",
+            "description": "descricao",
+            "status": "situacaodatraducao",
+        }
+        if any(key not in dictionary_headers for key in dictionary_columns.values()):
+            summary.add_workbook_error("collection_rate_dictionary_headers_invalid")
+            return summary
+        expected_dictionary = dict(zip(_COLLECTION_RATE_V2_SOURCE_FIELDS, contract.headers, strict=True))
+        observed_dictionary: dict[str, str] = {}
+        for cells in dictionary_rows:
+            source_cell = cells.get(dictionary_headers[dictionary_columns["source"]])
+            translation_cell = cells.get(dictionary_headers[dictionary_columns["translation"]])
+            source = source_cell.value if source_cell is not None else None
+            translation = translation_cell.value if translation_cell is not None else None
+            if not isinstance(source, str) or not isinstance(translation, str) or source in observed_dictionary:
+                summary.add_workbook_error("collection_rate_dictionary_mapping_invalid")
+                return summary
+            observed_dictionary[source] = translation
+        if list(observed_dictionary.items()) != list(expected_dictionary.items()):
+            summary.add_workbook_error("collection_rate_dictionary_mapping_invalid")
+            return summary
+        summary.semantic_warnings = [
+            f"{field}: significado operacional pendente de validação no JMS"
+            for field in _COLLECTION_RATE_V2_PENDING_FIELDS
+        ]
+
+        seen_row_hashes: set[bytes] = set()
+        seen_base_codes: set[str] = set()
+        for row_no, cells in data_rows:
+            summary.input_row_count += 1
+            errors: list[tuple[str | None, str]] = []
+            raw_identity = [
+                None if cells.get(index) is None else cells[index].value
+                for index in range(len(contract.columns))
+            ]
+            raw_key = json.dumps(
+                [str(value) if isinstance(value, Decimal) else value for value in raw_identity],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+            digest = hashlib.sha256(raw_key).digest()
+            if digest in seen_row_hashes:
+                summary.exact_duplicate_count += 1
+            else:
+                seen_row_hashes.add(digest)
+            if not cells or all(cell.value in (None, "") for cell in cells.values()):
+                errors.append((None, "empty_row"))
+            if any(cell.formula for cell in cells.values()):
+                errors.append((None, "formula_not_allowed"))
+            if any(cell.invalid for cell in cells.values()):
+                errors.append((None, "cell_value_invalid"))
+            if any(index >= len(contract.columns) and cell.value not in (None, "") for index, cell in cells.items()):
+                errors.append((None, "unexpected_column_value"))
+
+            values: dict[str, object] = {}
+            for index, column in enumerate(contract.columns):
+                value, error = _collection_rate_v2_value(cells.get(index), column, uses_1904_epoch)
+                if error:
+                    errors.append((column.key, error))
+                else:
+                    values[column.key] = value
+            for rate_key in _COLLECTION_RATE_V2_RATE_FIELDS:
+                rate = values.get(rate_key)
+                if isinstance(rate, Decimal) and not Decimal(0) <= rate <= Decimal(1):
+                    errors.append((rate_key, "rate_out_of_range"))
+            data_date = values.get("data_date")
+            if isinstance(data_date, date) and (data_date < period_start or data_date > period_end):
+                errors.append(("data_date", "collection_rate_row_date_outside_execution_period"))
+
+            source_code = values.get("source_base_code")
+            if isinstance(source_code, str):
+                if source_code in seen_base_codes:
+                    summary.duplicate_base_code_count += 1
+                seen_base_codes.add(source_code)
+            if errors:
+                summary.invalid_row_count += 1
+                for column_key, error_code in errors:
+                    summary.add_error(row_no, column_key, error_code)
+                continue
+
+            summary.valid_row_count += 1
+            assert isinstance(data_date, date)
+            date_key = data_date.isoformat()
+            summary.per_date_counts[date_key] = summary.per_date_counts.get(date_key, 0) + 1
+            resolved_code, resolution = _resolve_mapping(
+                contract.source_id, values, mapping, contract.version
+            )
+            if resolved_code is not None:
+                summary.mapped_row_count += 1
+            else:
+                summary.unmapped_row_count += 1
+                if resolution == "UNMAPPED":
+                    summary.no_mapping_match_row_count += 1
+                elif resolution == "MISSING_IDENTIFIER":
+                    summary.missing_identifier_row_count += 1
+            if on_valid_row:
+                on_valid_row(ValidImportRow(
+                    source_row_no=row_no,
+                    values=values,
+                    resolved_base_code=resolved_code,
+                    mapping_resolution=resolution,
+                ))
+
+        summary.bot_executed_at = latest_execution_at
+        summary.execution_period_start = period_start
+        summary.execution_period_end = period_end
+        summary.execution_page_count = execution_pages
+        if execution_count != summary.input_row_count:
+            summary.add_workbook_error("collection_rate_execution_row_count_mismatch")
+    return summary
+
+
 def _parse_pdd_v2_workbook(
     content: bytes,
     contract: SourceContract,
@@ -996,7 +1284,7 @@ def _parse_pdd_v2_workbook(
                     "orders_unscanned_at_collection", "packages_missing_dispatch_scan",
                 ):
                     aggregate[key] += int(values[key])
-                resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping)
+                resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping, contract.version)
                 if resolved_code is not None:
                     summary.mapped_row_count += 1
                 else:
@@ -1050,6 +1338,8 @@ def parse_workbook(
 
     if contract.source_id == "pdd_collection_failure" and contract.version == 2:
         return _parse_pdd_v2_workbook(content, contract, mapping, summary, on_valid_row)
+    if contract.source_id == "collection_rate" and contract.version == 2:
+        return _parse_collection_rate_v2_workbook(content, contract, mapping, summary, on_valid_row)
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(content))
@@ -1191,7 +1481,7 @@ def parse_workbook(
             if keyed_date:
                 date_key = keyed_date.isoformat()
                 summary.per_date_counts[date_key] = summary.per_date_counts.get(date_key, 0) + 1
-            resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping)
+            resolved_code, resolution = _resolve_mapping(contract.source_id, values, mapping, contract.version)
             if resolved_code is not None:
                 summary.mapped_row_count += 1
             elif resolution == "UNMAPPED" and (has_source_code or (isinstance(source_name, str) and source_name.strip())):

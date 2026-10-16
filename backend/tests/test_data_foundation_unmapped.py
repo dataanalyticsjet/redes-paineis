@@ -13,7 +13,7 @@ import zipfile
 import pytest
 from sqlalchemy import create_engine, event, text
 
-from app.services.data_foundation.contracts import CONTRACTS
+from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS
 from app.services.data_foundation import repository
 from app.services.data_foundation.mapping_resolution import build_mapping_query
 from app.services.data_foundation.queries import get_date_counts, get_publications, get_records
@@ -72,6 +72,7 @@ def _create_query_schema(engine) -> None:
         connection.exec_driver_sql("CREATE TABLE base_mapping_entries (map_version_id BLOB, base_code TEXT, regional_name TEXT, base_name TEXT, uf_code TEXT, rm_region TEXT, rm_responsible TEXT)")
         connection.exec_driver_sql("CREATE TABLE base_mapping_name_decisions (map_version_id BLOB, source_id TEXT, source_base_name TEXT, resolution_state TEXT, target_base_code TEXT)")
         connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, contract_version INTEGER NOT NULL DEFAULT 1, version_no INTEGER, period_start TEXT, period_end TEXT, snapshot_as_of TEXT, published_at TEXT, publication_state TEXT)")
+        connection.exec_driver_sql("CREATE TABLE source_publication_dates (source_id TEXT, publication_id BLOB, data_date DATE, row_count INTEGER, PRIMARY KEY(source_id, publication_id, data_date))")
         connection.exec_driver_sql("CREATE TABLE source_daily_head (source_id TEXT, data_date DATE, publication_id BLOB, PRIMARY KEY(source_id, data_date))")
         connection.exec_driver_sql("CREATE TABLE source_snapshot_head (source_id TEXT PRIMARY KEY, publication_id BLOB)")
         connection.execute(text("INSERT INTO base_mapping_versions VALUES (:id, 'PUBLISHED')"), {"id": MAP_VERSION_ID})
@@ -122,6 +123,21 @@ def _create_query_schema(engine) -> None:
                 "PRIMARY KEY(publication_id, source_row_no)",
             ])
             connection.exec_driver_sql(f"CREATE TABLE `{table_name}` ({', '.join(column_definitions)})")
+
+        collection_rate_v2 = CONTRACT_VERSIONS[("collection_rate", 2)]
+        v2_column_definitions = [
+            "source_id TEXT NOT NULL",
+            "publication_id BLOB NOT NULL",
+            "map_version_id BLOB NOT NULL",
+            "source_row_no INTEGER NOT NULL",
+            *(f"`{column.key}` {_sqlite_type(column.kind)}" for column in collection_rate_v2.columns),
+            "resolved_base_code TEXT",
+            "mapping_resolution TEXT NOT NULL",
+            "PRIMARY KEY(publication_id, source_row_no)",
+        ]
+        connection.exec_driver_sql(
+            f"CREATE TABLE fact_collection_rate_v2 ({', '.join(v2_column_definitions)})"
+        )
 
 
 def _row_values(source_id: str, row_no: int, *, duplicate_group: bool = False) -> dict[str, object]:
@@ -330,6 +346,14 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
                 })
                 if source_id in repository.DAILY_SOURCES:
                     connection.execute(text("""
+                        INSERT INTO source_publication_dates (source_id, publication_id, data_date, row_count)
+                        VALUES (:source_id, :publication_id, '2026-10-01', :row_count)
+                    """), {
+                        "source_id": source_id,
+                        "publication_id": publication_ids[source_id],
+                        "row_count": expected_count,
+                    })
+                    connection.execute(text("""
                         INSERT INTO source_daily_head (source_id, data_date, publication_id)
                         VALUES (:source_id, '2026-10-01', :publication_id)
                     """), {"source_id": source_id, "publication_id": publication_ids[source_id]})
@@ -535,6 +559,124 @@ def test_actual_parser_states_fit_the_source_enums(source_id):
         _persisted_mapping_resolution(source_id, row.mapping_resolution)
         for row in parsed_rows
     ] == expected_storage_states
+
+
+def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
+    engine = create_engine("sqlite://")
+    _create_query_schema(engine)
+    data_day = date(2026, 10, 13)
+    old_v1_publication = b"1" * 16
+    current_v1_publication = b"2" * 16
+    current_v2_publication = b"3" * 16
+
+    def row_values(contract, row_no: int, *, base_code: str | None) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for column in contract.columns:
+            if column.kind == "DATE":
+                value: object = data_day
+            elif column.kind == "DATETIME":
+                value = datetime(2026, 10, 13, 9, 0)
+            elif column.kind == "INTEGER":
+                value = row_no
+            elif column.kind == "DECIMAL":
+                value = 0.5
+            elif column.key == "source_base_code":
+                value = base_code
+            elif column.key == "source_base_name":
+                value = "Mapped base"
+            elif column.nullable:
+                value = None
+            else:
+                value = f"{column.key}-{row_no}"
+            result[column.key] = value
+        return result
+
+    try:
+        with engine.begin() as connection:
+            for publication_id, contract_version, version_no, published_at, snapshot_as_of in (
+                (old_v1_publication, 1, 4, "2026-10-13 10:00:00", "2026-10-13 09:00:00"),
+                (current_v1_publication, 1, 5, "2026-10-14 10:00:00", "2026-10-14 09:00:00"),
+                (current_v2_publication, 2, 6, "2026-10-14 11:00:00", "2026-10-14 10:30:00"),
+            ):
+                connection.execute(text("""
+                    INSERT INTO source_publications
+                      (publication_id, source_id, contract_version, version_no, published_at, snapshot_as_of, publication_state)
+                    VALUES (:publication_id, 'collection_rate', :contract_version, :version_no, :published_at, :snapshot_as_of, 'PUBLISHED')
+                """), {
+                    "publication_id": publication_id,
+                    "contract_version": contract_version,
+                    "version_no": version_no,
+                    "published_at": published_at,
+                    "snapshot_as_of": snapshot_as_of,
+                })
+                connection.execute(text("""
+                    INSERT INTO source_publication_dates
+                      (source_id, publication_id, data_date, row_count)
+                    VALUES ('collection_rate', :publication_id, :data_day, 1)
+                """), {"publication_id": publication_id, "data_day": data_day})
+
+            for contract_version, publication_id, source_row_no, mapping_resolution, source_code in (
+                (1, old_v1_publication, 1, "NAME_APPROVED", None),
+                (1, current_v1_publication, 2, "NAME_APPROVED", None),
+                (2, current_v2_publication, 3, "CODE_MATCH", "MATCHED-001"),
+            ):
+                contract = CONTRACT_VERSIONS[("collection_rate", contract_version)]
+                values = row_values(contract, source_row_no, base_code=source_code)
+                columns = [
+                    "source_id", "publication_id", "map_version_id", "source_row_no",
+                    *(column.key for column in contract.columns),
+                    "resolved_base_code", "mapping_resolution",
+                ]
+                table = "fact_collection_rate_v2" if contract_version == 2 else "fact_collection_rate"
+                payload = {
+                    "source_id": "collection_rate",
+                    "publication_id": publication_id,
+                    "map_version_id": MAP_VERSION_ID,
+                    "source_row_no": source_row_no,
+                    **values,
+                    "resolved_base_code": "MATCHED-001",
+                    "mapping_resolution": mapping_resolution,
+                }
+                connection.execute(text(
+                    f"INSERT INTO `{table}` ({', '.join(f'`{column}`' for column in columns)}) "
+                    f"VALUES ({', '.join(f':{column}' for column in columns)})"
+                ), payload)
+
+            connection.execute(text("""
+                INSERT INTO source_daily_head (source_id, data_date, publication_id)
+                VALUES ('collection_rate', :data_day, :publication_id)
+            """), {"data_day": data_day, "publication_id": current_v2_publication})
+
+        v1 = get_records(
+            engine, source_id="collection_rate", identity=ADMIN_MATRIX,
+            limit=250, offset=0, date_from=data_day, date_to=data_day,
+            contract_version=1,
+        )
+        v2 = get_records(
+            engine, source_id="collection_rate", identity=ADMIN_MATRIX,
+            limit=250, offset=0, date_from=data_day, date_to=data_day,
+            contract_version=2,
+        )
+        assert v1["total"] == 1
+        assert v1["records"][0]["source_row_no"] == 2
+        assert v1["records"][0]["publication_id"] == str(uuid.UUID(bytes=current_v1_publication))
+        assert v2["total"] == 1
+        assert v2["records"][0]["source_row_no"] == 3
+        assert v2["records"][0]["publication_id"] == str(uuid.UUID(bytes=current_v2_publication))
+        v2_dates = get_date_counts(
+            engine, source_id="collection_rate", identity=ADMIN_MATRIX,
+            date_from=data_day, date_to=data_day, contract_version=2,
+        )
+        assert v2_dates["hasPublishedPublication"] is True
+        assert v2_dates["dates"] == [{
+            "date": data_day.isoformat(),
+            "rowCount": 1,
+            "publicationId": str(uuid.UUID(bytes=current_v2_publication)),
+            "publishedAt": "2026-10-14 11:00:00",
+            "snapshotAsOf": "2026-10-14 10:30:00",
+        }]
+    finally:
+        engine.dispose()
 
 
 def test_daily_replace_dates_preserves_other_days_and_snapshot_replaces_one_head():

@@ -9,7 +9,7 @@ import uuid
 from sqlalchemy import Engine, text
 
 from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS, get_contract
-from app.services.data_foundation.mapping_resolution import build_mapping_query
+from app.services.data_foundation.mapping_resolution import build_mapping_query, code_only_mapping
 from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError, fact_table_for_contract
 
 
@@ -121,6 +121,10 @@ def _query_plan(
         raise DataFoundationError("date_filter_not_supported", 422)
 
     params: dict[str, object] = {"source_id": source_id}
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
     if publication_id is not None:
         try:
             params["selected_publication_id"] = uuid.UUID(publication_id).bytes
@@ -134,6 +138,42 @@ def _query_plan(
              AND selected_publication.publication_state = 'PUBLISHED'
         """
         params["contract_version"] = contract.version
+    elif source_id == "collection_rate" and contract.version in {1, 2}:
+        # source_daily_head is source-wide rather than contract-versioned.
+        # Select the current partition independently for V1 and V2 so a V2
+        # publication cannot hide the preserved V1 facts (or vice versa).
+        params["contract_version"] = contract.version
+        daily_date_filter = []
+        if date_from:
+            daily_date_filter.append("publication_dates.data_date >= :date_from")
+        if date_to:
+            daily_date_filter.append("publication_dates.data_date <= :date_to")
+        daily_date_filter_sql = " AND " + " AND ".join(daily_date_filter) if daily_date_filter else ""
+        head_join = """
+            JOIN (
+                SELECT ranked_dates.source_id, ranked_dates.data_date, ranked_dates.publication_id
+                FROM (
+                    SELECT publication_dates.source_id, publication_dates.data_date,
+                           publication_dates.publication_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY publication_dates.source_id, publication_dates.data_date
+                               ORDER BY daily_publication.version_no DESC
+                           ) AS publication_rank
+                    FROM source_publication_dates AS publication_dates
+                    JOIN source_publications AS daily_publication
+                      ON daily_publication.source_id = publication_dates.source_id
+                     AND daily_publication.publication_id = publication_dates.publication_id
+                    WHERE daily_publication.source_id = :source_id
+                      AND daily_publication.contract_version = :contract_version
+                      AND daily_publication.publication_state = 'PUBLISHED'
+            """ + daily_date_filter_sql + """
+                ) AS ranked_dates
+                WHERE ranked_dates.publication_rank = 1
+            ) AS versioned_head
+              ON versioned_head.source_id = fact.source_id
+             AND versioned_head.data_date = fact.data_date
+             AND versioned_head.publication_id = fact.publication_id
+        """
     elif source_id in DAILY_SOURCES:
         head_join = """
             JOIN source_daily_head AS head
@@ -152,6 +192,7 @@ def _query_plan(
         source_id=source_id,
         has_source_base_code="source_base_code" in column_keys,
         has_source_base_name="source_base_name" in column_keys,
+        allow_name_mapping=not code_only_mapping(source_id, contract.version),
         dialect=sql_dialect,
     )
     from_sql = f"""
@@ -355,6 +396,47 @@ def get_date_counts(
         with engine.connect() as connection:
             count = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} WHERE {plan.where_sql}"), plan.parameters).scalar_one())
         return {"sourceId": source_id, "dates": [], "snapshotRowCount": count}
+    if source_id == "collection_rate" and contract_version == 2:
+        with engine.connect() as connection:
+            has_published_publication = bool(connection.execute(text("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM source_publications
+                    WHERE source_id = :source_id
+                      AND contract_version = :contract_version
+                      AND publication_state = 'PUBLISHED'
+                )
+            """), plan.parameters).scalar_one())
+            rows = connection.execute(text(f"""
+                SELECT fact.data_date AS date, fact.publication_id,
+                       daily_publication.published_at, daily_publication.snapshot_as_of,
+                       COUNT(*) AS row_count
+                {plan.from_sql}
+                JOIN source_publications AS daily_publication
+                  ON daily_publication.source_id = fact.source_id
+                 AND daily_publication.publication_id = fact.publication_id
+                 AND daily_publication.contract_version = :contract_version
+                 AND daily_publication.publication_state = 'PUBLISHED'
+                WHERE {plan.where_sql}
+                GROUP BY fact.data_date, fact.publication_id,
+                         daily_publication.published_at, daily_publication.snapshot_as_of
+                ORDER BY fact.data_date DESC
+            """), plan.parameters).mappings()
+            dates = [
+                {
+                    "date": row["date"],
+                    "rowCount": int(row["row_count"]),
+                    "publicationId": str(uuid.UUID(bytes=bytes(row["publication_id"]))),
+                    "publishedAt": row["published_at"],
+                    "snapshotAsOf": row["snapshot_as_of"],
+                }
+                for row in rows
+            ]
+        return {
+            "sourceId": source_id,
+            "dates": dates,
+            "hasPublishedPublication": has_published_publication,
+        }
     with engine.connect() as connection:
         rows = connection.execute(text(f"""
             SELECT fact.data_date AS date, COUNT(*) AS row_count

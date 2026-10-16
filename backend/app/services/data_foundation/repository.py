@@ -21,6 +21,8 @@ from app.services.data_foundation.contracts import (
 from app.services.data_foundation.mapping_resolution import (
     CODE_RESOLUTION_SOURCES,
     NAME_MAPPED_SOURCES,
+    code_only_mapping,
+    name_mapping_enabled,
     normalize_mapping_name,
     resolve_name_candidates,
 )
@@ -46,6 +48,7 @@ FACT_TABLES_BY_VERSION: dict[tuple[str, int], str] = {
     if source_id in FACT_TABLES
 }
 FACT_TABLES_BY_VERSION[("pdd_collection_failure", 2)] = "fact_pdd_collection_failure_v2"
+FACT_TABLES_BY_VERSION[("collection_rate", 2)] = "fact_collection_rate_v2"
 
 
 def fact_table_for_contract(source_id: str, contract_version: int | None = None) -> str:
@@ -166,7 +169,8 @@ def get_name_mapping_candidates(
         if job["submitted_by_user_id"] != actor_user_id:
             raise DataFoundationError("import_job_not_found", 404)
         source_id = str(job["source_id"])
-        if source_id not in NAME_MAPPED_SOURCES:
+        contract_version = int(job["contract_version"])
+        if not name_mapping_enabled(source_id, contract_version):
             raise DataFoundationError("name_mapping_not_supported_for_source", 422)
         if job["job_state"] != "VALIDATED":
             raise DataFoundationError("import_job_not_validated", 409)
@@ -556,7 +560,8 @@ def _fact_row(
     map_version_id: bytes,
     row: ValidImportRow,
 ) -> dict[str, object]:
-    mapping_resolution = _persisted_mapping_resolution(source_id, row.mapping_resolution)
+    mapping_resolution = _persisted_mapping_resolution(source_id, row.mapping_resolution, contract.version)
+    uses_code_mapping = source_id in CODE_RESOLUTION_SOURCES or code_only_mapping(source_id, contract.version)
     values: dict[str, object] = {
         "source_id": source_id,
         "publication_id": publication_id,
@@ -564,7 +569,7 @@ def _fact_row(
         "source_row_no": row.source_row_no,
         "resolved_base_code": (
             row.resolved_base_code
-            if source_id not in CODE_RESOLUTION_SOURCES or row.mapping_resolution == "CODE_MATCH"
+            if not uses_code_mapping or row.mapping_resolution == "CODE_MATCH"
             else None
         ),
         "mapping_resolution": mapping_resolution,
@@ -578,9 +583,14 @@ def _fact_row(
     return values
 
 
-def _persisted_mapping_resolution(source_id: str, resolution: str) -> str:
+def _persisted_mapping_resolution(source_id: str, resolution: str, contract_version: int = 1) -> str:
     """Translate parser-only states to the source table's existing ENUM values."""
-    if source_id in NAME_MAPPED_SOURCES and source_id not in CODE_RESOLUTION_SOURCES:
+    if source_id in CODE_RESOLUTION_SOURCES or code_only_mapping(source_id, contract_version):
+        if resolution == "CODE_MATCH":
+            return resolution
+        if resolution in (_NAME_MAPPING_RESOLUTIONS | _UNAPPROVED_MAPPING_RESOLUTIONS | _CODE_MAPPING_RESOLUTIONS):
+            return "UNMAPPED"
+    elif source_id in NAME_MAPPED_SOURCES:
         if resolution in _NAME_MAPPING_RESOLUTIONS:
             return resolution
         if resolution in _UNAPPROVED_MAPPING_RESOLUTIONS:
@@ -810,6 +820,8 @@ def publish_import_job(
             period_end = summary.collection_date
             snapshot_as_of = summary.bot_executed_at
         elif source_id == "pdd_collection_failure" and contract.version == 2:
+            snapshot_as_of = summary.bot_executed_at
+        elif source_id == "collection_rate" and contract.version == 2:
             snapshot_as_of = summary.bot_executed_at
         connection.execute(text("""
             INSERT INTO source_publications

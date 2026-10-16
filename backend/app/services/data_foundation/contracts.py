@@ -105,6 +105,37 @@ _COLLECTION_RATE = (
     _c("merchants_not_visited", "未上门商家量", "INTEGER"),
 )
 
+_COLLECTION_RATE_V2 = (
+    _c("data_date", "Data de referência", "DATE"),
+    _c("source_region_code", "Código da regional", "TEXT", nullable=True, max_length=64),
+    _c("reported_region", "Regional", "TEXT", nullable=True, max_length=64),
+    _c("source_base_code", "Código da base de coleta", "BASE_CODE", nullable=True, max_length=64, numeric_code_allowed=True),
+    _c("source_base_name", "Base de coleta", "TEXT", nullable=True, max_length=191),
+    _c("order_origin_code", "Código da origem do pedido", "TEXT", max_length=64),
+    _c("order_origin", "Origem do pedido", "TEXT", max_length=96),
+    _c("product_type_code", "Código do tipo de encomenda", "TEXT", max_length=64),
+    _c("product_type", "Tipo de encomenda", "TEXT", max_length=96),
+    _c("total_orders", "Total de pedidos", "INTEGER"),
+    _c("quantity_to_collect", "Quantidade prevista para coleta", "INTEGER"),
+    _c("cancelled_orders", "Total de cancelamentos", "INTEGER"),
+    _c("collection_rate_reported", "Taxa de coleta", "DECIMAL"),
+    _c("collected_quantity", "Quantidade coletada", "INTEGER"),
+    _c("not_collected_quantity", "Quantidade não coletada", "INTEGER"),
+    _c("not_collected_deadline_pending", "Não coletados — indicador de prazo", "INTEGER"),
+    _c("collected_on_time_quantity", "Coletas no prazo", "INTEGER"),
+    _c("not_collected_after_deadline", "Não coletados fora do prazo", "INTEGER"),
+    _c("collected_after_deadline", "Coletas fora do prazo", "INTEGER"),
+    _c("collection_on_time_rate_reported", "Taxa de coleta no prazo", "DECIMAL"),
+    _c("attempts_on_time_pending", "Tentativas de coleta no prazo", "INTEGER"),
+    _c("punctuality_rate_pending", "Taxa de pontualidade", "DECIMAL"),
+    _c("average_collection_pending", "Média de coleta", "DECIMAL", nullable=True),
+    _c("problem_quantity", "Quantidade com problema", "INTEGER"),
+    _c("no_problem_quantity", "Quantidade sem problema", "INTEGER"),
+    _c("seller_collection_rate_pending", "Taxa relacionada à loja", "DECIMAL"),
+    _c("expected_shop_quantity_pending", "Quantidade prevista — loja", "INTEGER"),
+    _c("unexpected_shop_quantity_pending", "Quantidade não prevista — loja", "INTEGER"),
+)
+
 _JT_MONITORING = (
     _c("data_date", "Data", "DATE"),
     _c("reported_region", "Regional Origem", "TEXT", nullable=True, max_length=64),
@@ -278,10 +309,28 @@ PDD_COLLECTION_FAILURE_V2_CONTRACT = SourceContract(
     expected_sample_rows=None,
 )
 
+COLLECTION_RATE_V2_CONTRACT = SourceContract(
+    source_id="collection_rate",
+    display_name="Taxa de Coleta",
+    workbook_name="taxa_coleta.xlsx",
+    sheet_name="Dados",
+    header_row=1,
+    version=2,
+    history_policy="DAILY_REPLACE_DATES",
+    grain_description=(
+        "Uma linha por linha física da aba Dados do Bot 03; cada data de referência "
+        "importada substitui integralmente sua partição diária. Códigos são associados "
+        "somente por correspondência exata no De-para oficial DoomsDay."
+    ),
+    columns=_COLLECTION_RATE_V2,
+    expected_sample_rows=None,
+)
+
 CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
     (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
 }
 CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CONTRACT
+CONTRACT_VERSIONS[("collection_rate", 2)] = COLLECTION_RATE_V2_CONTRACT
 
 
 def get_contract(source_id: str, version: int | None = None) -> SourceContract:

@@ -14,6 +14,15 @@ NAME_MAPPED_SOURCES = frozenset({
 CODE_RESOLUTION_SOURCES = frozenset({"no_movement", "pdd_collection_failure"})
 
 
+def code_only_mapping(source_id: str, contract_version: int) -> bool:
+    """Whether this contract version forbids falling back to a base name."""
+    return source_id == "collection_rate" and contract_version == 2
+
+
+def name_mapping_enabled(source_id: str, contract_version: int) -> bool:
+    return source_id in NAME_MAPPED_SOURCES and not code_only_mapping(source_id, contract_version)
+
+
 @dataclass(frozen=True)
 class MappingQuery:
     joins: str
@@ -78,6 +87,7 @@ def build_mapping_query(
     source_id: str,
     has_source_base_code: bool,
     has_source_base_name: bool,
+    allow_name_mapping: bool = True,
     dialect: str = "mysql",
 ) -> MappingQuery:
     """Build one-row-per-fact joins against the current published map.
@@ -118,7 +128,7 @@ def build_mapping_query(
     exact_decision_code = None
     normalized_decision_code = None
 
-    if has_source_base_name:
+    if has_source_base_name and allow_name_mapping:
         exact_map_key = _binary_sql("map_name.base_name", dialect)
         exact_source_key = _binary_sql("fact.source_base_name", dialect)
         joins.append(f"""
@@ -153,7 +163,7 @@ def build_mapping_query(
         exact_candidate_code = "exact_name_candidates.candidate_base_code"
         normalized_candidate_code = "normalized_name_candidates.candidate_base_code"
 
-        if source_id in NAME_MAPPED_SOURCES:
+        if source_id in NAME_MAPPED_SOURCES and allow_name_mapping:
             joins.append(f"""
             LEFT JOIN base_mapping_name_decisions AS exact_decision
               ON exact_decision.map_version_id = current_map.map_version_id
