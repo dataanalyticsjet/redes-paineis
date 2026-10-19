@@ -396,6 +396,36 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
             assert publication_result["publications"][0]["visibleRowCount"] == expected_count
             assert publication_result["publications"][0]["contractVersion"] == CONTRACTS[source_id].version
 
+            regional_identity = {
+                "platform_role": "USER",
+                "organizational_scope": "regional",
+                "role": "regional",
+                "home_region": "SPE",
+                "additional_regions": [],
+            }
+            regional_records = get_records(
+                engine,
+                source_id=source_id,
+                identity=regional_identity,
+                limit=10_000,
+                offset=0,
+            )
+            regional_publications = get_publications(
+                engine,
+                source_id=source_id,
+                identity=regional_identity,
+                limit=10,
+                offset=0,
+            )
+            visible_publication_rows = (
+                regional_publications["publications"][0]["visibleRowCount"]
+                if regional_publications["publications"]
+                else 0
+            )
+            assert visible_publication_rows == regional_records["total"]
+            assert regional_publications["total"] == (1 if regional_records["total"] else 0)
+            assert regional_records["total"] <= expected_count
+
             counts = get_date_counts(engine, source_id=source_id, identity=identity)
             if source_id == "no_movement":
                 assert counts["snapshotRowCount"] == expected_count

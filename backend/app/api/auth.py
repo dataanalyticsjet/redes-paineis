@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -204,6 +205,7 @@ async def feishu_callback(request: Request) -> Response:
     # Organizational profile refresh is informational and must never block
     # an otherwise valid login or modify platform authorization.
     user_id = int(session_identity["user_id"])
+    unpersisted_sync_failure_at: float | None = None
     try:
         organizational_profile = await fetch_feishu_organizational_profile(
             str(identity.get("_open_id") or ""),
@@ -232,6 +234,7 @@ async def feishu_callback(request: Request) -> Response:
                 )
         except Exception:
             logger.warning("Feishu organizational profile sync status could not be persisted")
+            unpersisted_sync_failure_at = time.time()
     except Exception as error:
         logger.warning("Feishu organizational profile sync failed (error_type=%s)", type(error).__name__)
         try:
@@ -244,6 +247,13 @@ async def feishu_callback(request: Request) -> Response:
                 )
         except Exception:
             logger.warning("Feishu organizational profile sync status could not be persisted")
+            unpersisted_sync_failure_at = time.time()
+
+    if unpersisted_sync_failure_at is not None:
+        # A trusted server-side session marker keeps a failed sync fail-closed
+        # if the database could not persist SYNC_FAILED. A later successful
+        # profile sync is recognized by its newer last_successful_sync_at.
+        session_identity["_feishu_sync_failed_at"] = unpersisted_sync_failure_at
 
     try:
         session_token = create_local_session(session_identity, settings)
@@ -290,11 +300,14 @@ async def current_user(
             "region",
             "base",
             "platform_role",
+            "administrative_scope",
+            "can_manage_users",
             "organizational_scope",
             "home_region",
             "home_base",
             "additional_regions",
             "effective_regions",
+            "data_scope_source",
             "is_active",
         )
     }
@@ -304,8 +317,8 @@ async def current_user(
         {
             "authenticated": True,
             **public_identity,
-            "organizational_region_code": profile.organizational_region_code if profile else None,
-            "region_resolution_status": profile.region_resolution_status if profile else "UNKNOWN",
+            "organizational_region_code": identity.get("organizational_region_code"),
+            "region_resolution_status": identity.get("region_resolution_status", "UNKNOWN"),
         },
         headers={"Cache-Control": "no-store"},
     )

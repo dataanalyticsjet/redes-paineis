@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import UploadFile
 
 from app.core.config import get_settings
-from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_admin
+from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_matrix_admin
 from app.services.row_scope import scope_parsed_rows
 from app.services.local_workbooks import (
     HISTORY_KINDS,
@@ -219,7 +219,7 @@ async def _parse_post(request: Request) -> tuple[WorkbookPayload, list[tuple[str
 @router.post("/upload-auth")
 async def verify_upload_auth(
     request: Request,
-    _admin: AuthenticatedViewer = Depends(require_admin),
+    _admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> Response:
     error = _upload_error(request)
     if error:
@@ -250,7 +250,7 @@ async def responsibility_workbook_metadata(
 @router.post("/workbook/responsibility-list/preview")
 async def preview_responsibility_workbook(
     request: Request,
-    _admin: AuthenticatedViewer = Depends(require_admin),
+    _admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> Response:
     try:
         payload, source_files = await _parse_post(request)
@@ -281,7 +281,7 @@ async def preview_responsibility_workbook(
 async def publish_responsibility_workbook(
     request: Request,
     payload: ResponsibilityPublishPayload,
-    _admin: AuthenticatedViewer = Depends(require_admin),
+    _admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> Response:
     try:
         published = publish_responsibility_preview(
@@ -289,6 +289,7 @@ async def publish_responsibility_workbook(
             _responsibility_owner_key(request),
             data_root(get_settings().data_directory),
         )
+        logger.info("Administrative workbook change (actor_user_id=%s action=publish kind=responsibilityList)", _admin.user.id)
         return JSONResponse({
             "source": _responsibility_source_payload(published, published, published)
         }, headers={"Cache-Control": "no-store"})
@@ -334,7 +335,7 @@ async def read_workbook(
 @router.post("/workbook")
 async def write_workbook(
     request: Request,
-    _admin: AuthenticatedViewer = Depends(require_admin),
+    _admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> Response:
     try:
         payload, source_files = await _parse_post(request)
@@ -353,7 +354,7 @@ async def write_workbook(
         except (TypeError, ValueError):
             return _error("workbook_payload_invalid", 422)
         metadata = save_workbook(data_root(get_settings().data_directory), payload.kind, payload.file_name, payload.parsed, source_files)
-        logger.info("Local workbook published (kind=%s, source_count=%s, rows=%s)", payload.kind, len(source_files), len(payload.parsed.get("rows", [])))
+        logger.info("Administrative workbook change (actor_user_id=%s action=publish kind=%s source_count=%s rows=%s)", _admin.user.id, payload.kind, len(source_files), len(payload.parsed.get("rows", [])))
         workbook: dict[str, Any] = {"fileName": metadata["fileName"], "updatedAt": metadata["updatedAt"]}
         if payload.kind not in HISTORY_KINDS:
             workbook["parsed"] = payload.parsed

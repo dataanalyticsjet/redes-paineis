@@ -5373,6 +5373,88 @@ tbody tr:hover td {
   scrollbar-color: #c6cbd3 #f4f5f7;
 }
 
+/* The 28-column Taxa V2 table keeps its own compact layout and does not
+   inherit the PDD table's wider sizing rules. */
+.taxa-v2-detail-card .taxa-v2-detail-table-wrap {
+  max-height: 440px;
+  overflow: auto;
+  border-top-color: var(--table-grid);
+  border-radius: 8px;
+  overscroll-behavior: contain;
+  scrollbar-color: #c6cbd3 #f4f5f7;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table {
+  width: 100%;
+  min-width: 2340px;
+  table-layout: fixed;
+  font-size: 11px;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th,
+.taxa-v2-detail-card .taxa-v2-detail-table td {
+  height: 34px;
+  padding: 5px 7px;
+  border-right-color: var(--table-grid);
+  border-bottom-color: var(--table-grid);
+  line-height: 1.25;
+  vertical-align: middle;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 48px;
+  padding: 6px;
+  border-bottom: 1px solid var(--table-header-dark);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.15;
+  text-align: center;
+  vertical-align: middle;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(1),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(1) {
+  width: 86px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(2),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(4),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(6),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(8) {
+  width: 92px;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(3),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(5),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(7),
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(9) {
+  width: 145px;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(n + 10) {
+  width: 112px;
+}
+
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(n + 10),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(n + 10) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+html[data-theme="dark"] .taxa-v2-detail-card .taxa-v2-detail-table-wrap {
+  scrollbar-color: #535b67 #252a32;
+}
+
 .pdd-v2-detail-card .pdd-v2-detail-table {
   width: 100%;
   min-width: 1920px;
@@ -6758,6 +6840,14 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
 .demo-users-modal > select { width: 100%; min-height: 40px; padding: 0 10px; border: 1px solid #dfe2e6; border-radius: 8px; background: #fff; color: #3f4650; font: inherit; font-size: 12px; }
 .user-admin-home-scope { display: grid; gap: 5px; margin: 15px 0 19px; padding: 11px 12px; border: 1px solid #ece3e3; border-radius: 9px; background: #fafafa; color: #555d67; font-size: 11px; }
 .user-admin-home-scope strong { color: #414750; font-size: 11px; }
+.user-admin-audit { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e8eaed; }
+.user-admin-audit h3 { margin: 0 0 10px; color: #414750; font-size: 12px; font-weight: 750; }
+.user-admin-audit > p { color: #747b85; font-size: 11px; }
+.user-admin-audit ol { display: grid; gap: 8px; max-height: 190px; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+.user-admin-audit li { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid #e9eaed; border-radius: 8px; background: #fafafa; color: #555d67; font-size: 11px; }
+.user-admin-audit li strong { color: #414750; }
+.user-admin-audit li small { color: #747b85; line-height: 1.45; }
+.user-admin-audit li span { color: #747b85; font-size: 10px; }
 .user-admin-hint { margin: -3px 0 8px; color: #747b85; font-size: 11px; line-height: 1.5; }
 .user-admin-region-list { max-height: 240px; overflow-y: auto; }
 .user-admin-region-list .demo-users-access-option small { color: #858b95; font-size: 10px; font-weight: 500; }
@@ -8613,7 +8703,9 @@ html[data-theme="dark"] .demo-users-content {
 html[data-theme="dark"] .demo-users-heading h1,
 html[data-theme="dark"] .demo-users-table td strong,
 html[data-theme="dark"] .demo-users-modal h2,
-html[data-theme="dark"] .user-admin-home-scope strong {
+html[data-theme="dark"] .user-admin-home-scope strong,
+html[data-theme="dark"] .user-admin-audit h3,
+html[data-theme="dark"] .user-admin-audit li strong {
   color: var(--text-primary);
 }
 
@@ -8622,7 +8714,11 @@ html[data-theme="dark"] .demo-users-modal > p,
 html[data-theme="dark"] .user-admin-email,
 html[data-theme="dark"] .user-admin-total,
 html[data-theme="dark"] .user-admin-hint,
-html[data-theme="dark"] .user-admin-empty {
+html[data-theme="dark"] .user-admin-empty,
+html[data-theme="dark"] .user-admin-audit > p,
+html[data-theme="dark"] .user-admin-audit li,
+html[data-theme="dark"] .user-admin-audit li small,
+html[data-theme="dark"] .user-admin-audit li span {
   color: var(--text-secondary);
 }
 
@@ -8775,6 +8871,9 @@ html[data-theme="dark"] .user-admin-home-scope {
   background: var(--surface-input);
   color: var(--text-secondary);
 }
+
+html[data-theme="dark"] .user-admin-audit { border-color: var(--border); }
+html[data-theme="dark"] .user-admin-audit li { border-color: var(--border); background: var(--surface-table); }
 
 html[data-theme="dark"] .demo-users-access-option {
   border-color: var(--border);

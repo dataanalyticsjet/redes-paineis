@@ -87,21 +87,30 @@ def scope_parsed_rows(
     parsed = canonicalize_parsed_regions(parsed, responsibility)
     scope = str(identity.get("organizational_scope") or "").strip().lower()
     role = str(identity.get("role") or "").strip().lower()
-    if scope == "matrix" or role == "matrix":
+    if scope == "matrix" and role == "matrix":
         return parsed
+    if scope == "matrix" or role == "matrix" or role != "regional":
+        raise PermissionError("viewer_scope_unavailable")
 
     home_region = str(identity.get("home_region") or identity.get("region") or "").strip().upper()
     home_base = str(identity.get("home_base") or identity.get("base") or "").strip().upper()
-    additional_regions = {
+    if "effective_regions" in identity:
+        authorized_regions = identity.get("effective_regions") or []
+    else:
+        # Compatibility for internal legacy callers; request handlers supply
+        # the backend-resolved effective scope on every request.
+        authorized_regions = [home_region, *(identity.get("additional_regions") or [])]
+    effective_regions = {
         str(region).strip().upper()
-        for region in identity.get("additional_regions", [])
+        for region in authorized_regions
         if str(region).strip()
     }
+    additional_regions = effective_regions - ({home_region} if home_region else set())
     if not scope:
         scope = "base" if home_base and not home_region else "regional"
     if scope == "base" and not home_base:
         raise PermissionError("viewer_scope_unavailable")
-    if scope == "regional" and not home_region:
+    if scope == "regional" and not home_region and not additional_regions:
         raise PermissionError("viewer_scope_unavailable")
     if scope not in {"regional", "base"}:
         raise PermissionError("viewer_scope_unavailable")
@@ -123,7 +132,7 @@ def scope_parsed_rows(
             )
         ]
     else:
-        allowed_regions = additional_regions | {home_region}
+        allowed_regions = effective_regions
         filtered = [
             row for row in rows
             if region_column

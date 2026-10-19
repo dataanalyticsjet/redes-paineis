@@ -10,11 +10,29 @@ export interface ManagedUser {
   name: string;
   email: string;
   platformRole: "USER" | "ADMIN";
-  organizationalScope: "matrix" | "regional" | "base";
+  organizationalScope: "matrix" | "regional" | "base" | "unknown";
   homeRegion: string | null;
   homeBase: string | null;
   additionalRegions: string[];
+  effectiveRegions: string[];
+  feishuRegionCode: string | null;
+  feishuRegionStatus: "RESOLVED" | "UNKNOWN" | "AMBIGUOUS" | "SYNC_FAILED";
   isActive: boolean;
+  canChangeStatus?: boolean;
+  canManageAccess?: boolean;
+}
+
+export interface UserAccessAuditEntry {
+  id: number;
+  actor: string;
+  action: string;
+  oldPlatformRole: "USER" | "ADMIN" | null;
+  newPlatformRole: "USER" | "ADMIN" | null;
+  oldIsActive: boolean | null;
+  newIsActive: boolean | null;
+  regionsAdded: string[];
+  regionsRemoved: string[];
+  createdAt: string;
 }
 
 export interface ManagedUsersResponse {
@@ -55,6 +73,10 @@ export function getManagedUsers(query = ""): Promise<ManagedUsersResponse> {
 
 export function getAdminRegions(): Promise<{ regions: AdminRegion[] }> {
   return request("/api/admin/regions");
+}
+
+export function getUserAccessAudit(userId: number): Promise<{ entries: UserAccessAuditEntry[]; total: number }> {
+  return request(`/api/admin/users/${userId}/access-audit?limit=25&offset=0`);
 }
 
 export function updateManagedUser(

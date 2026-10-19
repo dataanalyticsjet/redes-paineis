@@ -41,9 +41,11 @@ test("collaborator names preserve Latin accents, lowercase particles and non-Lat
   assert.equal(formatCollaboratorName("周正军 WENTONG DONG (WINTA)"), "周正军 Wentong Dong (Winta)");
 });
 
-test("administrative menu items are rendered only for the server-validated ADMIN role", () => {
-  assert.match(appSource, /isAdmin=\{viewerIdentity\.platform_role === "ADMIN"\}/);
-  assert.match(appSource, /\{isAdmin \? <>[\s\S]*?t\("Fontes de dados"\)[\s\S]*?t\("Controle de usuários"\)[\s\S]*?<\/>\s*: null\}/);
+test("administrative menu items use backend-authorized capabilities separate from data scope", () => {
+  assert.match(appSource, /canManageDataSources=\{isMatrixAdminViewer\}/);
+  assert.match(appSource, /canManageUsers=\{viewerIdentity\.can_manage_users === true\}/);
+  assert.match(appSource, /\{canManageDataSources \? <button[\s\S]*?t\("Fontes de dados"\)/);
+  assert.match(appSource, /\{canManageUsers \? <button[\s\S]*?t\("Controle de usuários"\)/);
   assert.match(appSource, /onOpenDataSources=\{\(\) => \{ setView\("data-foundation"\)/);
   assert.match(appSource, /onOpenUserControl=\{\(\) => \{ setView\("home"\); setShowUserControl\(true\); \}\}/);
 });

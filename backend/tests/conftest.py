@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -14,7 +15,7 @@ from app.api.dependencies import get_db_session
 from app.core.config import get_settings
 from app.db.base import Base
 from app.main import app
-from app.models import PlatformUser, Region, UserRegionAccess
+from app.models import PlatformUser, PlatformUserFeishuProfile, Region, UserRegionAccess
 from app.services import feishu_auth
 from app.services.user_access import identity_for_user
 
@@ -31,11 +32,17 @@ def user_test_session_factory() -> Iterator[sessionmaker[Session]]:
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     with factory() as db:
         db.add_all([
+            Region(region_code="CE", display_name="Ceará", is_active=True),
             Region(region_code="SPE", display_name="São Paulo Leste", is_active=True),
             Region(region_code="SPS", display_name="São Paulo Sul", is_active=True),
             Region(region_code="MG", display_name="Minas Gerais", is_active=True),
             Region(region_code="RJ", display_name="Rio de Janeiro", is_active=True),
+            Region(region_code="PR", display_name="Paraná", is_active=True),
             Region(region_code="SR", display_name="Regional Sul", is_active=True),
+            Region(region_code="SPN", display_name="São Paulo Norte", is_active=True),
+            Region(region_code="PA", display_name="Pará", is_active=True),
+            Region(region_code="BA", display_name="Bahia", is_active=True),
+            Region(region_code="GP", display_name="Goiás Planalto", is_active=True),
         ])
         db.commit()
     try:
@@ -117,6 +124,7 @@ def create_user_session(
         additional_regions: list[str] | None = None,
         active: bool = True,
         identity_suffix: str = "one",
+        feishu_region_code: str | None | object = ...,
     ) -> tuple[str, PlatformUser]:
         monkeypatch.setenv("FEISHU_SESSION_SECRET", "isolated-test-session-secret-at-least-32-chars")
         get_settings.cache_clear()
@@ -141,6 +149,16 @@ def create_user_session(
                 )
                 db.add(user)
                 db.flush()
+                resolved_feishu_region = feishu_region_code
+                if resolved_feishu_region is ...:
+                    resolved_feishu_region = home_region or ("MATRIZ" if organizational_scope == "matrix" else None)
+                if resolved_feishu_region:
+                    db.add(PlatformUserFeishuProfile(
+                        user_id=user.id,
+                        organizational_region_code=str(resolved_feishu_region),
+                        region_resolution_status="RESOLVED",
+                        last_successful_sync_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    ))
                 for region in additional_regions or []:
                     db.add(UserRegionAccess(
                         user_id=user.id,

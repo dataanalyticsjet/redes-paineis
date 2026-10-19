@@ -6,9 +6,11 @@ import type { DashboardTranslator } from "../../lib/i18n";
 import {
   getAdminRegions,
   getManagedUsers,
+  getUserAccessAudit,
   updateManagedUser,
   type AdminRegion,
   type ManagedUser,
+  type UserAccessAuditEntry,
 } from "../../lib/admin-users";
 
 export function UserControl({ t }: { t: DashboardTranslator }) {
@@ -21,8 +23,11 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [draftRole, setDraftRole] = useState<"USER" | "ADMIN">("USER");
   const [draftRegions, setDraftRegions] = useState<string[]>([]);
+  const [accessAudit, setAccessAudit] = useState<UserAccessAuditEntry[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
   const [pendingUserIds, setPendingUserIds] = useState<Set<number>>(new Set());
   const closeRef = useRef<HTMLButtonElement>(null);
+  const editingUserId = editingUser?.id;
 
   useEffect(() => {
     let active = true;
@@ -51,7 +56,20 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [editingUser, saving]);
 
+  useEffect(() => {
+    if (editingUserId === undefined) return;
+    let active = true;
+    void getUserAccessAudit(editingUserId)
+      .then((response) => { if (active) setAccessAudit(response.entries); })
+      .catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause.message : "user_admin_request_failed");
+      })
+      .finally(() => { if (active) setAuditLoading(false); });
+    return () => { active = false; };
+  }, [editingUserId]);
+
   async function changeActive(user: ManagedUser) {
+    if (user.canChangeStatus !== true) return;
     setPendingUserIds((current) => new Set(current).add(user.id));
     setError("");
     try {
@@ -69,14 +87,17 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
   }
 
   function openEditor(user: ManagedUser) {
+    if (user.canManageAccess !== true) return;
     setEditingUser(user);
     setDraftRole(user.platformRole);
     setDraftRegions([...user.additionalRegions]);
+    setAccessAudit([]);
+    setAuditLoading(true);
     setError("");
   }
 
   async function saveEditor() {
-    if (!editingUser) return;
+    if (!editingUser || editingUser.canManageAccess !== true) return;
     setSaving(true);
     setError("");
     try {
@@ -126,7 +147,8 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                 <th scope="col">{t("Perfil")}</th>
                 <th scope="col">{t("Escopo organizacional")}</th>
                 <th scope="col">{t("Região/base de origem")}</th>
-                <th scope="col">{t("Acessos adicionais")}</th>
+                <th scope="col">{t("Regional do Feishu")}</th>
+                <th scope="col">{t("Regionais autorizadas")}</th>
                 <th scope="col">{t("Status")}</th>
                 <th scope="col">{t("Ações")}</th>
               </tr></thead>
@@ -135,10 +157,14 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                   <tr className={user.isActive ? "" : "demo-users-row-inactive"} key={user.id}>
                     <td data-label={t("Nome")}><strong>{user.name}</strong><small className="user-admin-email">{user.email}</small></td>
                     <td data-label={t("Perfil")}><span className={`user-admin-role${user.platformRole === "ADMIN" ? " is-admin" : ""}`}>{t(user.platformRole === "ADMIN" ? "Administrador" : "Usuário")}</span></td>
-                    <td data-label={t("Escopo organizacional")}>{t(user.organizationalScope === "matrix" ? "Matriz" : user.organizationalScope === "base" ? "Base" : "Regional")}</td>
+                    <td data-label={t("Escopo organizacional")}>{t(user.organizationalScope === "matrix" ? "Matriz" : user.organizationalScope === "base" ? "Base" : user.organizationalScope === "regional" ? "Regional" : "Não identificado")}</td>
                     <td data-label={t("Região/base de origem")}>{user.homeBase ? `${regionName(user.homeRegion)} · ${user.homeBase}` : regionName(user.homeRegion)}</td>
-                    <td data-label={t("Acessos adicionais")}>
-                      {user.organizationalScope === "matrix" ? t("Nacional") : user.additionalRegions.length ? user.additionalRegions.map(regionName).join(", ") : t("Nenhum")}
+                    <td data-label={t("Regional do Feishu")}>
+                      {user.feishuRegionCode ? regionName(user.feishuRegionCode) : t("Regional não identificada")}
+                      <small className="user-admin-email">{t(user.feishuRegionStatus)}</small>
+                    </td>
+                    <td data-label={t("Regionais autorizadas")}>
+                      {user.organizationalScope === "matrix" ? t("Nacional") : user.effectiveRegions.length ? user.effectiveRegions.map(regionName).join(", ") : t("Nenhum")}
                     </td>
                     <td data-label={t("Status")}>
                       <div className="demo-users-status-control">
@@ -148,16 +174,16 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                           role="switch"
                           aria-checked={user.isActive}
                           aria-label={t(user.isActive ? "Desativar {name}" : "Ativar {name}", { name: user.name })}
-                          disabled={pendingUserIds.has(user.id)}
+                          disabled={user.canChangeStatus !== true || pendingUserIds.has(user.id)}
                           onClick={() => void changeActive(user)}
                         ><span /></button>
                         <span className={`demo-users-status${user.isActive ? " is-active" : ""}`}>{t(user.isActive ? "Ativo" : "Desativado")}</span>
                       </div>
                     </td>
-                    <td data-label={t("Ações")}><button className="demo-users-manage" type="button" onClick={() => openEditor(user)}><Settings2 size={16} /> {t("Gerenciar acessos")}</button></td>
+                    <td data-label={t("Ações")}><button className="demo-users-manage" type="button" disabled={user.canManageAccess !== true} onClick={() => openEditor(user)}><Settings2 size={16} /> {t("Gerenciar acessos")}</button></td>
                   </tr>
                 ))}
-                {!users.length ? <tr><td colSpan={7} className="user-admin-empty">{t("Nenhum usuário encontrado.")}</td></tr> : null}
+                {!users.length ? <tr><td colSpan={8} className="user-admin-empty">{t("Nenhum usuário encontrado.")}</td></tr> : null}
               </tbody>
             </table>
           </div>
@@ -172,6 +198,11 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
             <h2 id="user-admin-modal-title">{t("Gerenciar acessos")}</h2>
             <p>{editingUser.name} · {editingUser.email}</p>
 
+            <div className="user-admin-home-scope">
+              <strong>{t("Regional recebida do Feishu")}</strong>
+              <span>{editingUser.feishuRegionCode ? `${regionName(editingUser.feishuRegionCode)} · ${t(editingUser.feishuRegionStatus)}` : t(editingUser.feishuRegionStatus === "AMBIGUOUS" ? "Regional ambígua" : editingUser.feishuRegionStatus === "SYNC_FAILED" ? "Falha na sincronização Feishu" : "Regional não identificada")}</span>
+            </div>
+
             <label className="user-admin-form-label" htmlFor="user-platform-role">{t("Perfil da plataforma")}</label>
             <select id="user-platform-role" value={draftRole} onChange={(event) => setDraftRole(event.currentTarget.value as "USER" | "ADMIN")}>
               <option value="USER">{t("Usuário — acesso operacional")}</option>
@@ -179,13 +210,13 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
             </select>
 
             <div className="user-admin-home-scope">
-              <strong>{t("Escopo original — somente leitura")}</strong>
-              <span>{editingUser.organizationalScope === "matrix" ? t("Matriz — acesso nacional") : <>{t(editingUser.organizationalScope === "base" ? "Base" : "Regional")}: {editingUser.homeBase ? `${regionName(editingUser.homeRegion)} · ${editingUser.homeBase}` : regionName(editingUser.homeRegion)}</>}</span>
+              <strong>{t("Escopo efetivo de dados")}</strong>
+              <span>{editingUser.organizationalScope === "matrix" ? t("Matriz — acesso nacional") : editingUser.effectiveRegions.length ? editingUser.effectiveRegions.map(regionName).join(", ") : editingUser.homeBase ? `${t("Base")}: ${editingUser.homeBase}` : t("Regional não identificada")}</span>
             </div>
 
             <fieldset className="demo-users-access-list user-admin-region-list">
-              <legend>{t("Regionais adicionais")}</legend>
-              <p className="user-admin-hint">{t("A região de origem permanece como acesso inicial; permissões extras não ampliam o perfil ADMIN.")}</p>
+              <legend>{t("Liberação regional manual")}</legend>
+              <p className="user-admin-hint">{t("A regional efetiva é controlada pelo Feishu e por liberações administrativas auditadas. Esta alteração não concede perfil ADMIN nem acesso nacional.")}</p>
               {editingUser.organizationalScope === "matrix" ? <p className="user-admin-hint">{t("Usuários de Matriz já possuem escopo nacional.")}</p> : regions.map((region) => {
                 const locked = region.code === editingUser.homeRegion || editingUser.organizationalScope === "matrix";
                 const checked = editingUser.organizationalScope === "matrix" || draftRegions.includes(region.code);
@@ -198,6 +229,25 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                 );
               })}
             </fieldset>
+
+            <section className="user-admin-audit" aria-labelledby="user-admin-audit-heading">
+              <h3 id="user-admin-audit-heading">{t("Histórico de alterações de acesso")}</h3>
+              {auditLoading ? <p role="status">{t("Carregando histórico…")}</p> : accessAudit.length ? (
+                <ol>
+                  {accessAudit.map((entry) => (
+                    <li key={entry.id}>
+                      <strong>{t(entry.action)}</strong>
+                      <span>{entry.actor} · {new Date(entry.createdAt).toLocaleString()}</span>
+                      {entry.regionsAdded.length || entry.regionsRemoved.length ? <small>
+                        {entry.regionsAdded.length ? `${t("Liberadas")}: ${entry.regionsAdded.map(regionName).join(", ")}` : ""}
+                        {entry.regionsAdded.length && entry.regionsRemoved.length ? " · " : ""}
+                        {entry.regionsRemoved.length ? `${t("Revogadas")}: ${entry.regionsRemoved.map(regionName).join(", ")}` : ""}
+                      </small> : null}
+                    </li>
+                  ))}
+                </ol>
+              ) : <p>{t("Nenhuma alteração de acesso registrada.")}</p>}
+            </section>
 
             {error ? <p className="user-admin-error" role="alert"><AlertCircle size={16} /> {t(error)}</p> : null}
             <div className="demo-users-modal-actions">

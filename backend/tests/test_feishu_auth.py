@@ -231,11 +231,14 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
         "authenticated": True,
         "username": "Demo Viewer",
         "avatar_url": None,
-        "role": "regional",
+        "role": "unknown",
         "region": None,
         "base": None,
         "platform_role": "USER",
-        "organizational_scope": "base",
+        "administrative_scope": "base",
+        "can_manage_users": False,
+        "organizational_scope": "unknown",
+        "data_scope_source": "none",
         "home_region": None,
         "home_base": None,
         "additional_regions": [],
@@ -704,8 +707,11 @@ def test_auth_me_survives_failure_of_optional_profile_store(
     body = response.json()
     assert body["authenticated"] is True
     assert body["platform_role"] == "USER"
-    assert body["organizational_scope"] == "regional"
-    assert body["home_region"] == "SPS"
+    # If the optional profile store is unreadable, keep login but fail closed
+    # for operational data rather than falling back to platform home_region.
+    assert body["organizational_scope"] == "unknown"
+    assert body["home_region"] is None
+    assert body["administrative_scope"] == "regional"
     assert body["organizational_region_code"] is None
     assert body["region_resolution_status"] == "UNKNOWN"
     assert "private database diagnostic" not in response.text

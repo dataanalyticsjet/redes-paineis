@@ -22,30 +22,29 @@ class ScopedQuery:
     select_sql: str
 
 
-def _require_matrix_admin_identity(identity: dict[str, Any]) -> None:
-    if str(identity.get("platform_role") or "").strip().upper() != "ADMIN":
-        raise DataFoundationError("admin_required", 403)
-    if (
-        str(identity.get("organizational_scope") or "").strip().lower() != "matrix"
-        or str(identity.get("role") or "").strip().lower() != "matrix"
-    ):
-        raise DataFoundationError("matrix_scope_required", 403)
-
-
 def _scope_clause(
     identity: dict[str, Any],
     params: dict[str, object],
     *,
     mapping_alias: str = "effective_entry",
+    dialect: str = "mysql",
 ) -> str:
     scope = str(identity.get("organizational_scope") or "").strip().lower()
     role = str(identity.get("role") or "").strip().lower()
     if scope == "matrix" and role == "matrix":
         return ""
     if scope == "regional":
+        if role != "regional":
+            raise DataFoundationError("user_scope_unavailable", 403)
+        if "effective_regions" in identity:
+            authorized_regions = identity.get("effective_regions") or []
+        else:
+            # Compatibility for internal callers that have not yet resolved a
+            # current PlatformUser identity. HTTP routes always pass this field.
+            authorized_regions = [identity.get("home_region"), *(identity.get("additional_regions") or [])]
         regions = {
             str(region).strip().upper()
-            for region in [identity.get("home_region"), *(identity.get("additional_regions") or [])]
+            for region in authorized_regions
             if str(region or "").strip()
         }
         if not regions:
@@ -55,8 +54,15 @@ def _scope_clause(
             key = f"scope_region_{index}"
             params[key] = region
             placeholders.append(f":{key}")
-        return f"BINARY {mapping_alias}.regional_name IN ({', '.join(placeholders)})"
+        regional_expression = (
+            f"{mapping_alias}.regional_name COLLATE BINARY"
+            if dialect == "sqlite"
+            else f"BINARY {mapping_alias}.regional_name"
+        )
+        return f"{regional_expression} IN ({', '.join(placeholders)})"
     if scope == "base":
+        if role != "regional":
+            raise DataFoundationError("user_scope_unavailable", 403)
         base_code = str(identity.get("home_base") or identity.get("base") or "").strip()
         if not base_code:
             raise DataFoundationError("user_scope_unavailable", 403)
@@ -73,19 +79,44 @@ def _scope_clause(
                 key = f"scope_extra_region_{index}"
                 params[key] = extra
                 placeholders.append(f":{key}")
-            extra_region_clause = f" OR BINARY {mapping_alias}.regional_name IN ({', '.join(placeholders)})"
+            extra_region_expression = (
+                f"{mapping_alias}.regional_name COLLATE BINARY"
+                if dialect == "sqlite"
+                else f"BINARY {mapping_alias}.regional_name"
+            )
+            extra_region_clause = f" OR {extra_region_expression} IN ({', '.join(placeholders)})"
         home_region = str(identity.get("home_region") or identity.get("region") or "").strip().upper()
         if home_region:
             params["scope_base_name"] = base_code
             params["scope_home_region"] = home_region
+            base_name_expression = (
+                f"{mapping_alias}.base_name COLLATE BINARY"
+                if dialect == "sqlite"
+                else f"BINARY {mapping_alias}.base_name"
+            )
+            home_region_expression = (
+                f"{mapping_alias}.regional_name COLLATE BINARY"
+                if dialect == "sqlite"
+                else f"BINARY {mapping_alias}.regional_name"
+            )
+            exact_name_expression = (
+                "exact_base.base_name COLLATE BINARY"
+                if dialect == "sqlite"
+                else "BINARY exact_base.base_name"
+            )
+            exact_region_expression = (
+                "exact_base.regional_name COLLATE BINARY"
+                if dialect == "sqlite"
+                else "BINARY exact_base.regional_name"
+            )
             return (
                 f"({mapping_alias}.base_code = :scope_base_code"
-                f" OR (BINARY {mapping_alias}.base_name = BINARY :scope_base_name"
-                f" AND BINARY {mapping_alias}.regional_name = BINARY :scope_home_region"
+                f" OR ({base_name_expression} = {(':scope_base_name COLLATE BINARY' if dialect == 'sqlite' else 'BINARY :scope_base_name')}"
+                f" AND {home_region_expression} = {(':scope_home_region COLLATE BINARY' if dialect == 'sqlite' else 'BINARY :scope_home_region')}"
                 f" AND (SELECT COUNT(*) FROM base_mapping_entries AS exact_base"
                 f" WHERE exact_base.map_version_id = {mapping_alias}.map_version_id"
-                f" AND BINARY exact_base.base_name = BINARY {mapping_alias}.base_name"
-                f" AND BINARY exact_base.regional_name = BINARY :scope_home_region) = 1){extra_region_clause})"
+                f" AND {exact_name_expression} = {base_name_expression}"
+                f" AND {exact_region_expression} = {(':scope_home_region COLLATE BINARY' if dialect == 'sqlite' else 'BINARY :scope_home_region')}) = 1){extra_region_clause})"
             )
         return f"({mapping_alias}.base_code = :scope_base_code{extra_region_clause})"
     raise DataFoundationError("user_scope_unavailable", 403)
@@ -103,7 +134,9 @@ def _query_plan(
     contract_version: int | None = None,
     sql_dialect: str = "mysql",
 ) -> ScopedQuery:
-    _require_matrix_admin_identity(identity)
+    # Validate and build the server-resolved scope before planning any fact read.
+    scope_parameters: dict[str, object] = {}
+    scope_predicate = _scope_clause(identity, scope_parameters, dialect=sql_dialect)
     selected_version = contract_version
     if selected_version is None:
         legacy_contract = CONTRACTS.get(source_id)
@@ -120,7 +153,7 @@ def _query_plan(
     if source_id == "no_movement" and (date_from or date_to):
         raise DataFoundationError("date_filter_not_supported", 422)
 
-    params: dict[str, object] = {"source_id": source_id}
+    params: dict[str, object] = {"source_id": source_id, **scope_parameters}
     if date_from:
         params["date_from"] = date_from
     if date_to:
@@ -210,7 +243,7 @@ def _query_plan(
     ]
     if publication_id is not None:
         where_parts.append("fact.publication_id = :selected_publication_id")
-    where_parts.append(_scope_clause(identity, params))
+    where_parts.append(scope_predicate)
     if date_from:
         where_parts.append("fact.data_date >= :date_from")
         params["date_from"] = date_from
@@ -275,9 +308,9 @@ def _assert_map_available(engine: Engine) -> None:
 
 def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> dict[str, object]:
     """Return current map metadata and only the base count visible to this identity."""
-    _require_matrix_admin_identity(identity)
     parameters: dict[str, object] = {}
-    scope = _scope_clause(identity, parameters, mapping_alias="current_entry")
+    # This validates scope before any database query and applies it to counts.
+    scope = _scope_clause(identity, parameters, mapping_alias="current_entry", dialect=engine.dialect.name)
     with engine.connect() as connection:
         current = connection.execute(text("""
             SELECT version.map_version_id, version.version_no, version.version_state,
@@ -501,7 +534,6 @@ def get_publications(
     offset: int,
     contract_version: int | None = None,
 ) -> dict[str, object]:
-    _require_matrix_admin_identity(identity)
     if source_id not in FACT_TABLES:
         raise DataFoundationError("data_source_not_found", 404)
     contracts = [
@@ -511,12 +543,14 @@ def get_publications(
     ]
     if not contracts:
         raise DataFoundationError("data_source_contract_version_not_supported", 404)
-    # This endpoint is restricted to ADMIN/matrix above, whose visibility scope
-    # is national. Mapping joins cannot narrow its result; they only add
-    # candidate-resolution relations to a query that needs publication counts.
-    # Keep the published-map prerequisite and count the facts directly.
-    _assert_map_available(engine)
+    # Publication history is data too: row counts and period metadata must be
+    # computed from facts visible to this identity. Do not expose national
+    # counts to regional/base viewers or fall back to global counts when scope
+    # is unknown. Matrix viewers retain unmapped rows because their scope
+    # predicate is intentionally empty.
     parameters: dict[str, object] = {"source_id": source_id}
+    scope = _scope_clause(identity, parameters, dialect=engine.dialect.name)
+    _assert_map_available(engine)
     publication_filter = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
     if contract_version is not None:
         parameters["contract_version"] = contract_version
@@ -553,29 +587,33 @@ def get_publications(
         fact_aggregates = []
         for version, _contract in published_contracts:
             table = fact_table_for_contract(source_id, version)
+            column_keys = {column.key for column in _contract.columns}
+            mapping_query = build_mapping_query(
+                source_id=source_id,
+                has_source_base_code="source_base_code" in column_keys,
+                has_source_base_name="source_base_name" in column_keys,
+                allow_name_mapping=not code_only_mapping(source_id, version),
+                dialect=engine.dialect.name,
+            )
             if source_id in DAILY_SOURCES:
-                period_columns = "MIN(data_date) AS period_start, MAX(data_date) AS period_end"
+                period_columns = "MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end"
             else:
                 period_columns = "NULL AS period_start, NULL AS period_end"
             fact_aggregates.append(f"""
-                SELECT source_id, publication_id, COUNT(*) AS visible_row_count,
+                SELECT fact.source_id, fact.publication_id, COUNT(*) AS visible_row_count,
                        {period_columns}, {version} AS contract_version
-                FROM `{table}`
-                WHERE source_id = :source_id
-                GROUP BY source_id, publication_id
+                FROM `{table}` AS fact
+                JOIN base_mapping_current AS current_map
+                  ON current_map.current_key = 'OFFICIAL'
+                JOIN base_mapping_versions AS current_version
+                  ON current_version.map_version_id = current_map.map_version_id
+                 AND current_version.version_state = 'PUBLISHED'
+                {mapping_query.joins}
+                WHERE fact.source_id = :source_id
+                  AND {scope or '1 = 1'}
+                GROUP BY fact.source_id, fact.publication_id
             """)
         fact_counts_sql = " UNION ALL ".join(fact_aggregates)
-        total = int(connection.execute(text(f"""
-            SELECT COUNT(*)
-            FROM source_publications AS publication
-            WHERE {publication_filter}
-              AND EXISTS (
-                  SELECT 1 FROM ({fact_counts_sql}) AS fact
-                  WHERE fact.source_id = publication.source_id
-                    AND fact.publication_id = publication.publication_id
-                    AND fact.contract_version = publication.contract_version
-              )
-        """), parameters).scalar_one())
         result = connection.execute(text(f"""
             SELECT publication.publication_id, publication.version_no, publication.contract_version, publication.published_at,
                    publication.snapshot_as_of, fact.visible_row_count,
@@ -587,9 +625,8 @@ def get_publications(
              AND fact.contract_version = publication.contract_version
             WHERE {publication_filter}
             ORDER BY publication.version_no DESC
-            LIMIT :page_limit OFFSET :page_offset
-        """), {**parameters, "page_limit": limit, "page_offset": offset}).mappings()
-        publications = [
+        """), parameters).mappings()
+        visible_publications = [
             {
                 "publicationId": str(uuid.UUID(bytes=bytes(row["publication_id"]))),
                 "version": int(row["version_no"]),
@@ -602,4 +639,6 @@ def get_publications(
             }
             for row in result
         ]
+    total = len(visible_publications)
+    publications = visible_publications[offset:offset + limit]
     return {"sourceId": source_id, "publications": publications, "total": total, "limit": limit, "offset": offset}

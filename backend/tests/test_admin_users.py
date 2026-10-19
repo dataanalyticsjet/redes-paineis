@@ -13,7 +13,7 @@ from app.core.config import get_settings
 from app.main import app
 from app.models import PlatformUser, UserAccessAudit
 from app.services.data_foundation.repository import DataFoundationError
-from app.services.data_foundation.queries import _require_matrix_admin_identity
+from app.services.data_foundation.queries import _scope_clause
 from app.services import feishu_auth
 from app.services.user_access import UserAccessError, identity_for_user, provision_feishu_user
 
@@ -27,10 +27,10 @@ def admin_client(monkeypatch: pytest.MonkeyPatch, create_user_session) -> TestCl
     monkeypatch.setenv("UPLOAD_PASSWORD", "test-upload-password")
     get_settings.cache_clear()
     token, _user = create_user_session(
-        name="Regional Admin",
+        name="Matrix Admin",
         platform_role="ADMIN",
-        organizational_scope="regional",
-        home_region="SPE",
+        organizational_scope="matrix",
+        home_region=None,
         identity_suffix="admin-api",
     )
     client = TestClient(app, base_url="http://127.0.0.1:8000")
@@ -40,14 +40,16 @@ def admin_client(monkeypatch: pytest.MonkeyPatch, create_user_session) -> TestCl
 
 
 def test_admin_lists_users_and_controlled_region_catalog(admin_client: TestClient) -> None:
-    users = admin_client.get("/api/admin/users?q=Regional%20Admin")
+    users = admin_client.get("/api/admin/users?q=Matrix%20Admin")
     regions = admin_client.get("/api/admin/regions")
 
     assert users.status_code == 200
     assert users.json()["total"] == 1
     assert users.json()["users"][0]["platformRole"] == "ADMIN"
+    assert users.json()["users"][0]["feishuRegionStatus"] == "RESOLVED"
+    assert users.json()["users"][0]["organizationalScope"] == "matrix"
     assert regions.status_code == 200
-    assert {item["code"] for item in regions.json()["regions"]} == {"SPE", "SPS", "MG", "RJ", "SR"}
+    assert {item["code"] for item in regions.json()["regions"]} == {"CE", "SPE", "SPS", "MG", "RJ", "PR", "SR", "SPN", "PA", "BA", "GP"}
 
 
 def test_user_administration_requires_an_authenticated_feishu_session() -> None:
@@ -166,10 +168,10 @@ def test_automatically_provisioned_user_has_no_restricted_dashboard_scope(
         user = provision_feishu_user(db, identity)
         session_identity = identity_for_user(db, user)
         assert session_identity["platform_role"] == "USER"
-        assert session_identity["organizational_scope"] == "base"
+        assert session_identity["organizational_scope"] == "unknown"
         assert session_identity["effective_regions"] == []
-        with pytest.raises(DataFoundationError, match="admin_required"):
-            _require_matrix_admin_identity(session_identity)
+        with pytest.raises(DataFoundationError, match="user_scope_unavailable"):
+            _scope_clause(session_identity, {})
 
 
 def test_user_cannot_call_admin_routes_or_modify_users(
@@ -191,6 +193,59 @@ def test_user_cannot_call_admin_routes_or_modify_users(
         "/api/admin/users/1",
         json={"platformRole": "ADMIN"},
     ).status_code == 403
+    assert admin_client.get("/api/admin/users/1/access-audit").status_code == 403
+
+
+def test_admin_can_manually_release_unknown_user_region_and_revoke_it(
+    admin_client: TestClient,
+    create_user_session,
+    user_test_session_factory: sessionmaker[Session],
+) -> None:
+    _token, target = create_user_session(
+        name="Unknown Region Viewer",
+        platform_role="USER",
+        organizational_scope="base",
+        home_region=None,
+        home_base=None,
+        identity_suffix="manual-region-release",
+    )
+    before = admin_client.get(f"/api/admin/users?q=Unknown%20Region%20Viewer").json()["users"][0]
+    assert before["organizationalScope"] == "unknown"
+    assert before["effectiveRegions"] == []
+
+    granted = admin_client.patch(
+        f"/api/admin/users/{target.id}",
+        json={"additionalRegions": ["MG"]},
+    )
+    assert granted.status_code == 200
+    granted_user = granted.json()["user"]
+    assert granted_user["platformRole"] == "USER"
+    assert granted_user["organizationalScope"] == "regional"
+    assert granted_user["effectiveRegions"] == ["MG"]
+
+    audit_response = admin_client.get(f"/api/admin/users/{target.id}/access-audit")
+    assert audit_response.status_code == 200
+    audit = audit_response.json()["entries"][0]
+    assert audit["actor"] == "Matrix Admin"
+    assert audit["regionsAdded"] == ["MG"]
+    assert audit["regionsRemoved"] == []
+
+    revoked = admin_client.patch(
+        f"/api/admin/users/{target.id}",
+        json={"additionalRegions": []},
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["user"]["organizationalScope"] == "unknown"
+    assert revoked.json()["user"]["effectiveRegions"] == []
+    with user_test_session_factory() as db:
+        audits = list(db.scalars(
+            select(UserAccessAudit)
+            .where(UserAccessAudit.target_user_id == target.id)
+            .order_by(UserAccessAudit.id)
+        ))
+        assert len(audits) == 2
+        assert audits[0].regions_added == ["MG"]
+        assert audits[1].regions_removed == ["MG"]
 
 
 def test_admin_updates_role_and_extra_regions_with_audit(
@@ -288,8 +343,8 @@ def test_last_active_admin_cannot_lock_the_platform(
         f"/api/admin/users/{admin_id}",
         json={"isActive": False},
     )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "last_active_admin_required"
+    assert response.status_code == 403
+    assert response.json()["detail"] == "admin_self_change_forbidden"
 
 
 def test_disabled_user_loses_auth_me_and_data_source_access(
@@ -344,15 +399,21 @@ def test_regional_admin_does_not_gain_national_scope_but_extra_region_is_applied
     assert upload.status_code == 200
 
     # ADMIN is a platform role; it does not widen this user's Feishu scope.
-    admin_read = admin_client.get("/api/workbook?kind=movement").json()["workbook"]["parsed"]["rows"]
+    regional_token, _ = create_user_session(
+        platform_role="ADMIN", home_region="SPE", identity_suffix="scoped-admin-reader",
+    )
+    regional_client = TestClient(app, base_url="http://127.0.0.1:8000")
+    regional_client.cookies.set(feishu_auth.SESSION_COOKIE, regional_token)
+    admin_read = regional_client.get("/api/workbook?kind=movement").json()["workbook"]["parsed"]["rows"]
     assert [row["Regional Origem"] for row in admin_read] == ["SPE"]
 
     viewer_token, _viewer = create_user_session(
         name="SPE plus MG Viewer",
         platform_role="USER",
         organizational_scope="regional",
-        home_region="SPE",
-        additional_regions=["MG"],
+        home_region=None,
+        additional_regions=["SPE", "MG"],
+        feishu_region_code=None,
         identity_suffix="spe-mg-reader",
     )
     viewer = TestClient(app, base_url="http://127.0.0.1:8000")

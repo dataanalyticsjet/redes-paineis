@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { apiFetch } from "../../lib/api-url";
 import { loadIndependently } from "../../lib/data-foundation/admin-metadata";
 import type { DashboardTranslator } from "../../lib/i18n";
+import { invalidateDashboardDataCache } from "../../lib/data-foundation/dashboard-data-cache.ts";
 import { AlertTriangle, Check, Clock3, Database, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
 
 type Source = {
@@ -88,7 +89,7 @@ const NAME_MAPPED_SOURCES = new Set(["collection_monitoring", "collection_rate",
 const INITIAL_MAPPING_SOURCE = "base_mapping_official";
 const API_ERROR_LABELS: Record<string, string> = {
   admin_required: "Somente administradores podem executar esta ação.",
-  matrix_scope_required: "A ação exige administrador com escopo organizacional matrix.",
+  matrix_scope_required: "Esta ação exige perfil ADMIN autorizado.",
   data_store_unavailable: "O banco de dados da Data Foundation está indisponível.",
   import_storage_unavailable: "O armazenamento privado de importação não está configurado.",
   official_mapping_unavailable: "O de-para vigente ainda não está publicado.",
@@ -430,6 +431,7 @@ export function DataFoundationAdmin({
         ? `/api/v2/base-mapping/initial-migration/${encodeURIComponent(preview.jobId)}/publish`
         : `/api/v2/imports/${encodeURIComponent(preview.jobId)}/publish`;
       const result = await requestJson<{ version: number; mappingRowCount?: number; reused?: boolean }>(path, { method: "POST", headers });
+      invalidateDashboardDataCache(mappingPublish ? undefined : preview.sourceId);
       const successNotice = mappingPublish
         ? t("De-para publicado como versão {version} com {count} bases.", {
             version: result.version,
@@ -497,7 +499,7 @@ export function DataFoundationAdmin({
           </div>
         </div>
       ) : null}
-      {!canImport && !error?.includes("disabled") ? <div className="data-foundation-alert is-disabled"><AlertTriangle size={18} /><p>{t("Seu perfil pode consultar apenas dados do próprio escopo. A prévia e a publicação nacional exigem administrador com autorização organizacional matrix.")}</p></div> : null}
+      {!canImport && !error?.includes("disabled") ? <div className="data-foundation-alert is-disabled"><AlertTriangle size={18} /><p>{t("Seu perfil pode consultar apenas dados do próprio escopo. A administração e publicação exigem perfil ADMIN; isso não amplia o escopo dos dashboards.")}</p></div> : null}
       {notice ? <div className="data-foundation-notice" role="status"><Check size={17} /> {t(notice)}</div> : null}
 
       {loading ? <p className="data-foundation-loading">{t("Carregando fontes e histórico…")}</p> : null}

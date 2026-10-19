@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
 from app.core.config import get_settings
-from app.api.dependencies import AuthenticatedViewer, get_current_viewer
+from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_matrix_admin
 from app.db.session import get_db_session
 from app.schemas.data_sources import ImportSourceRequest, PreviewSourceRequest
 from app.services.data_sources import (
@@ -47,9 +47,7 @@ def _data_source_viewer(
 def _data_source_admin(
     viewer: AuthenticatedViewer = Depends(_data_source_viewer),
 ) -> AuthenticatedViewer:
-    if viewer.user.platform_role != "ADMIN":
-        raise HTTPException(status_code=403, detail="admin_required")
-    return viewer
+    return require_matrix_admin(viewer)
 
 
 def _published_owner_key(dashboard_id: str) -> str:
@@ -167,6 +165,7 @@ async def import_dashboard_data_source(
     session_key = _session_preview_key(request)
     try:
         source = import_dashboard_preview(dashboard_id, owner_key, payload.preview_id, session_key)
+        logger.info("Administrative source change (actor_user_id=%s action=publish dashboard_id=%s)", admin.user.id, dashboard_id)
         return _scope_source(source, admin) or {"source": None}
     except DataSourceError as error:
         raise _translate_error(error) from None
@@ -192,6 +191,7 @@ async def delete_dashboard_source(
     owner_key = _published_owner_key(dashboard_id)
     try:
         remove_dashboard_source(dashboard_id, owner_key)
+        logger.info("Administrative source change (actor_user_id=%s action=remove dashboard_id=%s)", _admin.user.id, dashboard_id)
     except DataSourceError as error:
         raise _translate_error(error) from None
     return Response(status_code=204, headers={"Cache-Control": "no-store"})

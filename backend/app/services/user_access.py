@@ -6,7 +6,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import PlatformUser, Region, UserAccessAudit, UserRegionAccess
+from app.core.config import get_settings
+from app.models import PlatformUser, PlatformUserFeishuProfile, Region, UserAccessAudit, UserRegionAccess
+from app.services.feishu_regions import DEPARTMENT_REGION_IDS, MATRIX_REGION_CODE
 
 
 class UserAccessError(Exception):
@@ -80,7 +82,8 @@ def additional_regions_for_user(db: Session, user_id: int) -> list[str]:
         return list(
             db.scalars(
                 select(UserRegionAccess.region_code)
-                .where(UserRegionAccess.user_id == user_id)
+                .join(Region, Region.region_code == UserRegionAccess.region_code)
+                .where(UserRegionAccess.user_id == user_id, Region.is_active.is_(True))
                 .order_by(UserRegionAccess.region_code)
             )
         )
@@ -88,32 +91,162 @@ def additional_regions_for_user(db: Session, user_id: int) -> list[str]:
         raise UserAccessError("user_store_unavailable", 503) from None
 
 
-def identity_for_user(db: Session, user: PlatformUser) -> dict[str, Any]:
+def _recent_feishu_region(profile: PlatformUserFeishuProfile | None) -> tuple[str | None, str]:
+    if profile is None:
+        return None, "none"
+    status = str(profile.region_resolution_status or "").strip().upper()
+    # A previously resolved department is never an authorization fallback
+    # while Contacts synchronization is failing. Explicit audited grants are
+    # resolved separately by identity_for_user and remain region-limited.
+    if status != "RESOLVED":
+        return None, "none"
+    if profile.last_successful_sync_at is None:
+        return None, "none"
+
+    code = str(profile.organizational_region_code or "").strip().upper()
+    approved_codes = {MATRIX_REGION_CODE, *(value.upper() for value in DEPARTMENT_REGION_IDS.values())}
+    if code not in approved_codes:
+        return None, "none"
+    return code, "feishu"
+
+
+def identity_for_user(
+    db: Session,
+    user: PlatformUser,
+    *,
+    force_feishu_sync_failed: bool = False,
+) -> dict[str, Any]:
     extras = additional_regions_for_user(db, user.id)
-    role = "matrix" if user.organizational_scope == "matrix" else "regional"
+    administrative_scope = str(user.organizational_scope or "").strip().lower()
+    profile = None
+    try:
+        profile = db.get(PlatformUserFeishuProfile, user.id)
+    except SQLAlchemyError:
+        # Feishu profile storage is complementary. A database failure must not
+        # broaden access; existing explicit assignments remain authoritative.
+        db.rollback()
+
+    organizational_region_code = profile.organizational_region_code if profile else None
+    region_resolution_status = "SYNC_FAILED" if force_feishu_sync_failed else profile.region_resolution_status if profile else "UNKNOWN"
+    feishu_region_code, scope_source = (None, "none") if force_feishu_sync_failed else _recent_feishu_region(profile)
+    if feishu_region_code and feishu_region_code != MATRIX_REGION_CODE:
+        try:
+            active_region = db.scalar(
+                select(Region.region_code).where(
+                    Region.region_code == feishu_region_code,
+                    Region.is_active.is_(True),
+                )
+            )
+        except SQLAlchemyError:
+            db.rollback()
+            active_region = None
+        if not active_region:
+            feishu_region_code = None
+            scope_source = "none"
+
+    # Data visibility follows the current trusted Feishu resolution. If that
+    # resolution is unavailable (including SYNC_FAILED), explicit audited
+    # region grants are the only fallback; platform role and administrative
+    # scope never turn into national data scope by themselves.
+    if feishu_region_code == MATRIX_REGION_CODE:
+        scope = "matrix"
+        home_region = None
+        home_base = None
+    elif feishu_region_code:
+        scope = "regional"
+        home_region = feishu_region_code
+        home_base = None
+    elif extras:
+        scope = "regional"
+        home_region = None
+        home_base = None
+        scope_source = "admin_grant"
+    else:
+        scope = "unknown"
+        home_region = None
+        home_base = None
+
+    role = "matrix" if scope == "matrix" else "regional" if scope == "regional" else "unknown"
     effective_regions: list[str] | None
-    if user.organizational_scope == "matrix":
+    if scope == "matrix":
         effective_regions = None  # null means unrestricted/national.
     else:
-        effective_regions = sorted({
-            region
-            for region in [user.home_region, *extras]
-            if region
-        })
-    return {
+        # A resolved Feishu regional assignment is the complete data scope.
+        # Manual grants are a fail-safe only when no trusted Feishu region is
+        # available; they must not expand a regional Feishu profile.
+        authorized_regions = [home_region] if scope_source == "feishu" else extras
+        effective_regions = sorted({region for region in authorized_regions if region})
+    identity = {
         "user_id": user.id,
         "username": user.display_name,
         "role": role,
-        "region": user.home_region,
-        "base": user.home_base,
+        "region": home_region,
+        "base": home_base,
         "platform_role": user.platform_role,
-        "organizational_scope": user.organizational_scope,
-        "home_region": user.home_region,
-        "home_base": user.home_base,
+        "administrative_scope": administrative_scope,
+        "organizational_scope": scope,
+        "home_region": home_region,
+        "home_base": home_base,
         "additional_regions": extras,
         "effective_regions": effective_regions,
         "is_active": bool(user.is_active),
+        "organizational_region_code": organizational_region_code,
+        "region_resolution_status": region_resolution_status,
+        "data_scope_source": scope_source,
     }
+    delegated_regions = _delegated_administration_regions(identity)
+    identity["can_manage_users"] = bool(
+        user.platform_role == "ADMIN"
+        and (administrative_scope == "matrix" or delegated_regions)
+    )
+    return identity
+
+
+def _delegated_administration_regions(identity: dict[str, Any]) -> list[str] | None:
+    if identity["platform_role"] == "ADMIN" and identity["administrative_scope"] == "matrix":
+        return None
+    if not get_settings().regional_user_administration_enabled:
+        return []
+    regions = set(identity["additional_regions"] or [])
+    if (
+        identity["organizational_scope"] == "regional"
+        and identity["data_scope_source"] == "feishu"
+        and identity["home_region"]
+    ):
+        regions.add(identity["home_region"])
+    return sorted(regions)
+
+
+def user_administration_identity(db: Session, actor: PlatformUser) -> dict[str, Any]:
+    """Resolve administrative authority from the current user store, never a request payload."""
+    current = db.get(PlatformUser, actor.id, populate_existing=True)
+    if current is None or not current.is_active or current.platform_role != "ADMIN":
+        raise UserAccessError("admin_required", 403)
+    identity = identity_for_user(db, current)
+    delegated_regions = _delegated_administration_regions(identity)
+    if delegated_regions is None:
+        identity["administrative_regions"] = None
+        return identity
+    identity["administrative_regions"] = delegated_regions
+    if not identity["administrative_regions"]:
+        if not get_settings().regional_user_administration_enabled:
+            raise UserAccessError("regional_user_administration_disabled", 403)
+        raise UserAccessError("user_admin_scope_unavailable", 403)
+    return identity
+
+
+def can_administer_user(
+    administrator: dict[str, Any], target: PlatformUser, target_identity: dict[str, Any],
+) -> bool:
+    if administrator["administrative_scope"] == "matrix" and administrator["platform_role"] == "ADMIN":
+        return True
+    regions = set(target_identity["effective_regions"] or [])
+    return bool(
+        target.platform_role == "USER"
+        and target_identity["organizational_scope"] == "regional"
+        and regions
+        and regions.issubset(set(administrator.get("administrative_regions") or []))
+    )
 
 
 def update_user_access(
@@ -126,17 +259,42 @@ def update_user_access(
     is_active: bool | None,
 ) -> tuple[PlatformUser, list[str]]:
     try:
-        target = db.scalar(
+        # Serialize changes to administrators and the two affected users. Re-read
+        # persisted roles under the lock so an old session cannot authorize a grant.
+        locked_users = list(db.scalars(
             select(PlatformUser)
-            .where(PlatformUser.id == target_id)
+            .where(
+                PlatformUser.id.in_([actor.id, target_id])
+                | ((PlatformUser.platform_role == "ADMIN") & PlatformUser.is_active.is_(True))
+            )
+            .order_by(PlatformUser.id)
+            .execution_options(populate_existing=True)
             .with_for_update()
-        )
+        ))
+        users_by_id = {user.id: user for user in locked_users}
+        current_actor = users_by_id.get(actor.id)
+        if current_actor is None:
+            raise UserAccessError("admin_required", 403)
+        authority = user_administration_identity(db, current_actor)
+        target = users_by_id.get(target_id)
         if target is None:
             raise UserAccessError("user_not_found", 404)
+        if target.id == current_actor.id:
+            raise UserAccessError("admin_self_change_forbidden", 403)
+        if not can_administer_user(authority, target, identity_for_user(db, target)):
+            raise UserAccessError("user_admin_target_forbidden", 403)
+        if authority["administrative_scope"] != "matrix" and (
+            platform_role is not None or additional_regions is not None
+        ):
+            raise UserAccessError("regional_access_change_forbidden", 403)
 
         before_role = target.platform_role
         before_active = bool(target.is_active)
-        before_regions = set(additional_regions_for_user(db, target.id))
+        # Include inactive grants in revocation/audit; filtering them here could
+        # resurrect a revoked grant when its region is reactivated later.
+        before_regions = set(db.scalars(
+            select(UserRegionAccess.region_code).where(UserRegionAccess.user_id == target.id)
+        ))
         requested_regions = before_regions
 
         if platform_role is not None and platform_role not in {"USER", "ADMIN"}:

@@ -672,7 +672,7 @@ def test_local_publication_flow_keeps_history_and_replaces_daily_and_snapshot_he
             },
         )
         assert matrix_map["visibleBaseCount"] == 1628
-        with pytest.raises(DataFoundationError, match="matrix_scope_required"):
+        with pytest.raises(DataFoundationError, match="user_scope_unavailable"):
             get_current_mapping_status(
                 engine,
                 identity={

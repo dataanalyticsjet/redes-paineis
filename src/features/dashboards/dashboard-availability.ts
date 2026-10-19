@@ -30,8 +30,10 @@ export async function loadDashboardSourceAvailability(
   const sourceId = DASHBOARD_V2_SOURCE_BY_PANEL[panelId];
   if (!sourceId) return null;
 
+  const contractVersion = sourceId === "collection_rate" || sourceId === "no_movement" || sourceId === "pdd_collection_failure" ? 2 : 1;
+
   const response = await fetcher(
-    `/api/v2/data-sources/${encodeURIComponent(sourceId)}/publications?limit=1&offset=0`,
+    `/api/v2/data-sources/${encodeURIComponent(sourceId)}/publications?contract_version=${contractVersion}&limit=1&offset=0`,
     { method: "GET", cache: "no-store", signal },
   );
   if (!response.ok) {

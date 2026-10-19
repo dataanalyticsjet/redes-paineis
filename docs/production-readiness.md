@@ -42,6 +42,67 @@ Antes de produção, aprovar um armazenamento compartilhado e durável. A propos
 - Controle de usuários, grupos Feishu simulados e chat não concedem permissões nem enviam dados.
 - D1/R2/Worker não fazem parte do caminho ativo da nova arquitetura. Não foram acessados ou migrados.
 
+## Revisão de autorização administrativa — outubro de 2026
+
+As permissões são recarregadas de `platform_users` e das atribuições vigentes em
+cada requisição autenticada. Informações de papel/regional enviadas pelo navegador
+ou mantidas em uma sessão antiga não concedem acesso. ADMIN matriz requer papel
+ADMIN e escopo efetivo `matrix`; o perfil organizacional Feishu nunca concede matriz.
+
+Administração de usuários é nacional apenas para ADMIN matriz. Autoalterações de
+papel, atribuições ou status são recusadas inclusive para matriz. Um segundo ADMIN
+matriz deve realizar mudanças nesse usuário; o bootstrap inicial continua manual.
+As alterações permitidas e suas diferenças são persistidas em `user_access_audit`
+na mesma transação das atribuições, com bloqueio das linhas administrativas.
+
+`REGIONAL_USER_ADMINISTRATION_ENABLED` é uma opção nova, desativada por padrão.
+Sem habilitação explícita, ADMIN regional não acessa o catálogo administrativo de
+usuários. Quando habilitada, a delegação permite somente alterar o status de USER
+com escopo regional integralmente contido nas regiões autorizadas do administrador.
+O catálogo, a paginação, o catálogo regional e o histórico também são restringidos.
+Não permite alterar ADMIN, usuários matriz, bases sem regional comprovada, usuários
+sem regional, papéis ou atribuições regionais. O catálogo delegado calcula o escopo
+efetivo antes de paginar; avaliar o custo dessa opção com um catálogo grande.
+
+Publicação/importação, previews e decisões de mapeamento globais exigem ADMIN
+matriz, incluindo os caminhos legados de workbook e fontes compartilhadas. A leitura
+operacional continua independente do papel administrativo e limitada no backend.
+Os fluxos V2 já mantêm a rastreabilidade dos jobs/publicações e de seu responsável;
+alterações de acesso usam a auditoria transacional de usuários.
+Os caminhos legados de publicação/remoção registram ator, ação e fonte nos logs;
+retenção e acesso restrito a esses logs precisam ser confirmados na homologação.
+
+As tabelas exigidas são `user_region_access`, `user_access_audit` e
+`platform_user_feishu_profiles`, além de `platform_users` e `regions`. Conferir
+manualmente `backend/sql/user-access-security-verification-review.sql`. O arquivo
+`user-access-security-missing-tables-review.sql` é uma proposta separada para
+tabelas comprovadamente ausentes. Nenhum desses arquivos roda na aplicação.
+Não é necessário modificar schema para as novas regras se as tabelas já existem.
+
+Com sessões/state em memória, a configuração temporária é exatamente **um processo
+FastAPI, um worker e uma única instância**, sem reload nem processos sobrepostos
+durante atualização. Exemplo conceitual: `uvicorn app.main:app --workers 1` com os
+demais argumentos locais previamente aprovados. Reinício perde sessões e tentativas
+OAuth em curso e exige novo login. Afinidade de carga não resolve compartilhamento
+nem revogação entre instâncias. Não houve mudança de systemd, Nginx ou infraestrutura.
+
+O cache de dashboards fica na memória do frontend, separado por identidade e escopo,
+fonte, contrato e período, com manifesto de publicação e mapa. Logout e mudança de
+identidade/escopo limpam cache e estados carregados. A identidade é revalidada pelo
+frontend a cada 60 segundos e ao recuperar foco; o backend aplica uma revogação já
+na próxima requisição, mesmo com o cookie antigo. Dados já entregues ao navegador
+não podem ser apagados remotamente antes dessa revalidação. O cache não sobrevive
+a refresh, fechamento de aba ou nova sessão e não é um mecanismo de autorização.
+
+Evolução proposta separadamente: cache no backend após autorização, com chave por
+usuário ou impressão do escopo efetivo, contrato, publicação diária vigente, versão
+do mapa, período e filtros. Revalidar o usuário antes de devolver qualquer resultado,
+invalidar em publicação e mudança de acesso e limitar TTL/tamanho. Não persistir
+dados operacionais em localStorage nem usar cache público compartilhado. Um store
+compartilhado para sessões/state precisaria de hashes de tokens, expiração, revogação
+e consumo atômico de state. Redis ou tabelas MySQL exigem aprovação própria; esta
+correção não instala infraestrutura nem implementa esse cache futuro.
+
 ## Operação local
 
 Consulte o README para instalar e iniciar os dois processos. `ops/nginx/redes-paineis.conf.example` e `ops/systemd/` são modelos, não configuração pronta para copiar ao servidor sem preencher e revisar `DOMINIO_PRODUCAO`, `FRONTEND_PORT`, `BACKEND_PORT`, caminhos, permissões e ambiente. A sessão Feishu permanece em memória; restart da API exige nova autenticação. Os dados do Excel têm persistência independente em `DATA_DIRECTORY`.

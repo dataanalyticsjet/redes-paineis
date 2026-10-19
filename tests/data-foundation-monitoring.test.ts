@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   adaptMonitoringV2Records,
+  canReadDashboardV2Data,
   canReadMonitoringV2,
   loadPublishedMonitoringWorkbook,
   MonitoringV2LoadError,
@@ -105,12 +106,87 @@ function makeFetcher(records: MonitoringV2Record[], publicationId = PUBLICATION_
   return { fetcher, recordRequests, metadataRequests, requestSignals };
 }
 
-test("V2 Monitoramento exige ADMIN/matrix e rejeita outros escopos", () => {
-  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", organizational_scope: "matrix", role: "matrix" }), true);
-  assert.equal(canReadMonitoringV2({ platform_role: "USER", organizational_scope: "matrix", role: "matrix" }), false);
-  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", organizational_scope: "regional", role: "regional" }), false);
-  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", organizational_scope: "matrix", role: "regional" }), false);
+test("ferramentas administrativas de matriz continuam limitadas a ADMIN/matrix", () => {
+  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", administrative_scope: "matrix", organizational_scope: "regional", role: "regional" }), true);
+  assert.equal(canReadMonitoringV2({ platform_role: "USER", administrative_scope: "matrix", organizational_scope: "matrix", role: "matrix" }), false);
+  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", administrative_scope: "base", organizational_scope: "matrix", role: "matrix" }), false);
+  assert.equal(canReadMonitoringV2({ platform_role: "ADMIN", administrative_scope: "regional", organizational_scope: "regional", role: "regional" }), false);
   assert.equal(canReadMonitoringV2(null), false);
+});
+
+test("consulta V2 aceita qualquer perfil com escopo regional, base ou matriz válido", () => {
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "regional",
+    role: "regional",
+    home_region: "SPE",
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "ADMIN",
+    organizational_scope: "regional",
+    role: "regional",
+    effective_regions: ["SPE"],
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "base",
+    role: "regional",
+    home_base: "311197",
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "matrix",
+    role: "matrix",
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "matrix",
+    role: "matrix",
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "none",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "ADMIN",
+    organizational_scope: "regional",
+    role: "regional",
+    home_region: "MATRIZ",
+    effective_regions: ["MATRIZ"],
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "feishu",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "base",
+    role: "regional",
+    home_base: "base-001",
+    effective_regions: [],
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "admin_grant",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "regional",
+    role: "regional",
+    effective_regions: ["CE"],
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "admin_grant",
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "unknown",
+    role: "unknown",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "regional",
+    role: "regional",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "matrix",
+    role: "matrix",
+    is_active: false,
+  }), false);
 });
 
 test("adaptador preserva os 22 campos, taxas nulas, dados originais e estado sem vínculo", () => {

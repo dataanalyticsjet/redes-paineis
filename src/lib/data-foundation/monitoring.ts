@@ -7,14 +7,43 @@ export const MONITORING_V2_PAGE_SIZE = 250;
 
 export interface MonitoringViewerAuthorization {
   platform_role?: string | null;
+  administrative_scope?: string | null;
   organizational_scope?: string | null;
   role?: string | null;
+  home_region?: string | null;
+  home_base?: string | null;
+  effective_regions?: readonly string[] | null;
+  additional_regions?: readonly string[] | null;
+  data_scope_source?: "feishu" | "admin_grant" | "none" | null;
+  region_resolution_status?: "RESOLVED" | "UNKNOWN" | "AMBIGUOUS" | "SYNC_FAILED" | string | null;
+  is_active?: boolean;
 }
 
 export function canReadMonitoringV2(identity: MonitoringViewerAuthorization | null | undefined): boolean {
   return identity?.platform_role === "ADMIN" &&
-    identity.organizational_scope?.trim().toLowerCase() === "matrix" &&
-    identity.role?.trim().toLowerCase() === "matrix";
+    identity.administrative_scope?.trim().toLowerCase() === "matrix";
+}
+
+/** Data scope is independent from the ADMIN permission. Unknown scopes fail closed. */
+export function canReadDashboardV2Data(identity: MonitoringViewerAuthorization | null | undefined): boolean {
+  if (!identity || identity.is_active === false) return false;
+  const scope = identity.organizational_scope?.trim().toLowerCase();
+  const role = identity.role?.trim().toLowerCase();
+  const syncFailed = identity.region_resolution_status === "SYNC_FAILED";
+  if (syncFailed) {
+    return scope === "regional" && role === "regional" && identity.data_scope_source === "admin_grant" &&
+      Boolean(identity.effective_regions?.some((region) => region.trim()));
+  }
+  if (scope === "matrix" && role === "matrix") return true;
+  if (scope === "regional" && role === "regional") {
+    return Boolean(
+      identity.home_region?.trim() ||
+      identity.effective_regions?.some((region) => region.trim()) ||
+      identity.additional_regions?.some((region) => region.trim()),
+    );
+  }
+  if (scope === "base" && role === "regional") return Boolean(identity.home_base?.trim());
+  return false;
 }
 
 export interface MonitoringV2Record extends Record<string, unknown> {
@@ -137,15 +166,16 @@ const STATUS_COLUMNS = VALUE_FIELDS
 function apiErrorMessage(detail: unknown, status: number): string {
   const known: Record<string, string> = {
     authentication_required: "Sua sessão expirou. Entre novamente para consultar os dados V2.",
-    admin_required: "A consulta V2 exige um usuário ADMIN.",
-    matrix_scope_required: "A consulta V2 exige perfil ADMIN com escopo matrix.",
+    admin_required: "Esta ação administrativa exige perfil ADMIN.",
+    matrix_scope_required: "O escopo de matriz não está autorizado.",
+    user_scope_unavailable: "Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.",
     data_foundation_v2_disabled: "As consultas da Data Foundation V2 estão desabilitadas neste backend local.",
     data_store_unavailable: "O banco da Data Foundation V2 está indisponível no momento.",
     official_mapping_unavailable: "O mapa oficial de bases está indisponível; a consulta V2 não pode continuar.",
   };
   if (typeof detail === "string" && known[detail]) return known[detail];
   if (status === 401) return known.authentication_required;
-  if (status === 403) return "A conta atual não tem autorização ADMIN/matrix para consultar os dados V2.";
+  if (status === 403) return "Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.";
   return `A API da Data Foundation V2 retornou HTTP ${status}.`;
 }
 

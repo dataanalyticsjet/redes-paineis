@@ -27,5 +27,13 @@ test("session verification failures are distinct from an unauthenticated respons
 test("logout and periodic session validation continue using the existing secure endpoints", () => {
   assert.match(frontend, /apiFetch\("\/api\/auth\/logout", \{ method: "POST" \}\)/);
   assert.match(frontend, /setViewerAuthState\("UNAUTHENTICATED"\)/);
-  assert.match(frontend, /setInterval\(\(\) => void verifyCurrentAccess\(\), 60_000\)/);
+  assert.match(frontend, /setInterval\(\(\) => void verifyCurrentAccess\(\), 30_000\)/);
+  assert.match(frontend, /window\.addEventListener\("focus", verifyCurrentAccess\)/);
+});
+
+test("regional sync failure blocks data without ending the Feishu session", () => {
+  assert.match(frontend, /region_resolution_status === "SYNC_FAILED"[\s\S]*?Não foi possível confirmar sua regional no Feishu/);
+  assert.match(frontend, /subscribeToProtectedApiAuthorizationFailure\(\(\) => \{[\s\S]*?clearProtectedDashboardData\(\);[\s\S]*?setViewerDataAccessBlocked\(true\)/);
+  assert.match(frontend, /if \(response\.status === 403\) \{\s*clearProtectedDashboardData\(\);\s*setViewerDataAccessBlocked\(true\);\s*return;/);
+  assert.doesNotMatch(frontend, /feishu_sync_grace/);
 });

@@ -8,6 +8,7 @@ from collections.abc import Iterable, Sequence
 # reference. Descriptions are intentionally not used to resolve a region.
 JT_BRASIL_ID = "od-33e90ac1a93b12c1b65347320e648498"
 REGIONAL_SPONSOR_ID = "od-f0274f53c145deb39c05e626b61f0976"
+MATRIX_REGION_CODE = "MATRIZ"
 
 DEPARTMENT_REGION_IDS: dict[str, str] = {
     "od-3d75c10ce15130e199fc3b42e4e86a04": "SPN",

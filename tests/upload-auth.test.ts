@@ -18,11 +18,11 @@ test("dashboard uploads do not ask for a second username and password", () => {
   assert.match(frontend, /apiFetch\("\/api\/workbook"/);
   assert.match(frontend, /const queueUpload = useCallback\([\s\S]*?void runUpload\(upload\)/);
   assert.match(frontend, /canManageUpload \? onAddSource \?/);
-  assert.match(frontend, /canManageUpload=\{viewerIdentity\.platform_role === "ADMIN"\}/);
-  assert.match(frontend, /viewerIdentity\.platform_role === "ADMIN" \? <label className="primary-upload-button" htmlFor="epop-upload"/);
-  assert.match(backend, /async def verify_upload_auth\([\s\S]*?_admin: AuthenticatedViewer = Depends\(require_admin\)/);
+  assert.match(frontend, /canManageUpload=\{isMatrixAdminViewer\}/);
+  assert.match(frontend, /isMatrixAdminViewer \? <label className="primary-upload-button" htmlFor="epop-upload"/);
+  assert.match(backend, /async def verify_upload_auth\([\s\S]*?_admin: AuthenticatedViewer = Depends\(require_matrix_admin\)/);
   const workbookWriter = backend.slice(backend.indexOf("async def write_workbook("));
-  assert.match(workbookWriter, /_admin: AuthenticatedViewer = Depends\(require_admin\)/);
+  assert.match(workbookWriter, /_admin: AuthenticatedViewer = Depends\(require_matrix_admin\)/);
   assert.doesNotMatch(workbookWriter, /_upload_error\(/);
   assert.match(backend, /hmac\.compare_digest/);
   assert.match(backendTests, /def test_legacy_upload_auth_remains_available_but_admin_session_publishes_without_it/);
@@ -31,7 +31,7 @@ test("dashboard uploads do not ask for a second username and password", () => {
 
 test("modern source actions share one component and are limited to configured sources for admins", () => {
   assert.match(actionBand, /onDataSource \? <button type="button" onClick=\{onDataSource\}><Database size=\{16\} \/> \{t\("Fonte de dados"\)\}/);
-  assert.match(frontend, /viewerIdentity\?\.platform_role === "ADMIN" && activeDataSourceConfig\?\.configured === true/);
+  assert.match(frontend, /isMatrixAdminViewer && activeDataSourceConfig\?\.configured === true/);
   for (const mapping of [
     'monitoramento: "monitoring"',
     'taxa: "taxa"',

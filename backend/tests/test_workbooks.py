@@ -23,10 +23,10 @@ def workbook_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, create_user
     get_settings.cache_clear()
     feishu_auth.reset_temporary_auth_state()
     token, _user = create_user_session(
-        name="SPS Admin",
+        name="Matrix Publisher",
         platform_role="ADMIN",
-        organizational_scope="regional",
-        home_region="SPS",
+        organizational_scope="matrix",
+        home_region=None,
         identity_suffix="workbook-admin",
     )
     client = TestClient(app, base_url="http://127.0.0.1:3000")
@@ -96,14 +96,17 @@ def test_workbook_requires_authenticated_admin_session() -> None:
         ).status_code == 401
 
 
-def test_workbook_upload_persists_source_and_scopes_reads(workbook_client: TestClient, tmp_path: Path) -> None:
+def test_workbook_upload_persists_source_and_scopes_reads(workbook_client: TestClient, tmp_path: Path, create_user_session) -> None:
     uploaded = _upload(workbook_client, "movement")
     assert uploaded.status_code == 200
     body = uploaded.json()
     assert body["workbook"]["fileName"] == "dados.xlsx"
     assert body["workbook"]["parsed"]["metadata"]["rowCount"] == 2
 
-    stored = workbook_client.get("/api/workbook?kind=movement")
+    token, _ = create_user_session(home_region="SPS", identity_suffix="workbook-scoped-reader")
+    reader = TestClient(app, base_url="http://127.0.0.1:3000")
+    reader.cookies.set(feishu_auth.SESSION_COOKIE, token)
+    stored = reader.get("/api/workbook?kind=movement")
     assert stored.status_code == 200
     payload = stored.json()["workbook"]["parsed"]
     assert [row["Regional Origem"] for row in payload["rows"]] == ["SPS"]
@@ -147,7 +150,7 @@ def test_matrix_viewer_keeps_the_existing_unscoped_viewer_behavior(workbook_clie
     assert len(response.json()["workbook"]["parsed"]["rows"]) == 2
 
 
-def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClient, create_user_session) -> None:
+def test_base_assignment_without_verified_feishu_region_or_explicit_grant_is_denied(workbook_client: TestClient, create_user_session) -> None:
     assert _upload(workbook_client, "movement").status_code == 200
     base_token, _user = create_user_session(
         name="Base Viewer",
@@ -161,10 +164,8 @@ def test_base_viewer_is_limited_to_the_configured_base(workbook_client: TestClie
     base_client.cookies.set(feishu_auth.SESSION_COOKIE, base_token)
 
     response = base_client.get("/api/workbook?kind=movement")
-    assert response.status_code == 200
-    rows = response.json()["workbook"]["parsed"]["rows"]
-    assert len(rows) == 1
-    assert rows[0]["PDD de saída"] == "Base 1"
+    assert response.status_code == 403
+    assert not response.json().get("workbook")
 
 
 def test_responsibility_list_preview_and_publish_use_admin_session_without_basic_auth(workbook_client: TestClient, tmp_path: Path) -> None:

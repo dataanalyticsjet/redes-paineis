@@ -115,15 +115,16 @@ interface RecordsPage {
 function apiErrorMessage(detail: unknown, status: number): string {
   const known: Record<string, string> = {
     authentication_required: "Sua sessão expirou. Entre novamente para consultar os dados V2.",
-    admin_required: "A consulta V2 exige um usuário ADMIN.",
-    matrix_scope_required: "A consulta V2 exige perfil ADMIN com escopo matrix.",
+    admin_required: "Esta ação administrativa exige perfil ADMIN.",
+    matrix_scope_required: "O escopo de matriz não está autorizado.",
+    user_scope_unavailable: "Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.",
     data_foundation_v2_disabled: "As consultas da Data Foundation V2 estão desabilitadas neste backend local.",
     data_store_unavailable: "O banco da Data Foundation V2 está indisponível no momento.",
     official_mapping_unavailable: "O mapa oficial de bases está indisponível; a consulta V2 não pode continuar.",
   };
   if (typeof detail === "string" && known[detail]) return known[detail];
   if (status === 401) return known.authentication_required;
-  if (status === 403) return "A conta atual não tem autorização ADMIN/matrix para consultar os dados V2.";
+  if (status === 403) return "Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.";
   return `A API da Data Foundation V2 retornou HTTP ${status}.`;
 }
 

@@ -1,6 +1,6 @@
 export interface ViewerRegionScope {
-  role: "matrix" | "regional";
-  organizational_scope?: "matrix" | "regional" | "base";
+  role: "matrix" | "regional" | "unknown";
+  organizational_scope?: "matrix" | "regional" | "base" | "unknown";
   region: string | null;
   home_region?: string | null;
 }
@@ -9,6 +9,9 @@ export function initialRegionSelection(
   regions: string[],
   identity: ViewerRegionScope | null,
 ): Set<string> {
+  if (identity?.role === "unknown" || identity?.organizational_scope === "unknown") {
+    return new Set();
+  }
   if (!identity || identity.organizational_scope === "matrix" || identity.role === "matrix") {
     return new Set(regions);
   }

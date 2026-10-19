@@ -29,8 +29,8 @@ def authenticated_client(monkeypatch: pytest.MonkeyPatch, tmp_path, create_user_
     token, _user = create_user_session(
         name="Example Admin",
         platform_role="ADMIN",
-        organizational_scope="regional",
-        home_region="SPS",
+        organizational_scope="matrix",
+        home_region=None,
         identity_suffix="source-admin",
     )
     client = TestClient(app, base_url="http://localhost:3000")
@@ -178,7 +178,7 @@ def test_seller_monitoring_source_keeps_canonical_national_history_before_region
     authenticated_client: TestClient,
     create_user_session,
 ) -> None:
-    """A regional admin's preview/read must not truncate the published J&T source."""
+    """A matrix publication preserves national history and regional reads stay scoped."""
     responsibility = parsed_responsibility_workbook()
     save_workbook(data_root(get_settings().data_directory), "responsibilityList", "De_para DoomsDay.xlsx", responsibility)
 
@@ -197,23 +197,24 @@ def test_seller_monitoring_source_keeps_canonical_national_history_before_region
         "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "parsed": incoming,
     }
-    preview_response = pr_client.post(
+    assert pr_client.post("/api/data-sources/sellerPerformance/preview", json={}).status_code == 403
+    preview_response = authenticated_client.post(
         "/api/data-sources/sellerPerformance/preview",
         data={"payload": json.dumps(payload, ensure_ascii=False)},
         files={"file": ("monitoramento-jt.xlsx", b"PK\x03\x04", payload["contentType"])},
     )
     assert preview_response.status_code == 200
     preview_body = preview_response.json()
-    assert preview_body["rowCount"] == 1
-    assert preview_body["history"]["fileRowCount"] == 1
-    assert preview_body["history"]["resultingRows"] == 1
+    assert preview_body["rowCount"] == 3
+    assert preview_body["history"]["fileRowCount"] == 3
+    assert preview_body["history"]["resultingRows"] == 3
 
-    published = pr_client.post(
+    published = authenticated_client.post(
         "/api/data-sources/sellerPerformance/import",
         json={"previewId": preview_body["previewId"]},
     )
     assert published.status_code == 200
-    assert published.json()["rowCount"] == 1
+    assert published.json()["rowCount"] == 3
 
     owner_key = data_sources.create_published_source_key("sellerPerformance", get_settings().feishu_session_secret)
     canonical = data_sources.get_dashboard_source("sellerPerformance", owner_key)
@@ -227,7 +228,9 @@ def test_seller_monitoring_source_keeps_canonical_national_history_before_region
     sr_token, _sr_user = create_user_session(
         name="SR Viewer",
         organizational_scope="regional",
-        home_region="SR",
+        home_region=None,
+        feishu_region_code=None,
+        additional_regions=["SR"],
         identity_suffix="seller-source-sr-viewer",
     )
     sr_source = _session_client(sr_token).get("/api/data-sources/sellerPerformance").json()["source"]
@@ -440,11 +443,12 @@ def test_matrix_user_data_source_preview_is_not_region_filtered(
 
 def test_regional_user_data_source_preview_keeps_only_its_region(
     authenticated_client: TestClient,
+    create_user_session,
 ) -> None:
     response = preview(authenticated_client)
 
     assert response.status_code == 200
-    assert response.json()["rowCount"] == 1
+    assert response.json()["rowCount"] == 2
 
     imported = authenticated_client.post(
         "/api/data-sources/monitoring/import",
@@ -452,7 +456,11 @@ def test_regional_user_data_source_preview_keeps_only_its_region(
     )
 
     assert imported.status_code == 200
-    rows = imported.json()["parsed"]["rows"]
+    token, _ = create_user_session(platform_role="ADMIN", home_region="SPS", identity_suffix="regional-read-only-admin")
+    regional = _session_client(token)
+    assert preview(regional).status_code == 403
+    assert regional.post("/api/data-sources/monitoring/import", json={"previewId": response.json()["previewId"]}).status_code == 403
+    rows = regional.get("/api/data-sources/monitoring").json()["source"]["parsed"]["rows"]
     assert len(rows) == 1
     assert rows[0]["Regional Origem"] == "SPS"
 
@@ -462,7 +470,7 @@ def test_preview_import_get_and_remove_are_local_and_scoped(authenticated_client
     assert preview_response.status_code == 200
     preview_payload = preview_response.json()
     assert preview_payload["canImport"] is True
-    assert preview_payload["rowCount"] == 1
+    assert preview_payload["rowCount"] == 2
     assert preview_payload["period"] == {"start": "2026-09-30", "end": "2026-09-30"}
     assert {field["classification"] for field in preview_payload["fields"]} == {"required", "optional"}
 
@@ -473,7 +481,7 @@ def test_preview_import_get_and_remove_are_local_and_scoped(authenticated_client
     assert imported.status_code == 200
     source = imported.json()
     assert source["sourceType"] == "MANUAL_UPLOAD"
-    assert source["rowCount"] == 1
+    assert source["rowCount"] == 2
     assert source["parsed"]["rows"][0]["Regional Origem"] == "SPS"
 
     current = authenticated_client.get("/api/data-sources/monitoring")
@@ -490,7 +498,7 @@ def test_taxa_source_uses_its_own_local_store_and_applies_user_scope(authenticat
     assert preview_response.status_code == 200
     preview_payload = preview_response.json()
     assert preview_payload["canImport"] is True
-    assert preview_payload["rowCount"] == 1
+    assert preview_payload["rowCount"] == 2
     assert preview_payload["period"] == {"start": "2026-09-30", "end": "2026-09-30"}
     assert len([field for field in preview_payload["fields"] if field["classification"] == "required" and field["present"]]) == 22
 
@@ -501,7 +509,7 @@ def test_taxa_source_uses_its_own_local_store_and_applies_user_scope(authenticat
     assert imported.status_code == 200
     source = imported.json()
     assert source["fileName"] == "taxa-coleta.xlsx"
-    assert len(source["parsed"]["rows"]) == 1
+    assert len(source["parsed"]["rows"]) == 2
     assert source["parsed"]["rows"][0]["Nome da regional"] == "SPS"
     assert authenticated_client.get("/api/data-sources/taxa").json()["source"]["fileName"] == "taxa-coleta.xlsx"
     assert authenticated_client.get("/api/data-sources/monitoring").json() == {"source": None}
@@ -705,8 +713,9 @@ def test_taxa_history_preview_publish_and_reupload_follow_date_snapshot_rules(
     additional_region_token, _additional_user = create_user_session(
         name="SPS and RJ Viewer",
         organizational_scope="regional",
-        home_region="SPS",
-        additional_regions=["RJ"],
+        home_region=None,
+        additional_regions=["SPS", "RJ"],
+        feishu_region_code=None,
         identity_suffix="taxa-history-sps-rj-viewer",
     )
     additional_region_client = TestClient(app, base_url="http://localhost:3000")
@@ -741,7 +750,8 @@ def test_regional_admin_taxa_publication_and_history_keep_canonical_national_dat
         home_region="SPE",
         identity_suffix="taxa-history-regional-admin-spe",
     )
-    authenticated_client.cookies.set(feishu_auth.SESSION_COOKIE, admin_token)
+    regional_reader = _session_client(admin_token)
+    assert preview_taxa(regional_reader).status_code == 403
 
     first_national_file = taxa_national_snapshot([
         ("2026-10-01", "SPE"),
@@ -752,16 +762,16 @@ def test_regional_admin_taxa_publication_and_history_keep_canonical_national_dat
         ("2026-10-02", "RJ"),
     ])
     first_preview = preview_taxa(authenticated_client, first_national_file).json()
-    assert first_preview["rowCount"] == 2
-    assert first_preview["history"]["fileRowCount"] == 2
-    assert first_preview["history"]["resultingRows"] == 2
+    assert first_preview["rowCount"] == 6
+    assert first_preview["history"]["fileRowCount"] == 6
+    assert first_preview["history"]["resultingRows"] == 6
 
     first_import = authenticated_client.post(
         "/api/data-sources/taxa/import",
         json={"previewId": first_preview["previewId"]},
     )
     assert first_import.status_code == 200
-    assert {row["Nome da regional"] for row in first_import.json()["parsed"]["rows"]} == {"SPE"}
+    assert {row["Nome da regional"] for row in first_import.json()["parsed"]["rows"]} == {"SPE", "MG", "RJ"}
 
     replacement_national_file = taxa_national_snapshot([
         ("2026-10-02", "SPE"),
@@ -772,19 +782,19 @@ def test_regional_admin_taxa_publication_and_history_keep_canonical_national_dat
         ("2026-10-03", "RJ"),
     ], base_prefix="Replacement")
     second_preview = preview_taxa(authenticated_client, replacement_national_file).json()
-    assert second_preview["rowCount"] == 2
-    assert second_preview["history"]["fileRowCount"] == 2
+    assert second_preview["rowCount"] == 6
+    assert second_preview["history"]["fileRowCount"] == 6
     assert second_preview["history"]["replacedDates"] == ["2026-10-02"]
     assert second_preview["history"]["newDates"] == ["2026-10-03"]
-    assert second_preview["history"]["resultingRows"] == 3
+    assert second_preview["history"]["resultingRows"] == 9
 
     second_import = authenticated_client.post(
         "/api/data-sources/taxa/import",
         json={"previewId": second_preview["previewId"]},
     )
     assert second_import.status_code == 200
-    assert len(second_import.json()["parsed"]["rows"]) == 3
-    assert {row["Nome da regional"] for row in second_import.json()["parsed"]["rows"]} == {"SPE"}
+    assert len(second_import.json()["parsed"]["rows"]) == 9
+    assert {row["Nome da regional"] for row in second_import.json()["parsed"]["rows"]} == {"SPE", "MG", "RJ"}
 
     owner_key = data_sources.create_published_source_key("taxa", get_settings().feishu_session_secret)
     canonical_source = data_sources.get_dashboard_source("taxa", owner_key)
@@ -807,7 +817,7 @@ def test_regional_admin_taxa_publication_and_history_keep_canonical_national_dat
         if row["Horário de término do prazo de coleta"] == "2026-10-01"
     )
 
-    scoped_source = authenticated_client.get("/api/data-sources/taxa").json()["source"]
+    scoped_source = regional_reader.get("/api/data-sources/taxa").json()["source"]
     assert len(scoped_source["parsed"]["rows"]) == 3
     assert {row["Nome da regional"] for row in scoped_source["parsed"]["rows"]} == {"SPE"}
 
@@ -871,22 +881,22 @@ def test_movement_snapshot_canonicalizes_before_scope_and_replaces_without_mergi
         identity_suffix="movement-pr-admin",
     )
     pr_client = _session_client(pr_token)
-    preview_response = preview_movement(pr_client)
+    assert preview_movement(pr_client).status_code == 403
+    preview_response = preview_movement(authenticated_client)
     assert preview_response.status_code == 200
     preview_body = preview_response.json()
     assert preview_body["canImport"] is True
     assert preview_body["period"] is None
-    assert preview_body["rowCount"] == 1
+    assert preview_body["rowCount"] == 3
     assert len(preview_body["fields"]) == len(MOVEMENT_REQUIRED_HEADERS)
 
-    published = pr_client.post(
+    published = authenticated_client.post(
         "/api/data-sources/movement/import",
         json={"previewId": preview_body["previewId"]},
     )
     assert published.status_code == 200
-    # The publisher only receives the rows allowed by their own PR scope.
-    assert published.json()["rowCount"] == 1
-    assert [row["Nome da unidade responsável"] for row in published.json()["parsed"]["rows"]] == ["CWB-PR"]
+    # The matrix publisher receives all rows; the regional reader below receives PR only.
+    assert published.json()["rowCount"] == 3
 
     owner_key = data_sources.create_published_source_key("movement", get_settings().feishu_session_secret)
     canonical = data_sources.get_dashboard_source("movement", owner_key)
@@ -901,7 +911,9 @@ def test_movement_snapshot_canonicalizes_before_scope_and_replaces_without_mergi
     sr_token, _ = create_user_session(
         name="SR User",
         organizational_scope="regional",
-        home_region="SR",
+        home_region=None,
+        feishu_region_code=None,
+        additional_regions=["SR"],
         identity_suffix="movement-sr-user",
     )
     sr_source = _session_client(sr_token).get("/api/data-sources/movement").json()["source"]

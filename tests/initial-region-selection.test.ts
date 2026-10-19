@@ -49,3 +49,15 @@ test("regional users never default to all regions when their home region is unav
     ["SPE"],
   );
 });
+
+test("unknown users start with no selected regions", () => {
+  assert.deepEqual(
+    [...initialRegionSelection(available, {
+      role: "unknown",
+      organizational_scope: "unknown",
+      region: null,
+      home_region: null,
+    })],
+    [],
+  );
+});

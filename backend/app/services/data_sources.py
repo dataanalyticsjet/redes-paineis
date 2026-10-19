@@ -250,7 +250,7 @@ def _scope_parsed(parsed: dict[str, Any], identity: dict[str, str | None]) -> di
     home_base = str(identity.get("home_base") or identity.get("base") or "").strip()
     extras = identity.get("additional_regions") or []
     if scope == "regional" or (not scope and not home_base):
-        if not (identity.get("home_region") or identity.get("region")):
+        if not (identity.get("home_region") or identity.get("region") or extras):
             raise DataSourceError("data_source_scope_unavailable", 403)
     if (scope == "regional" or extras) and not region_column:
         raise DataSourceError("data_source_region_column_required", 422)

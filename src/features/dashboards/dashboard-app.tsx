@@ -11,7 +11,8 @@ import { DataSourceDialog, type DataSourceSummary } from "../data-sources/data-s
 import { ResponsibilitySourceDialog } from "../data-sources/responsibility-source-dialog";
 import { PresentationAuthTransition, PresentationLogin } from "../auth/presentation-login";
 import { viewerAuthStateFromResponse, type ViewerAuthState } from "../../lib/viewer-auth-state";
-import { apiFetch, apiUrl } from "../../lib/api-url.ts";
+import { apiFetch, apiUrl, subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
+import { invalidateDashboardDataCache, loadCachedDashboardData, readDashboardDataManifest } from "../../lib/data-foundation/dashboard-data-cache.ts";
 import { formatCollaboratorName } from "../../lib/profile-name.ts";
 import { organizationalRegionLabel, type OrganizationalRegionStatus } from "../../lib/organizational-region.ts";
 import {
@@ -146,6 +147,7 @@ import { aggregateTaxaRmPoc } from "../../lib/taxa-rm-poc";
 import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loader";
 import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
 import {
+  canReadDashboardV2Data,
   canReadMonitoringV2,
   loadPublishedMonitoringWorkbook,
   MonitoringV2LoadError,
@@ -716,11 +718,14 @@ interface SellerPerformanceData {
 interface ViewerIdentity {
   username: string;
   avatar_url?: string | null;
-  role: "matrix" | "regional";
+  role: "matrix" | "regional" | "unknown";
   region: string | null;
   base: string | null;
   platform_role?: "USER" | "ADMIN";
-  organizational_scope?: "matrix" | "regional" | "base";
+  administrative_scope?: "matrix" | "regional" | "base" | "unknown";
+  can_manage_users?: boolean;
+  organizational_scope?: "matrix" | "regional" | "base" | "unknown";
+  data_scope_source?: "feishu" | "admin_grant" | "none";
   home_region?: string | null;
   organizational_region_code?: string | null;
   region_resolution_status?: OrganizationalRegionStatus;
@@ -740,7 +745,10 @@ function sameViewerIdentity(left: ViewerIdentity | null, right: ViewerIdentity):
     left.region === right.region &&
     left.base === right.base &&
     left.platform_role === right.platform_role &&
+    left.administrative_scope === right.administrative_scope &&
+    left.can_manage_users === right.can_manage_users &&
     left.organizational_scope === right.organizational_scope &&
+    left.data_scope_source === right.data_scope_source &&
     left.home_region === right.home_region &&
     left.organizational_region_code === right.organizational_region_code &&
     left.region_resolution_status === right.region_resolution_status &&
@@ -748,6 +756,26 @@ function sameViewerIdentity(left: ViewerIdentity | null, right: ViewerIdentity):
     left.is_active === right.is_active &&
     sameArray(left.effective_regions, right.effective_regions) &&
     sameArray(left.additional_regions, right.additional_regions);
+}
+
+function dashboardIdentityCacheKey(sessionId: string, identity: ViewerIdentity | null): string {
+  if (!identity) return "";
+  return JSON.stringify([
+    sessionId,
+    identity.username,
+    identity.platform_role,
+    identity.administrative_scope,
+    identity.can_manage_users,
+    identity.organizational_scope,
+    identity.data_scope_source,
+    identity.role,
+    identity.home_region,
+    identity.home_base,
+    identity.effective_regions,
+    identity.additional_regions,
+    identity.organizational_region_code,
+    identity.region_resolution_status,
+  ]);
 }
 
 interface StatusSummary {
@@ -2301,9 +2329,10 @@ function LanguageSwitcher({ language, onChange, t }: {
   );
 }
 
-function UserProfileMenu({ identity, isAdmin, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
+function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
   identity: ViewerIdentity;
-  isAdmin: boolean;
+  canManageDataSources: boolean;
+  canManageUsers: boolean;
   theme: DashboardTheme;
   onToggleTheme: () => void;
   onOpenDataSources: () => void;
@@ -2321,10 +2350,12 @@ function UserProfileMenu({ identity, isAdmin, theme, onToggleTheme, onOpenDataSo
   const avatarUrl = identity.avatar_url?.trim() || null;
   const avatarLoadFailed = Boolean(avatarUrl && failedAvatarUrl === avatarUrl);
   const displayName = fullName.split(/\s+/)[0] || t("Colaborador");
+  const adminActionCount = Number(canManageDataSources) + Number(canManageUsers);
   const region = organizationalRegionLabel(
     identity.organizational_region_code,
     identity.region_resolution_status,
     t("Regional não identificada"),
+    identity.data_scope_source,
   );
   const nameParts = fullName.split(/\s+/).filter(Boolean);
   const initials = nameParts.length > 1
@@ -2409,20 +2440,20 @@ function UserProfileMenu({ identity, isAdmin, theme, onToggleTheme, onOpenDataSo
             <span><strong>{fullName}</strong><small>{region}</small></span>
           </div>
           <div className="profile-menu-separator" role="separator" />
-          {isAdmin ? <>
-            <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenDataSources)}>
+          {adminActionCount > 0 ? <>
+            {canManageDataSources ? <button ref={(element) => { itemRefs.current[0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenDataSources)}>
               <Database size={16} aria-hidden="true" /> {t("Fontes de dados")}
-            </button>
-            <button ref={(element) => { itemRefs.current[1] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenUserControl)}>
+            </button> : null}
+            {canManageUsers ? <button ref={(element) => { itemRefs.current[canManageDataSources ? 1 : 0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onOpenUserControl)}>
               <UsersRound size={16} aria-hidden="true" /> {t("Controle de usuários")}
-            </button>
+            </button> : null}
             <div className="profile-menu-separator" role="separator" />
           </> : null}
-          <button ref={(element) => { itemRefs.current[isAdmin ? 2 : 0] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onToggleTheme)}>
+          <button ref={(element) => { itemRefs.current[adminActionCount] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onToggleTheme)}>
             {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
             {t(theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro")}
           </button>
-          <button className="profile-menu-signout" ref={(element) => { itemRefs.current[isAdmin ? 3 : 1] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onSignOut)}>
+          <button className="profile-menu-signout" ref={(element) => { itemRefs.current[adminActionCount + 1] = element; }} type="button" role="menuitem" onClick={() => closeAndRun(onSignOut)}>
             <LogOut size={16} aria-hidden="true" /> {t("Sair")}
           </button>
         </div>
@@ -2797,7 +2828,7 @@ function DashboardUnderDevelopment({
   const statusText = availability.status === "loading"
     ? t("Verificando publicação vigente…")
     : availability.status === "restricted"
-      ? t("Consulta às fontes V2 exclusiva para ADMIN/matrix.")
+      ? t("Aguardando liberação do acesso operacional pela administração.")
       : availability.status === "unavailable"
         ? t("Fonte indisponível no momento.")
         : availability.status === "unpublished" || data?.status === "unpublished"
@@ -2854,10 +2885,14 @@ function DashboardUnderDevelopment({
 export function DashboardApp() {
   const [language, setLanguage] = useState<DashboardLanguage>("pt");
   const [theme, setTheme] = useState<DashboardTheme>("light");
+  const [dashboardCacheSessionId] = useState(() => `${Date.now()}-${Math.random()}`);
+  const previousDashboardCacheIdentity = useRef("");
+  const viewerIdentityRef = useRef<ViewerIdentity | null>(null);
   const themeRef = useRef<DashboardTheme>("light");
   const themeInitializedRef = useRef(false);
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
+  const [viewerDataAccessBlocked, setViewerDataAccessBlocked] = useState(false);
   const [viewerAuthState, setViewerAuthState] = useState<ViewerAuthState>("CHECKING");
   const [viewerSessionCheckAttempt, setViewerSessionCheckAttempt] = useState(0);
   const [viewerAuthError, setViewerAuthError] = useState<string | null>(() => {
@@ -3050,13 +3085,59 @@ export function DashboardApp() {
     [language],
   );
   const isMatrixAdminViewer = canReadMonitoringV2(viewerIdentity);
+  const isAuthorizedDashboardViewer = canReadDashboardV2Data(viewerIdentity);
+  const dashboardCacheIdentity = dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity);
+  const regionalAccessPendingMessage = viewerIdentity?.region_resolution_status === "SYNC_FAILED"
+    ? t("Não foi possível confirmar sua regional no Feishu. Seus dados estão temporariamente indisponíveis. Aguarde uma nova sincronização ou solicite liberação ao administrador.")
+    : t("Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.");
+  const clearProtectedDashboardData = useCallback(() => {
+    invalidateDashboardDataCache();
+    setLoaded(null);
+    setTaxaLoaded(null);
+    setEpopLoaded(null);
+    setMovementLoaded(buildEmptyNoMovementV2LoadedData());
+    setSellerPerformanceLoaded(null);
+    setSellerReferenceLoaded(null);
+    setSpecialSellerLoaded(null);
+    setSellerManualSource(null);
+    setSellerDependencyMessage(null);
+    setResponsibilityLoaded(null);
+    setBipagemLoaded(null);
+    setDamageLoaded(null);
+    loadedDashboardDataViewerRef.current = null;
+    setMonitoringV2Status("idle");
+    setMonitoringV2Message(null);
+    setCollectionRateV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, snapshotAsOf: null, error: null }));
+    setNoMovementV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, updatedAt: null, collectionDate: null, publishedAt: null, error: null }));
+    setPddCollectionFailureV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], updatedAt: null, publishedAt: null, error: null }));
+    jtMonitoringV2RequestRef.current?.abort();
+    jtMonitoringV2RequestRef.current = null;
+    setJtMonitoringV2State((current) => ({ ...current, status: "idle", loading: false, records: [], totalAvailable: 0, loadedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, dateCountsSignature: null, error: null }));
+  }, []);
+  const applyViewerIdentity = useCallback((identity: ViewerIdentity) => {
+    const previous = viewerIdentityRef.current;
+    if (previous && !sameViewerIdentity(previous, identity)) {
+      clearProtectedDashboardData();
+      setViewerDataAccessBlocked(false);
+      setDashboardSourcesReady(false);
+      setDashboardAvailability({ status: "idle" });
+    }
+    viewerIdentityRef.current = identity;
+    setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
+  }, [clearProtectedDashboardData]);
+  useEffect(() => {
+    if (previousDashboardCacheIdentity.current && previousDashboardCacheIdentity.current !== dashboardCacheIdentity) {
+      invalidateDashboardDataCache();
+    }
+    previousDashboardCacheIdentity.current = dashboardCacheIdentity;
+  }, [dashboardCacheIdentity]);
   const isFirstMileUnderReview = Object.hasOwn(DASHBOARD_V2_SOURCE_BY_PANEL, view);
   const currentDashboardSourceId = isFirstMileUnderReview
     ? DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel] ?? null
     : null;
   const currentDashboardAvailability: DashboardAvailabilityState = !isFirstMileUnderReview || !viewerAuthorization
     ? { status: "idle" }
-    : !isMatrixAdminViewer
+    : !isAuthorizedDashboardViewer
       ? { status: "restricted", sourceId: currentDashboardSourceId ?? "" }
       : !currentDashboardSourceId
         ? { status: "unavailable", sourceId: "" }
@@ -3067,6 +3148,10 @@ export function DashboardApp() {
           : dashboardAvailability.status !== "idle" && dashboardAvailability.sourceId === currentDashboardSourceId
             ? dashboardAvailability
             : { status: "loading", sourceId: currentDashboardSourceId };
+  const currentDashboardManifestReady = currentDashboardAvailability.status === "ready" || currentDashboardAvailability.status === "unpublished";
+  const currentDashboardPublicationToken = currentDashboardManifestReady
+    ? currentDashboardAvailability.data.publicationId
+    : null;
   const isReferenceBaseTestActive = Boolean(
     import.meta.env.DEV &&
     referenceBaseTestRequested &&
@@ -3080,7 +3165,7 @@ export function DashboardApp() {
   const statusLabel = useCallback((status: string) => monitoringStatusLabel(status, t), [t]);
 
   useEffect(() => {
-    if (!isFirstMileUnderReview || view === "movimentacao" || view === "bipagem" || !viewerAuthorization || !isMatrixAdminViewer) return undefined;
+    if (!isFirstMileUnderReview || !viewerAuthorization || !isAuthorizedDashboardViewer) return undefined;
 
     const sourceId = DASHBOARD_V2_SOURCE_BY_PANEL[view as DashboardPanel];
     if (!sourceId) return undefined;
@@ -3115,7 +3200,7 @@ export function DashboardApp() {
       window.clearTimeout(loadingTimer);
       controller.abort();
     };
-  }, [isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization]);
+  }, [isFirstMileUnderReview, isAuthorizedDashboardViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     monitoringFilterSnapshot.current = {
@@ -3191,6 +3276,7 @@ export function DashboardApp() {
         if (response.status === 401) {
           if (!active) return;
           setViewerAuthorization(null);
+          viewerIdentityRef.current = null;
           setViewerIdentity(null);
           setViewerAuthState("UNAUTHENTICATED");
           return;
@@ -3203,13 +3289,14 @@ export function DashboardApp() {
         const nextAuthState = viewerAuthStateFromResponse(response.status, identity);
         if (nextAuthState !== "AUTHENTICATED") {
           setViewerAuthorization(null);
+          viewerIdentityRef.current = null;
           setViewerIdentity(null);
           setViewerAuthState(nextAuthState);
           return;
         }
         setViewerAuthError(null);
         setViewerAuthorization(FEISHU_COOKIE_SESSION);
-        setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
+        applyViewerIdentity(identity);
         setViewerAuthState("AUTHENTICATED");
       })
       .catch(() => {
@@ -3220,111 +3307,68 @@ export function DashboardApp() {
     return () => {
       active = false;
     };
-  }, [viewerSessionCheckAttempt]);
+  }, [applyViewerIdentity, viewerSessionCheckAttempt]);
 
   const endViewerSession = useCallback(() => {
     void apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    clearProtectedDashboardData();
+    setDashboardSourcesReady(false);
+    setDashboardAvailability({ status: "idle" });
+    setViewerDataAccessBlocked(false);
     setViewerAuthorization(null);
+    viewerIdentityRef.current = null;
     setViewerIdentity(null);
     setViewerAuthError(null);
     setViewerAuthState("UNAUTHENTICATED");
-    setLoaded(null);
-    setTaxaLoaded(null);
-    setEpopLoaded(null);
-    setMovementLoaded(buildEmptyNoMovementV2LoadedData());
-    setSellerPerformanceLoaded(null);
-    setSellerReferenceLoaded(null);
-    setSpecialSellerLoaded(null);
-    setResponsibilityLoaded(null);
-    setBipagemLoaded(null);
-    setDamageLoaded(null);
-    setDashboardSourcesReady(false);
-    loadedDashboardDataViewerRef.current = null;
-    setDashboardAvailability({ status: "idle" });
-    setMonitoringV2Status("idle");
-    setMonitoringV2Message(null);
-    setCollectionRateV2State((current) => ({
-      ...current,
-      status: "idle",
-      records: [],
-      receivedCount: 0,
-      publicationId: null,
-      publicationIds: [],
-      publishedAt: null,
-      snapshotAsOf: null,
-      error: null,
-    }));
-    setNoMovementV2State((current) => ({
-      ...current,
-      status: "idle",
-      records: [],
-      receivedCount: 0,
-      publicationId: null,
-      updatedAt: null,
-      error: null,
-    }));
-    setPddCollectionFailureV2State((current) => ({
-      ...current,
-      status: "idle",
-      records: [],
-      receivedCount: 0,
-      publicationId: null,
-      publicationIds: [],
-      updatedAt: null,
-      publishedAt: null,
-      error: null,
-    }));
-    jtMonitoringV2RequestRef.current?.abort();
-    jtMonitoringV2RequestRef.current = null;
-    setJtMonitoringV2State((current) => ({
-      ...current,
-      status: "idle",
-      loading: false,
-      records: [],
-      totalAvailable: 0,
-      loadedCount: 0,
-      publicationId: null,
-      publicationIds: [],
-      publishedAt: null,
-      dateCountsSignature: null,
-      error: null,
-    }));
     setView("home");
     setShowUserControl(false);
-  }, []);
+  }, [clearProtectedDashboardData]);
+
+  const accessCheckInFlightRef = useRef(false);
+  const verifyCurrentAccess = useCallback(async () => {
+    if (!viewerAuthorization || accessCheckInFlightRef.current || document.visibilityState === "hidden") return;
+    accessCheckInFlightRef.current = true;
+    try {
+      const response = await apiFetch("/api/auth/me", { method: "GET", cache: "no-store" });
+      if (response.status === 401) {
+        endViewerSession();
+        return;
+      }
+      if (response.status === 403) {
+        clearProtectedDashboardData();
+        setViewerDataAccessBlocked(true);
+        return;
+      }
+      if (response.ok) {
+        const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
+        if (identity.authenticated && identity.is_active !== false) {
+          applyViewerIdentity(identity);
+        } else {
+          endViewerSession();
+        }
+      }
+    } catch {
+      // A temporary network issue does not invalidate a valid session or widen its scope.
+    } finally {
+      accessCheckInFlightRef.current = false;
+    }
+  }, [applyViewerIdentity, clearProtectedDashboardData, endViewerSession, viewerAuthorization]);
 
   useEffect(() => {
     if (!viewerAuthorization) return undefined;
-    let checking = false;
-    const verifyCurrentAccess = async () => {
-      if (checking || document.visibilityState === "hidden") return;
-      checking = true;
-      try {
-        const response = await apiFetch("/api/auth/me", { method: "GET", cache: "no-store" });
-        if (response.status === 401) {
-          endViewerSession();
-          return;
-        }
-        if (response.ok) {
-          const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
-          if (identity.authenticated && identity.is_active !== false) {
-            setViewerIdentity((current) => sameViewerIdentity(current, identity) ? current : identity);
-          }
-          else endViewerSession();
-        }
-      } catch {
-        // A temporary network issue does not invalidate an otherwise valid session.
-      } finally {
-        checking = false;
-      }
-    };
-    const interval = window.setInterval(() => void verifyCurrentAccess(), 60_000);
+    const interval = window.setInterval(() => void verifyCurrentAccess(), 30_000);
     window.addEventListener("focus", verifyCurrentAccess);
     return () => {
       window.clearInterval(interval);
       window.removeEventListener("focus", verifyCurrentAccess);
     };
-  }, [endViewerSession, viewerAuthorization]);
+  }, [verifyCurrentAccess, viewerAuthorization]);
+
+  useEffect(() => subscribeToProtectedApiAuthorizationFailure(() => {
+    clearProtectedDashboardData();
+    setViewerDataAccessBlocked(true);
+    void verifyCurrentAccess();
+  }), [clearProtectedDashboardData, verifyCurrentAccess]);
 
   const startFeishuLogin = useCallback(() => {
     setViewerAuthError(null);
@@ -3408,7 +3452,7 @@ export function DashboardApp() {
     setTaxaTableQuery("");
     setTaxaPage(1);
     resetResponsibilityFilters();
-  }, [resetResponsibilityFilters, responsibilityLoaded, taxaLoaded, viewerIdentity]);
+  }, [resetResponsibilityFilters, taxaLoaded, viewerIdentity]);
 
   const applyTaxaLoadedData = useCallback((data: TaxaLoadedData) => {
     setTaxaLoaded(data);
@@ -3925,7 +3969,7 @@ export function DashboardApp() {
   }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
 
   useEffect(() => {
-    if (view !== "monitoramento" || isFirstMileUnderReview || !viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) return undefined;
+    if (view !== "monitoramento" || !isFirstMileUnderReview || !viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady) return undefined;
 
     let active = true;
     const controller = new AbortController();
@@ -3944,12 +3988,23 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
+        const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
         try {
-          const published = await loadPublishedMonitoringWorkbook(
-            { dateFrom, dateTo },
-            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-            controller.signal,
-          );
+          const published = await loadCachedDashboardData({
+            identityKey: dashboardCacheIdentity,
+            sourceId: "collection_monitoring",
+            contractVersion: 1,
+            periodKey: `${dateFrom}:${dateTo}:unfiltered-rows`,
+            manifest: (signal) => readDashboardDataManifest({
+              sourceId: "collection_monitoring",
+              contractVersion: 1,
+              dateFrom,
+              dateTo,
+              publicationToken: currentDashboardPublicationToken,
+              fetcher: cacheFetcher,
+            }, signal),
+            load: (signal) => loadPublishedMonitoringWorkbook({ dateFrom, dateTo }, cacheFetcher, signal),
+          }, controller.signal);
           if (!active) return;
           if (published.rowCount === 0) {
             setLoaded(null);
@@ -4021,7 +4076,8 @@ export function DashboardApp() {
             ? cause
             : new MonitoringV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
           const authorizationFailed = loadError.message.startsWith("Sua sessão expirou") ||
-            loadError.message.includes("autorização ADMIN/matrix");
+            loadError.message.includes("autorização ADMIN/matrix") ||
+            loadError.message.includes("Sua regional ainda não foi identificada");
           if (authorizationFailed) setLoaded(null);
           setMonitoringV2Status(loadError.kind === "empty" ? "empty" : "error");
           setMonitoringV2Message(loadError.kind === "empty"
@@ -4041,11 +4097,11 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
+  }, [currentDashboardPublicationToken, dashboardCacheIdentity, dashboardSourcesReady, isFirstMileUnderReview, isAuthorizedDashboardViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
 
   useEffect(() => {
     if (view !== "taxa") return undefined;
-    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+    if (!viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady || !currentDashboardManifestReady) {
       return undefined;
     }
 
@@ -4079,12 +4135,23 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
+        const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
         try {
-          const published = await loadPublishedCollectionRateV2(
-            { dateFrom, dateTo },
-            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-            controller.signal,
-          );
+          const published = await loadCachedDashboardData({
+            identityKey: dashboardCacheIdentity,
+            sourceId: "collection_rate",
+            contractVersion: 2,
+            periodKey: `${dateFrom}:${dateTo}:unfiltered-rows`,
+            manifest: (signal) => readDashboardDataManifest({
+              sourceId: "collection_rate",
+              contractVersion: 2,
+              dateFrom,
+              dateTo,
+              publicationToken: currentDashboardPublicationToken,
+              fetcher: cacheFetcher,
+            }, signal),
+            load: (signal) => loadPublishedCollectionRateV2({ dateFrom, dateTo }, cacheFetcher, signal),
+          }, controller.signal);
           if (!active) return;
           setCollectionRateV2State((current) => ({
             ...current,
@@ -4124,11 +4191,11 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, dashboardSourcesReady, isMatrixAdminViewer, view, viewerAuthorization]);
+  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "movimentacao") return undefined;
-    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+    if (!viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady || !currentDashboardManifestReady) {
       return undefined;
     }
 
@@ -4153,11 +4220,20 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
+        const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
         try {
-          const snapshot = await loadCurrentNoMovementSnapshot(
-            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-            controller.signal,
-          );
+          const snapshot = await loadCachedDashboardData({
+            identityKey: dashboardCacheIdentity,
+            sourceId: "no_movement",
+            contractVersion: 2,
+            periodKey: "current-snapshot:unfiltered-rows",
+            manifest: (signal) => readDashboardDataManifest({
+              sourceId: "no_movement",
+              contractVersion: 2,
+              fetcher: cacheFetcher,
+            }, signal),
+            load: (signal) => loadCurrentNoMovementSnapshot(cacheFetcher, signal),
+          }, controller.signal);
           if (!active || controller.signal.aborted) return;
           applyMovementLoadedData(buildNoMovementV2LoadedData(snapshot));
           setNoMovementV2State((current) => ({
@@ -4199,11 +4275,11 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [applyMovementLoadedData, dashboardSourcesReady, isMatrixAdminViewer, view, viewerAuthorization]);
+  }, [applyMovementLoadedData, currentDashboardManifestReady, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "bipagem") return undefined;
-    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
+    if (!viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady || !currentDashboardManifestReady) {
       return undefined;
     }
 
@@ -4240,12 +4316,23 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
+        const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
         try {
-          const published = await loadPublishedPddCollectionFailure(
-            { dateFrom, dateTo },
-            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-            controller.signal,
-          );
+          const published = await loadCachedDashboardData({
+            identityKey: dashboardCacheIdentity,
+            sourceId: "pdd_collection_failure",
+            contractVersion: 2,
+            periodKey: `${dateFrom}:${dateTo}:unfiltered-rows`,
+            manifest: (signal) => readDashboardDataManifest({
+              sourceId: "pdd_collection_failure",
+              contractVersion: 2,
+              dateFrom,
+              dateTo,
+              publicationToken: currentDashboardPublicationToken,
+              fetcher: cacheFetcher,
+            }, signal),
+            load: (signal) => loadPublishedPddCollectionFailure({ dateFrom, dateTo }, cacheFetcher, signal),
+          }, controller.signal);
           if (!active) return;
           setPddCollectionFailureV2State((current) => ({
             ...current,
@@ -4285,12 +4372,12 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [dashboardSourcesReady, isMatrixAdminViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, t, view, viewerAuthorization]);
+  }, [currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, t, view, viewerAuthorization]);
 
   useEffect(() => {
-    if (view !== "sellers" || isFirstMileUnderReview) return undefined;
-    if (!viewerAuthorization || !isMatrixAdminViewer || !dashboardSourcesReady) {
-      if (!viewerAuthorization || !isMatrixAdminViewer) {
+    if (view !== "sellers" || !isFirstMileUnderReview) return undefined;
+    if (!viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady) {
+      if (!viewerAuthorization || !isAuthorizedDashboardViewer) {
         jtMonitoringV2RequestRef.current?.abort();
         jtMonitoringV2RequestRef.current = null;
       }
@@ -4331,13 +4418,23 @@ export function DashboardApp() {
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
           authorizationHeaders.set("authorization", viewerAuthorization);
         }
+        const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
         try {
-          const page = await loadJtMonitoringPage(
-            period,
-            0,
-            (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-            controller.signal,
-          );
+          const page = await loadCachedDashboardData({
+            identityKey: dashboardCacheIdentity,
+            sourceId: "jt_monitoring",
+            contractVersion: 1,
+            periodKey: `${period.dateFrom}:${period.dateTo}:page-0`,
+            manifest: (signal) => readDashboardDataManifest({
+              sourceId: "jt_monitoring",
+              contractVersion: 1,
+              dateFrom: period.dateFrom,
+              dateTo: period.dateTo,
+              publicationToken: currentDashboardPublicationToken,
+              fetcher: cacheFetcher,
+            }, signal),
+            load: (signal) => loadJtMonitoringPage(period, 0, cacheFetcher, signal),
+          }, controller.signal);
           if (!active) return;
           setJtMonitoringV2State((current) => ({
             ...current,
@@ -4384,13 +4481,13 @@ export function DashboardApp() {
       jtMonitoringV2RequestRef.current?.abort();
       if (jtMonitoringV2RequestRef.current) jtMonitoringV2RequestRef.current = null;
     };
-  }, [dashboardSourcesReady, isFirstMileUnderReview, isMatrixAdminViewer, jtMonitoringV2State.period.dateFrom, jtMonitoringV2State.period.dateTo, view, viewerAuthorization]);
+  }, [currentDashboardPublicationToken, dashboardCacheIdentity, dashboardSourcesReady, isFirstMileUnderReview, isAuthorizedDashboardViewer, jtMonitoringV2State.period, view, viewerAuthorization]);
 
   const loadMoreJtMonitoringV2 = useCallback(async () => {
     const currentState = jtMonitoringV2State;
     if (
       !viewerAuthorization ||
-      !isMatrixAdminViewer ||
+      !isAuthorizedDashboardViewer ||
       (currentState.status !== "ready" && !(currentState.status === "error" && currentState.loadedCount > 0)) ||
       currentState.loading ||
       currentState.loadedCount >= currentState.totalAvailable ||
@@ -4407,13 +4504,23 @@ export function DashboardApp() {
     if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
       authorizationHeaders.set("authorization", viewerAuthorization);
     }
+    const cacheFetcher = (path: string, init?: RequestInit) => apiFetch(path, { ...init, headers: authorizationHeaders });
     try {
-      const page = await loadJtMonitoringPage(
-        currentState.period,
-        offset,
-        (path, init) => apiFetch(path, { ...init, headers: authorizationHeaders }),
-        controller.signal,
-      );
+      const page = await loadCachedDashboardData({
+        identityKey: dashboardCacheIdentity,
+        sourceId: "jt_monitoring",
+        contractVersion: 1,
+        periodKey: `${currentState.period.dateFrom}:${currentState.period.dateTo}:page-${offset}`,
+        manifest: (signal) => readDashboardDataManifest({
+          sourceId: "jt_monitoring",
+          contractVersion: 1,
+          dateFrom: currentState.period.dateFrom,
+          dateTo: currentState.period.dateTo,
+          publicationToken: currentDashboardPublicationToken,
+          fetcher: cacheFetcher,
+        }, signal),
+        load: (signal) => loadJtMonitoringPage(currentState.period, offset, cacheFetcher, signal),
+      }, controller.signal);
       if (controller.signal.aborted) return;
       if (
         page.offset !== currentState.loadedCount ||
@@ -4457,7 +4564,7 @@ export function DashboardApp() {
     } finally {
       if (jtMonitoringV2RequestRef.current === controller) jtMonitoringV2RequestRef.current = null;
     }
-  }, [isMatrixAdminViewer, jtMonitoringV2State, viewerAuthorization]);
+  }, [currentDashboardPublicationToken, dashboardCacheIdentity, isAuthorizedDashboardViewer, jtMonitoringV2State, viewerAuthorization]);
 
   const loadFile = useCallback(async (file: File) => {
     setError(null);
@@ -4564,7 +4671,7 @@ export function DashboardApp() {
     } finally {
       setTaxaLoading(false);
     }
-  }, [applyTaxaLoadedData, responsibilityLoaded, taxaLoaded]);
+  }, [applyTaxaLoadedData, taxaLoaded]);
 
   const loadEpopFile = useCallback(async (file: File) => {
     setError(null);
@@ -4885,7 +4992,7 @@ export function DashboardApp() {
     return [...groups.values()]
       .filter((row) => row.orderVolume > 0 || row.awaiting > 0 || row.collected > 0)
       .sort((a, b) => b.orderVolume - a.orderVolume || a.region.localeCompare(b.region, dashboardLocale(language), { numeric: true }));
-  }, [language, loaded, monitoringSummaryPeriod, monitoringSummaryRows, responsibilityLoaded, selectedStatuses]);
+  }, [language, loaded, monitoringSummaryPeriod, monitoringSummaryRows, selectedStatuses]);
 
   const monitoringRmSummary = useMemo<MonitoringRmSummaryRow[]>(() => {
     if (!loaded?.parsed.baseColumn) return [];
@@ -5030,7 +5137,7 @@ export function DashboardApp() {
       })
       .filter((item) => item.total > 0)
       .sort((a, b) => b.total - a.total || a.region.localeCompare(b.region, "pt-BR"));
-  }, [loaded, filteredRows, responsibilityLoaded, selectedStatuses]);
+  }, [loaded, filteredRows, selectedStatuses]);
 
   const tableRows = useMemo(() => {
     if (!loaded) return [];
@@ -5078,7 +5185,7 @@ export function DashboardApp() {
           a.origin.localeCompare(b.origin, "pt-BR", { numeric: true })
         );
       });
-  }, [loaded, dateStart, dateEnd, filteredRows, responsibilityLoaded, selectedStatuses, tableQuery]);
+  }, [loaded, dateStart, dateEnd, filteredRows, selectedStatuses, tableQuery]);
 
   const monitoringRegionOptions = useMemo(() => {
     if (!loaded?.parsed.baseColumn) return [];
@@ -6424,7 +6531,7 @@ export function DashboardApp() {
   };
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
-  const canManageActiveDataSource = viewerIdentity?.platform_role === "ADMIN" && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao" && view !== "bipagem";
+  const canManageActiveDataSource = isMatrixAdminViewer && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao" && view !== "bipagem";
   const noMovementHasPublishedRecords = noMovementV2State.status === "ready" && noMovementV2State.receivedCount > 0;
   const noMovementAvailabilityText = noMovementAvailabilityMessage(noMovementV2State.status, noMovementV2State.publicationId);
   const noMovementV2Diagnostic = isMatrixAdminViewer ? (
@@ -7168,7 +7275,8 @@ export function DashboardApp() {
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
             <UserProfileMenu
               identity={viewerIdentity}
-              isAdmin={viewerIdentity.platform_role === "ADMIN"}
+              canManageDataSources={isMatrixAdminViewer}
+              canManageUsers={viewerIdentity.can_manage_users === true}
               theme={theme}
               onToggleTheme={toggleTheme}
               onOpenDataSources={() => { setView("data-foundation"); setShowUserControl(false); }}
@@ -7179,6 +7287,21 @@ export function DashboardApp() {
           </div>
         </div>
       </header>
+
+      {viewerAuthorization && viewerDataAccessBlocked && viewerIdentity?.organizational_scope !== "unknown" ? (
+        <section className="dashboard-source-availability unavailable" role="alert" data-testid="operational-data-access-revoked">
+          <p>{t("A autorização dos dados operacionais foi negada. Sua sessão continua ativa; solicite a verificação das permissões.")}</p>
+        </section>
+      ) : null}
+
+      {viewerAuthorization &&
+      viewerIdentity.organizational_scope === "unknown" &&
+      !viewerIdentity.effective_regions?.length &&
+      (view === "home" || !isFirstMileUnderReview) ? (
+        <section className="dashboard-source-availability unavailable" role="status" data-testid="regional-access-pending">
+          <p>{regionalAccessPendingMessage}</p>
+        </section>
+      ) : null}
 
       {view !== "home" || showUserControl ? (
         <div className="dashboard-back-row">
@@ -7218,7 +7341,7 @@ export function DashboardApp() {
       {dataSourceDialogId ? <DataSourceDialog
         config={DASHBOARD_DATA_SOURCES[dataSourceDialogId]}
         currentSource={dataSourceSummary}
-        canManage={viewerIdentity.platform_role === "ADMIN"}
+        canManage={isMatrixAdminViewer}
         onClose={() => setDataSourceDialogId(null)}
         onImported={(source: ManualDataSource) => {
           try {
@@ -7271,29 +7394,38 @@ export function DashboardApp() {
       /> : null}
 
       <main
-        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : "dashboard-main"}
         data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : view === "bipagem" ? "pdd-collection-failure-v2-dashboard-shell" : undefined}
-        data-v2-source={view === "movimentacao" && isMatrixAdminViewer ? "no_movement" : view === "taxa" && isMatrixAdminViewer ? "collection_rate" : view === "bipagem" && isMatrixAdminViewer ? "pdd_collection_failure" : undefined}
-        data-v2-status={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.status : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.status : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.status : undefined}
-        data-v2-period-start={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateFrom : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.period.dateFrom : undefined}
-        data-v2-period-end={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.period.dateTo : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.period.dateTo : undefined}
-        data-v2-record-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.receivedCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.receivedCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.receivedCount : undefined}
-        data-v2-column-count={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.columnCount : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.columnCount : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.columnCount : undefined}
-        data-v2-updated-at={view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.snapshotAsOf ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.updatedAt ?? undefined : undefined}
-        data-v2-error={view === "movimentacao" && isMatrixAdminViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isMatrixAdminViewer ? collectionRateV2State.error ?? undefined : view === "bipagem" && isMatrixAdminViewer ? pddCollectionFailureV2State.error ?? undefined : undefined}
+        data-v2-source={view === "movimentacao" && isAuthorizedDashboardViewer ? "no_movement" : view === "taxa" && isAuthorizedDashboardViewer ? "collection_rate" : view === "bipagem" && isAuthorizedDashboardViewer ? "pdd_collection_failure" : undefined}
+        data-v2-status={view === "movimentacao" && isAuthorizedDashboardViewer ? noMovementV2State.status : view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.status : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.status : undefined}
+        data-v2-period-start={view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.period.dateFrom : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.period.dateFrom : undefined}
+        data-v2-period-end={view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.period.dateTo : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.period.dateTo : undefined}
+        data-v2-record-count={view === "movimentacao" && isAuthorizedDashboardViewer ? noMovementV2State.receivedCount : view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.receivedCount : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.receivedCount : undefined}
+        data-v2-column-count={view === "movimentacao" && isAuthorizedDashboardViewer ? noMovementV2State.columnCount : view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.columnCount : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.columnCount : undefined}
+        data-v2-updated-at={view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.snapshotAsOf ?? undefined : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.updatedAt ?? undefined : undefined}
+        data-v2-error={view === "movimentacao" && isAuthorizedDashboardViewer ? noMovementV2State.error ?? undefined : view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.error ?? undefined : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.error ?? undefined : undefined}
       >
-        {view === "home" ? (
-          showUserControl && viewerIdentity.platform_role === "ADMIN" ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
+        {isFirstMileUnderReview && !isAuthorizedDashboardViewer ? (
+          <section className="dashboard-source-availability unavailable" role="alert" data-testid="regional-data-access-pending">
+            <div className="dashboard-intro">
+              <div><div className="eyebrow"><ShieldCheck size={15} /> {t("Acesso aos dados operacionais")}</div><h1>{dashboardCards.find((card) => card.id === view)?.title ?? t("Painel")}</h1></div>
+            </div>
+            <p>{regionalAccessPendingMessage}</p>
+          </section>
+        ) : view === "home" ? (
+          showUserControl && viewerIdentity.can_manage_users === true ? <UserControl t={t} /> : <AssistantHome t={t} onSelect={(nextView) => {
             setError(null);
             setView(nextView);
             setShowUserControl(false);
           }} />
         ) : view === "data-foundation" ? (
-          viewerIdentity.platform_role === "ADMIN" ? <DataFoundationAdmin
+          isMatrixAdminViewer ? <DataFoundationAdmin
             t={t}
-            canImport={viewerIdentity.organizational_scope === "matrix" && viewerIdentity.role === "matrix"}
-          /> : null
-        ) : isFirstMileUnderReview && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? (
+            canImport={isMatrixAdminViewer}
+          /> : <section className="dashboard-source-availability unavailable" role="alert" data-testid="matrix-administration-restricted">
+            <p>{t("A administração das fontes compartilhadas exige autorização administrativa de matriz.")}</p>
+          </section>
+        ) : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? (
           <DashboardUnderDevelopment
             title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
             description={dashboardCards.find((card) => card.id === view)?.description ?? ""}
@@ -7305,12 +7437,12 @@ export function DashboardApp() {
           <PendingLastMileDashboard
             title={pendingLastMilePanel.title}
             onOpenSource={() => setDataSourceDialogId(SOURCE_ID_BY_VIEW[view] ?? null)}
-            canManageSource={viewerIdentity.platform_role === "ADMIN"}
+            canManageSource={isMatrixAdminViewer}
             t={t}
           />
         ) : view === "damage" ? (
           !damageLoaded ? (
-            <EmptyDashboardPanel loading={damageLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "damage", files: [file] })} inputId="damage-upload" t={t} />
+            <EmptyDashboardPanel loading={damageLoading} error={error} canManageUpload={isMatrixAdminViewer} onDrop={(file) => queueUpload({ kind: "damage", files: [file] })} inputId="damage-upload" t={t} />
           ) : (
             <>
               <section className="dashboard-intro">
@@ -7349,10 +7481,10 @@ export function DashboardApp() {
             </>
           )
         ) : view === "bipagem" ? (
-          !isMatrixAdminViewer ? (
+          !isAuthorizedDashboardViewer ? (
             <section className="dashboard-source-availability unavailable" role="alert" data-testid="pdd-v2-restricted">
               <div className="dashboard-intro"><div><div className="eyebrow"><CircleAlert size={15} /> {t("QUALIDADE DA COLETA")}</div><h1>{t("Falha na coleta PDD")}</h1></div></div>
-              <p>{t("A consulta deste dashboard exige perfil ADMIN com escopo matrix.")}</p>
+              <p>{t("Aguardando liberação do acesso operacional pela administração.")}</p>
             </section>
           ) : (
             <PddCollectionFailureV2Dashboard
@@ -7373,7 +7505,7 @@ export function DashboardApp() {
           !bipagemLoaded ? (
             <>
               {pddCollectionFailureV2Diagnostic}
-              <EmptyDashboardPanel loading={bipagemLoading} error={error} canManageUpload={viewerIdentity.platform_role === "ADMIN"} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
+              <EmptyDashboardPanel loading={bipagemLoading} error={error} canManageUpload={isMatrixAdminViewer} onDrop={(file) => queueUpload({ kind: "bipagem", files: [file] })} inputId="bipagem-upload" t={t} />
             </>
           ) : (
             <>
@@ -7588,12 +7720,12 @@ export function DashboardApp() {
             </>
           )
         ) : view === "movimentacao" ? (
-          !isMatrixAdminViewer ? (
+          !isAuthorizedDashboardViewer ? (
             <section className="dashboard-source-availability unavailable" role="alert" data-testid="no-movement-v2-restricted">
               <div className="dashboard-intro">
                 <div><div className="eyebrow"><Activity size={15} /> {t("SEM MOVIMENTAÇÃO")}</div><h1>{t("Sem movimentação")}</h1></div>
               </div>
-              <p>{t("A consulta deste dashboard exige perfil ADMIN com escopo matrix.")}</p>
+              <p>{t("Aguardando liberação do acesso operacional pela administração.")}</p>
             </section>
           ) : !movementLoaded ? (
             <section className="dashboard-source-availability" role="status" aria-live="polite">
@@ -8035,7 +8167,7 @@ export function DashboardApp() {
               </section>
 
               <footer className="dashboard-footer">
-                <span><ShieldCheck size={15} /> {t("Fonte exclusiva Data Foundation V2 · acesso ADMIN/matrix")}</span>
+                <span><ShieldCheck size={15} /> {t("Fonte exclusiva Data Foundation V2 · dados limitados ao escopo autorizado")}</span>
                 <span>{noMovementHasPublishedRecords && movementLoaded.collectionDate
                   ? t("Data da coleta: {date} · Publicada em: {publishedAt}", { date: formatDate(movementLoaded.collectionDate), publishedAt: movementLoaded.publishedAt ? formatDateTime(movementLoaded.publishedAt) : "—" })
                   : t(noMovementAvailabilityText)}</span>
@@ -8092,7 +8224,7 @@ export function DashboardApp() {
                   <h2>{t(sellerManualSource ? "Fonte J&T publicada" : "Fonte J&T não publicada")}</h2>
                   <p>{t("Este é o arquivo abastecido diariamente para calcular aguardando coleta, processados e percentual de processamento.")}</p>
                 </div>
-                {viewerIdentity.platform_role === "ADMIN" ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("sellerPerformance")} disabled={sellerLoading}>
+                {isMatrixAdminViewer ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("sellerPerformance")} disabled={sellerLoading}>
                   <Database size={18} /> {t(sellerManualSource ? "Gerenciar fonte J&T" : "Adicionar fonte J&T")}
                 </button> : null}
               </div>
@@ -8137,7 +8269,7 @@ export function DashboardApp() {
                     <p>{t("Refine os dados do monitoramento para uma análise mais precisa.")}</p>
                   </div>
                   <div className="seller-file-actions">
-                    {viewerIdentity.platform_role === "ADMIN" ? <label className="secondary-upload-button" htmlFor="seller-list-upload"><Upload size={15} /> {t("Lista oficial de sellers")}</label> : null}
+                    {isMatrixAdminViewer ? <label className="secondary-upload-button" htmlFor="seller-list-upload"><Upload size={15} /> {t("Lista oficial de sellers")}</label> : null}
                     <button
                       type="button"
                       className="reset-button"
@@ -8685,7 +8817,7 @@ export function DashboardApp() {
             <>
               <section className="dashboard-intro"><div><div className="eyebrow"><Check size={15} /> EPOP / ePOD</div><h1>{t("Cobertura EPOP")}</h1><p>{t("Carregue o relatório EPOP para acompanhar a cobertura de comprovantes TikTok.")}</p></div></section>
               {error ? <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{t(error)}</span><button type="button" onClick={() => setError(null)}><X size={16} /></button></div> : null}
-              <div className={`filters-card upload-ready-card${epopLoading ? " loading" : ""}`}><div className="upload-ready-icon"><FileSpreadsheet size={26} /></div><div><span className="card-eyebrow">EPOP / ePOD</span><h2>{epopLoading ? t("Processando relatório EPOP...") : t("Publique o relatório EPOP")}</h2><p>{t("A taxa usa somente sellers TikTok elegíveis: regional preenchida, base ativa no RJ, ID válido e quantidade coletada maior que zero.")}</p></div>{viewerIdentity.platform_role === "ADMIN" ? <label className="primary-upload-button" htmlFor="epop-upload"><Upload size={18} />{t("Selecionar planilha")}</label> : null}</div>
+              <div className={`filters-card upload-ready-card${epopLoading ? " loading" : ""}`}><div className="upload-ready-icon"><FileSpreadsheet size={26} /></div><div><span className="card-eyebrow">EPOP / ePOD</span><h2>{epopLoading ? t("Processando relatório EPOP...") : t("Publique o relatório EPOP")}</h2><p>{t("A taxa usa somente sellers TikTok elegíveis: regional preenchida, base ativa no RJ, ID válido e quantidade coletada maior que zero.")}</p></div>{isMatrixAdminViewer ? <label className="primary-upload-button" htmlFor="epop-upload"><Upload size={18} />{t("Selecionar planilha")}</label> : null}</div>
             </>
           ) : (() => {
             const rows = epopLoaded.records.filter((row) => row.date >= epopDateStart && row.date <= epopDateEnd && epopSelectedRegions.has(row.region) && epopSelectedBases.has(row.base) && selectedRms.has(responsibilityForBase(responsibilityLoaded, row.base).rm) && selectedRgms.has(responsibilityForBase(responsibilityLoaded, row.base).rgm));
@@ -8797,7 +8929,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
             </>;
           })()
         ) : view === "taxa" ? (
-          isMatrixAdminViewer ? (
+          isAuthorizedDashboardViewer ? (
             <>
               <section className="dashboard-intro">
                 <div>
@@ -9096,7 +9228,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <h2>{taxaLoading ? t("Buscando última atualização...") : t("Publique o Excel de taxa")}</h2>
                   <p>{t("Na primeira carga, selecione até duas planilhas. Depois, envie o arquivo diário: o histórico permanece salvo e somente datas repetidas são atualizadas.")}</p>
                 </div>
-                {viewerIdentity.platform_role === "ADMIN" ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("taxa")} disabled={taxaLoading}>
+                {isMatrixAdminViewer ? <button className="primary-upload-button" type="button" onClick={() => setDataSourceDialogId("taxa")} disabled={taxaLoading}>
                   <Upload size={18} />
                   {taxaLoading ? t("Processando…") : t("Selecionar planilha(s)")}
                 </button> : null}
@@ -9682,25 +9814,25 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
             </>
           )
         ) : !loaded ||
-          (isMatrixAdminViewer && loaded.sourceType !== "DATA_FOUNDATION_V2") ||
-          (loaded.sourceType === "DATA_FOUNDATION_V2" && !isMatrixAdminViewer) ? (
+          (isAuthorizedDashboardViewer && loaded.sourceType !== "DATA_FOUNDATION_V2") ||
+          (loaded.sourceType === "DATA_FOUNDATION_V2" && !isAuthorizedDashboardViewer) ? (
           <EmptyDashboardPanel
-            loading={isMatrixAdminViewer ? monitoringV2Status === "loading" || monitoringV2Status === "idle" : loading}
-            error={isMatrixAdminViewer ? (monitoringV2Status === "error" ? monitoringV2Message : null) : error}
-            canManageUpload={!isMatrixAdminViewer && viewerIdentity.platform_role === "ADMIN"}
+            loading={isAuthorizedDashboardViewer ? monitoringV2Status === "loading" || monitoringV2Status === "idle" : loading}
+            error={isAuthorizedDashboardViewer ? (monitoringV2Status === "error" ? monitoringV2Message : null) : error}
+            canManageUpload={false}
             onDrop={(file) => queueUpload({ kind: "monitoring", files: [file] })}
             onAddSource={() => setDataSourceDialogId("monitoring")}
             inputId="monitoring-upload"
-            description={isMatrixAdminViewer ? "Este painel consulta a publicação vigente de Monitoramento de Coleta na Data Foundation V2." : undefined}
-            sourceLabel={isMatrixAdminViewer ? "DATA FOUNDATION V2" : undefined}
-            emptyTitle={isMatrixAdminViewer && monitoringV2Status === "empty" ? "Sem dados publicados para a data selecionada" : undefined}
-            emptyDescription={isMatrixAdminViewer && monitoringV2Status === "empty" ? monitoringV2Message ?? "Sem dados publicados para a data selecionada" : undefined}
-            loadingDescription={isMatrixAdminViewer ? "Consultando a publicação vigente da Data Foundation V2…" : undefined}
-            periodStart={isMatrixAdminViewer ? monitoringV2PeriodStart : undefined}
-            periodEnd={isMatrixAdminViewer ? monitoringV2PeriodEnd : undefined}
-            onPeriodStartChange={isMatrixAdminViewer ? setMonitoringV2PeriodStart : undefined}
-            onPeriodEndChange={isMatrixAdminViewer ? setMonitoringV2PeriodEnd : undefined}
-            onRetry={isMatrixAdminViewer ? () => setMonitoringV2RetryKey((key) => key + 1) : undefined}
+            description={isAuthorizedDashboardViewer ? "Este painel consulta a publicação vigente de Monitoramento de Coleta na Data Foundation V2." : undefined}
+            sourceLabel={isAuthorizedDashboardViewer ? "DATA FOUNDATION V2" : undefined}
+            emptyTitle={isAuthorizedDashboardViewer && monitoringV2Status === "empty" ? "Sem dados publicados para a data selecionada" : undefined}
+            emptyDescription={isAuthorizedDashboardViewer && monitoringV2Status === "empty" ? monitoringV2Message ?? "Sem dados publicados para a data selecionada" : undefined}
+            loadingDescription={isAuthorizedDashboardViewer ? "Consultando a publicação vigente da Data Foundation V2…" : undefined}
+            periodStart={isAuthorizedDashboardViewer ? monitoringV2PeriodStart : undefined}
+            periodEnd={isAuthorizedDashboardViewer ? monitoringV2PeriodEnd : undefined}
+            onPeriodStartChange={isAuthorizedDashboardViewer ? setMonitoringV2PeriodStart : undefined}
+            onPeriodEndChange={isAuthorizedDashboardViewer ? setMonitoringV2PeriodEnd : undefined}
+            onRetry={isAuthorizedDashboardViewer ? () => setMonitoringV2RetryKey((key) => key + 1) : undefined}
             t={t}
           />
         ) : (

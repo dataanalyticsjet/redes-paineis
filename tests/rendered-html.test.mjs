@@ -100,12 +100,12 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(route, /async def read_workbook/);
   assert.match(route, /async def write_workbook/);
   assert.match(route, /Depends\(get_current_viewer\)/);
-  assert.match(route, /Depends\(require_admin\)/);
+  assert.match(route, /Depends\(require_matrix_admin\)/);
   assert.match(source, /onDataSource=\{canManageActiveDataSource && activeDataSourceId \? \(\) => setDataSourceDialogId\(activeDataSourceId\) : undefined\}/);
-  assert.match(source, /loaded\.sourceType === "DATA_FOUNDATION_V2" && !isMatrixAdminViewer/);
+  assert.match(source, /loaded\.sourceType === "DATA_FOUNDATION_V2" && !isAuthorizedDashboardViewer/);
   assert.match(source, /className="primary-upload-button" type="button" onClick=\{\(\) => setDataSourceDialogId\("taxa"\)\}/);
   assert.doesNotMatch(source, /view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE/);
-  assert.match(source, /canManage=\{viewerIdentity\.platform_role === "ADMIN"\}/);
+  assert.match(source, /canManage=\{isMatrixAdminViewer\}/);
   assert.match(route, /save_workbook/);
   assert.match(route, /get_workbook/);
   assert.match(localWorkbooks, /HISTORY_KINDS/);
