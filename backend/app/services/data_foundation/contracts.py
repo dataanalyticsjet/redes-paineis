@@ -326,11 +326,31 @@ COLLECTION_RATE_V2_CONTRACT = SourceContract(
     expected_sample_rows=None,
 )
 
+COLLECTION_RATE_V3_CONTRACT = SourceContract(
+    source_id="collection_rate",
+    display_name="Taxa de Coleta",
+    workbook_name="taxa_coleta_mensal_validacao.xlsx",
+    sheet_name="Dados",
+    header_row=1,
+    version=3,
+    history_policy="DAILY_REPLACE_DATES",
+    grain_description=(
+        "Uma linha por linha física da aba Dados da exportação mensal oficial JMS; "
+        "cada data presente substitui somente sua partição diária. O horário da "
+        "primeira coluna é preservado, e a data da partição é derivada desse campo. "
+        "A identificação organizacional usa exclusivamente correspondência única "
+        "exata ou normalizada de forma conservadora com o DoomsDay publicado."
+    ),
+    columns=_COLLECTION_RATE,
+    expected_sample_rows=None,
+)
+
 CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
     (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
 }
 CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CONTRACT
 CONTRACT_VERSIONS[("collection_rate", 2)] = COLLECTION_RATE_V2_CONTRACT
+CONTRACT_VERSIONS[("collection_rate", 3)] = COLLECTION_RATE_V3_CONTRACT
 
 
 def get_contract(source_id: str, version: int | None = None) -> SourceContract:

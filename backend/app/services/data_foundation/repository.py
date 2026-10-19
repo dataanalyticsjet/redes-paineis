@@ -49,6 +49,7 @@ FACT_TABLES_BY_VERSION: dict[tuple[str, int], str] = {
 }
 FACT_TABLES_BY_VERSION[("pdd_collection_failure", 2)] = "fact_pdd_collection_failure_v2"
 FACT_TABLES_BY_VERSION[("collection_rate", 2)] = "fact_collection_rate_v2"
+FACT_TABLES_BY_VERSION[("collection_rate", 3)] = "fact_collection_rate_v3"
 
 
 def fact_table_for_contract(source_id: str, contract_version: int | None = None) -> str:
@@ -822,6 +823,8 @@ def publish_import_job(
         elif source_id == "pdd_collection_failure" and contract.version == 2:
             snapshot_as_of = summary.bot_executed_at
         elif source_id == "collection_rate" and contract.version == 2:
+            snapshot_as_of = summary.bot_executed_at
+        elif source_id == "collection_rate" and contract.version == 3:
             snapshot_as_of = summary.bot_executed_at
         connection.execute(text("""
             INSERT INTO source_publications

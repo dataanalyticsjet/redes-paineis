@@ -916,6 +916,21 @@ _COLLECTION_RATE_V2_RATE_FIELDS = (
     "collection_rate_reported", "collection_on_time_rate_reported",
     "punctuality_rate_pending", "seller_collection_rate_pending",
 )
+_COLLECTION_RATE_V3_SOURCE_FIELDS = (
+    "datetime", "proxyAreaName", "pickNetworkName", "orderSourcename", "expressTypeName",
+    "totalCount", "shouldTakingNum", "cancelTotalCount", "pickRateTotal", "pickcount",
+    "nopickcount", "agingNoTakingNum", "timelyTakingNum", "timelyPickRateTotal",
+    "timelyTryTakingNum", "timelyRate", "averageTakingNum", "problemNum", "noProblemNum",
+    "shopRate", "shouldShopNum", "noShouldShopNum",
+)
+_COLLECTION_RATE_V3_PENDING_FIELDS = (
+    "agingNoTakingNum", "timelyTryTakingNum", "timelyRate", "averageTakingNum",
+    "shopRate", "shouldShopNum", "noShouldShopNum",
+)
+_COLLECTION_RATE_V3_RATE_KEYS = (
+    "collection_rate", "collection_on_time_rate", "collection_rate_with_attempts",
+    "seller_collection_rate",
+)
 
 
 def _collection_rate_v2_value(
@@ -1162,6 +1177,270 @@ def _parse_collection_rate_v2_workbook(
     return summary
 
 
+def _parse_collection_rate_v3_workbook(
+    content: bytes,
+    contract: SourceContract,
+    mapping: MappingResolver,
+    summary: PreviewSummary,
+    on_valid_row: Callable[[ValidImportRow], None] | None,
+) -> PreviewSummary:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+    except (zipfile.BadZipFile, OSError):
+        raise WorkbookValidationError("workbook_file_invalid") from None
+
+    with archive:
+        if sum(info.file_size for info in archive.infolist()) > MAX_UNCOMPRESSED_WORKBOOK_BYTES:
+            raise WorkbookValidationError("workbook_uncompressed_size_exceeded", 413)
+        if any(info.filename.startswith("/") or ".." in PurePosixPath(info.filename).parts for info in archive.infolist()):
+            raise WorkbookValidationError("workbook_archive_path_invalid")
+        sheet_paths = _sheet_paths(archive)
+        normalized_sheets = {_metadata_header_key(name): path for name, path in sheet_paths.items()}
+        if set(normalized_sheets) != {"dados", "execucao", "dicionario"}:
+            summary.add_workbook_error("collection_rate_required_sheets_invalid")
+            return summary
+
+        shared = _shared_strings(archive)
+        date_styles = _date_style_ids(archive)
+        uses_1904_epoch = _date_1904(archive)
+        data_rows = iter(_iter_sheet_rows(archive, normalized_sheets["dados"], shared, date_styles))
+        try:
+            header_row_no, header_cells = next(data_rows)
+        except StopIteration:
+            summary.add_workbook_error("workbook_header_missing")
+            return summary
+        if header_row_no != contract.header_row:
+            summary.add_workbook_error("workbook_header_row_mismatch")
+            return summary
+        try:
+            _pdd_header_indexes(header_cells, contract.headers, error_code="workbook_header_mismatch")
+        except WorkbookValidationError as error:
+            summary.add_workbook_error(error.code)
+            return summary
+
+        execution_headers, execution_rows = _pdd_metadata_rows(
+            archive, normalized_sheets["execucao"], shared, date_styles
+        )
+        execution_columns = {
+            "bot_name": "nomedobot",
+            "executed_at": "dataehorariodacoleta",
+            "period_start": "datainicialconsultada",
+            "period_end": "datafinalconsultada",
+            "record_count": "totalderegistros",
+            "page_count": "totaldepaginas",
+            "status": "status",
+            "duration": "duracaosegundos",
+            "method": "metododecoleta",
+            "task_id": "iddatarefajms",
+        }
+        required_execution_keys = set(execution_columns) - {"page_count", "task_id"}
+        if not execution_rows or any(execution_columns[key] not in execution_headers for key in required_execution_keys):
+            summary.add_workbook_error("collection_rate_execution_metadata_invalid")
+            return summary
+        execution_indexes = {
+            key: execution_headers[header_key]
+            for key, header_key in execution_columns.items()
+            if header_key in execution_headers
+        }
+        execution_records = [
+            _metadata_row(cells, execution_indexes, date_styles, uses_1904_epoch)
+            for cells in execution_rows
+        ]
+        parsed_records = [
+            (record, _collection_rate_execution_datetime(record.get("executed_at")))
+            for record in execution_records
+        ]
+        if any(executed_at is None for _record, executed_at in parsed_records):
+            summary.add_workbook_error("collection_rate_execution_metadata_invalid")
+            return summary
+        latest_execution_at = max(
+            executed_at for _record, executed_at in parsed_records if executed_at is not None
+        )
+        if sum(executed_at == latest_execution_at for _record, executed_at in parsed_records) != 1:
+            summary.add_workbook_error("collection_rate_execution_metadata_ambiguous")
+            return summary
+        execution = next(record for record, executed_at in parsed_records if executed_at == latest_execution_at)
+        execution_name = _metadata_header_key(execution.get("bot_name"))
+        execution_status = _metadata_header_key(execution.get("status"))
+        execution_method = _metadata_header_key(execution.get("method"))
+        execution_count = _nonnegative_metadata_integer(execution.get("record_count"))
+        execution_pages = _nonnegative_metadata_integer(execution.get("page_count"))
+        try:
+            execution_duration = Decimal(str(execution.get("duration")).strip())
+        except (InvalidOperation, ValueError, AttributeError):
+            execution_duration = None
+        period_start = _parse_metadata_date(execution.get("period_start"))
+        period_end = _parse_metadata_date(execution.get("period_end"))
+        period_end_datetime = _parse_metadata_datetime(execution.get("period_end"))
+        if (
+            execution_name != "taxadecoleta"
+            or execution_status not in {"sucesso", "success", "concluido", "concluida"}
+            or execution_method not in {"exportacaooficialjms", "jms"}
+            or execution_count is None
+            or execution_duration is None
+            or not execution_duration.is_finite()
+            or execution_duration < 0
+            or period_start is None
+            or period_end is None
+            or period_start > period_end
+            or (execution_pages is not None and execution_count > 0 and (execution_pages < 1 or execution_pages > execution_count))
+        ):
+            summary.add_workbook_error("collection_rate_execution_reconciliation_mismatch")
+            return summary
+
+        task_id = execution.get("task_id")
+        if isinstance(task_id, Decimal) and task_id.is_finite() and task_id == task_id.to_integral_value():
+            summary.bot_execution_id = format(task_id.quantize(Decimal(1)), "f")
+        elif isinstance(task_id, str) and task_id.strip():
+            summary.bot_execution_id = task_id.strip()
+
+        dictionary_headers, dictionary_rows = _pdd_metadata_rows(
+            archive, normalized_sheets["dicionario"], shared, date_styles
+        )
+        dictionary_columns = {
+            "source": "campoapi",
+            "translation": "titulooficialjms",
+            "description": "descricaoemportugues",
+            "status": "statusdeconfirmacaodacorrespondencia",
+        }
+        if any(key not in dictionary_headers for key in dictionary_columns.values()):
+            summary.add_workbook_error("collection_rate_dictionary_headers_invalid")
+            return summary
+        expected_dictionary = dict(zip(_COLLECTION_RATE_V3_SOURCE_FIELDS, contract.headers, strict=True))
+        observed_dictionary: dict[str, str] = {}
+        dictionary_confirmed = True
+        for cells in dictionary_rows:
+            source_cell = cells.get(dictionary_headers[dictionary_columns["source"]])
+            translation_cell = cells.get(dictionary_headers[dictionary_columns["translation"]])
+            status_cell = cells.get(dictionary_headers[dictionary_columns["status"]])
+            source = source_cell.value if source_cell else None
+            translation = translation_cell.value if translation_cell else None
+            status = _metadata_header_key(status_cell.value if status_cell else None)
+            if not isinstance(source, str) or not isinstance(translation, str) or source in observed_dictionary:
+                summary.add_workbook_error("collection_rate_dictionary_mapping_invalid")
+                return summary
+            observed_dictionary[source] = translation
+            dictionary_confirmed = dictionary_confirmed and "confirmad" in status
+        if list(observed_dictionary.items()) != list(expected_dictionary.items()):
+            summary.add_workbook_error("collection_rate_dictionary_mapping_invalid")
+            return summary
+        if not dictionary_confirmed:
+            summary.add_workbook_error("collection_rate_dictionary_identification_unconfirmed")
+            return summary
+
+        summary.semantic_warnings = [
+            f"{field}: significado operacional ou agregação pendente de validação no JMS"
+            for field in _COLLECTION_RATE_V3_PENDING_FIELDS
+        ]
+        exact_duplicates: set[bytes] = set()
+        negative_average_count = 0
+        last_data_date: date | None = None
+        for row_no, cells in data_rows:
+            summary.input_row_count += 1
+            errors: list[tuple[str | None, str]] = []
+            raw_identity = [
+                None if cells.get(index) is None else cells[index].value
+                for index in range(len(contract.columns))
+            ]
+            raw_key = json.dumps(
+                [str(value) if isinstance(value, Decimal) else value for value in raw_identity],
+                ensure_ascii=False, separators=(",", ":"), default=str,
+            ).encode("utf-8")
+            digest = hashlib.sha256(raw_key).digest()
+            if digest in exact_duplicates:
+                summary.exact_duplicate_count += 1
+            else:
+                exact_duplicates.add(digest)
+            if not cells or all(cell.value in (None, "") for cell in cells.values()):
+                errors.append((None, "empty_row"))
+            if any(cell.formula for cell in cells.values()):
+                errors.append((None, "formula_not_allowed"))
+            if any(cell.invalid for cell in cells.values()):
+                errors.append((None, "cell_value_invalid"))
+            if any(index >= len(contract.columns) and cell.value not in (None, "") for index, cell in cells.items()):
+                errors.append((None, "unexpected_column_value"))
+
+            values: dict[str, object] = {}
+            for index, column in enumerate(contract.columns):
+                value, error = _cell_as_value(cells.get(index), column, uses_1904_epoch)
+                if error:
+                    errors.append((column.key, error))
+                else:
+                    values[column.key] = value
+            for rate_key in _COLLECTION_RATE_V3_RATE_KEYS:
+                rate = values.get(rate_key)
+                if isinstance(rate, Decimal) and not Decimal(0) <= rate <= Decimal(1):
+                    errors.append((rate_key, "rate_out_of_range"))
+            deadline = values.get("deadline_at")
+            data_date = deadline.date() if isinstance(deadline, datetime) else None
+            if data_date is not None and (data_date < period_start or data_date > period_end):
+                errors.append(("deadline_at", "collection_rate_row_date_outside_execution_period"))
+            average = values.get("average_collection_delay_hours")
+            if isinstance(average, Decimal) and average < 0:
+                negative_average_count += 1
+
+            if errors:
+                summary.invalid_row_count += 1
+                for column_key, error_code in errors:
+                    summary.add_error(row_no, column_key, error_code)
+                continue
+
+            assert isinstance(deadline, datetime) and data_date is not None
+            last_data_date = max(last_data_date, data_date) if last_data_date else data_date
+            summary.valid_row_count += 1
+            date_key = data_date.isoformat()
+            summary.per_date_counts[date_key] = summary.per_date_counts.get(date_key, 0) + 1
+            base_name = values.get("source_base_name")
+            if isinstance(base_name, str) and base_name.strip():
+                exact = mapping.exact_base_name_candidates.get(base_name, ())
+                normalized = () if exact else mapping.normalized_base_name_candidates.get(normalize_mapping_name(base_name), ())
+                if exact:
+                    summary.exact_name_candidate_row_count += 1
+                elif normalized:
+                    summary.normalized_name_candidate_row_count += 1
+            resolved_code, resolution = _resolve_mapping(
+                contract.source_id, values, mapping, contract.version
+            )
+            if resolved_code is not None:
+                summary.mapped_row_count += 1
+            else:
+                summary.unmapped_row_count += 1
+                if resolution == "AMBIGUOUS":
+                    summary.ambiguous_row_count += 1
+                elif resolution == "MISSING_IDENTIFIER":
+                    summary.missing_identifier_row_count += 1
+                else:
+                    summary.no_mapping_match_row_count += 1
+            if on_valid_row:
+                on_valid_row(ValidImportRow(
+                    source_row_no=row_no,
+                    values=values,
+                    resolved_base_code=resolved_code,
+                    mapping_resolution=resolution,
+                ))
+
+        summary.bot_executed_at = latest_execution_at
+        summary.execution_period_start = period_start
+        summary.execution_period_end = period_end
+        summary.execution_page_count = execution_pages
+        if execution_count != summary.input_row_count:
+            summary.add_workbook_error("collection_rate_execution_row_count_mismatch")
+        if negative_average_count:
+            summary.semantic_warnings.append(
+                f"averageTakingNum: {negative_average_count} valor(es) negativo(s) preservado(s) para revisão"
+            )
+        if (
+            period_end_datetime is not None
+            and last_data_date == period_end
+            and latest_execution_at.date() == period_end
+            and period_end_datetime > latest_execution_at
+        ):
+            summary.semantic_warnings.append(
+                f"Último dia {period_end.isoformat()} pode estar incompleto: a execução ocorreu antes do fim da janela consultada"
+            )
+    return summary
+
+
 def _parse_pdd_v2_workbook(
     content: bytes,
     contract: SourceContract,
@@ -1340,6 +1619,8 @@ def parse_workbook(
         return _parse_pdd_v2_workbook(content, contract, mapping, summary, on_valid_row)
     if contract.source_id == "collection_rate" and contract.version == 2:
         return _parse_collection_rate_v2_workbook(content, contract, mapping, summary, on_valid_row)
+    if contract.source_id == "collection_rate" and contract.version == 3:
+        return _parse_collection_rate_v3_workbook(content, contract, mapping, summary, on_valid_row)
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(content))

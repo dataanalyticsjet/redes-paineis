@@ -64,7 +64,7 @@ test("dashboard availability checks only the latest publication metadata for eac
       },
     );
 
-    const contractVersion = ["collection_rate", "no_movement", "pdd_collection_failure"].includes(sourceId) ? 2 : 1;
+    const contractVersion = sourceId === "collection_rate" ? 3 : ["no_movement", "pdd_collection_failure"].includes(sourceId) ? 2 : 1;
     assert.equal(requestedPath, `/api/v2/data-sources/${sourceId}/publications?contract_version=${contractVersion}&limit=1&offset=0`);
     assert.equal(requestedInit?.method, "GET");
     assert.equal(requestedInit?.cache, "no-store");
@@ -105,14 +105,17 @@ test("dashboard availability keeps authorization and connection failures distinc
   );
 });
 
-test("Taxa V2 renders its published dashboard while unfinished First Mile panels remain in review", async () => {
+test("Taxa V3 renders its published dashboard while unfinished First Mile panels remain in review", async () => {
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
   const loader = await readFile(new URL("../src/features/dashboards/dashboard-availability.ts", import.meta.url), "utf8");
 
   assert.match(source, /isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" \? \(/);
   assert.match(source, /className=\{view === "home" \? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" \? "dashboard-main dashboard-main-under-development"/);
   assert.match(source, /if \(view !== "taxa"\) return undefined;\s+if \(!viewerAuthorization/);
-  assert.match(source, /loadPublishedCollectionRateV2\(/);
+  assert.match(source, /loadPublishedCollectionRateV3\(/);
+  assert.match(source, /Fonte operacional: exportação mensal oficial do JMS/);
+  assert.match(source, /currentDashboardAvailability\.status === "unavailable"/);
+  assert.match(source, /collectionRateV2State\.error \?\? "Sem dados publicados para a data selecionada"/);
   assert.match(source, /\) : view === "taxa" \? \(\s+isAuthorizedDashboardViewer \? \(/);
   assert.match(source, /data-testid="taxa-v2-kpi-grid"/);
   assert.match(source, /label=\{t\("Taxa com tentativa"\)\} value=\{t\("Pendente de validação"\)\}/);

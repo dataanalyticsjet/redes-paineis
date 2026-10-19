@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import create_engine, event, text
 
 from app.services.data_foundation.contracts import (
+    COLLECTION_RATE_V3_CONTRACT,
     COLLECTION_RATE_V2_CONTRACT,
     CONTRACTS,
     CONTRACT_VERSIONS,
@@ -270,6 +271,51 @@ def _xlsx_bytes(
             ("Execução", execution_headers, [execution_row], ["TEXT", "DATETIME", "DATE", "DATE", "INTEGER", "INTEGER", "TEXT", "DECIMAL"], None),
             ("Dicionário", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
         ]
+    elif contract.source_id == "collection_rate" and contract.version == 3:
+        data_headers = list(contract.headers)
+        execution_headers = [
+            "Nome do bot", "Data e horário da coleta", "Data inicial consultada",
+            "Data final consultada", "Total de registros", "Total de páginas",
+            "Status", "Duração (segundos)", "Método de coleta", "ID da tarefa JMS",
+        ]
+        execution_row = {
+            "Nome do bot": "Taxa de Coleta",
+            "Data e horário da coleta": datetime(2026, 10, 14, 11, 5, 22, 329733),
+            "Data inicial consultada": date(2026, 10, 13),
+            "Data final consultada": datetime(2026, 10, 14, 23, 59, 59),
+            "Total de registros": len(rows),
+            "Total de páginas": None,
+            "Status": "SUCESSO",
+            "Duração (segundos)": Decimal("13.963"),
+            "Método de coleta": "Exportação oficial JMS",
+            "ID da tarefa JMS": 10325519,
+        }
+        execution_row.update(execution_overrides or {})
+        source_fields = (
+            "datetime", "proxyAreaName", "pickNetworkName", "orderSourcename", "expressTypeName",
+            "totalCount", "shouldTakingNum", "cancelTotalCount", "pickRateTotal", "pickcount",
+            "nopickcount", "agingNoTakingNum", "timelyTakingNum", "timelyPickRateTotal",
+            "timelyTryTakingNum", "timelyRate", "averageTakingNum", "problemNum", "noProblemNum",
+            "shopRate", "shouldShopNum", "noShouldShopNum",
+        )
+        dictionary_headers = [
+            "Campo API", "Título oficial JMS", "Descrição em português",
+            "Status de confirmação da correspondência",
+        ]
+        dictionary_rows = [
+            {
+                "Campo API": source,
+                "Título oficial JMS": header,
+                "Descrição em português": "Correspondência confirmada no dicionário oficial.",
+                "Status de confirmação da correspondência": "Confirmada",
+            }
+            for source, header in zip(source_fields, contract.headers, strict=True)
+        ]
+        sheets = [
+            ("Dados", data_headers, rows, [column.kind for column in contract.columns], [column.key for column in contract.columns]),
+            ("Execução", execution_headers, [execution_row], ["TEXT", "DATETIME", "DATE", "DATETIME", "INTEGER", "INTEGER", "TEXT", "DECIMAL", "TEXT", "INTEGER"], None),
+            ("Dicionário", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
+        ]
     elif contract.source_id == "no_movement" and contract.version >= 2:
         data_headers = list(contract.headers)
         data_kinds = [column.kind for column in contract.columns]
@@ -408,6 +454,30 @@ def _collection_rate_v2_row(data_date: date, base_code: str, base_name: str | No
     return values
 
 
+def _collection_rate_v3_row(data_date: date, base_name: str | None) -> dict[str, object]:
+    values: dict[str, object] = {
+        "deadline_at": datetime.combine(data_date, datetime.min.time()),
+        "reported_region": "Regional informada JMS",
+        "source_base_name": base_name,
+        "order_origin": "Marketplace",
+        "product_type": "EXPRESS",
+        "average_collection_delay_hours": Decimal("1.25"),
+    }
+    for column in COLLECTION_RATE_V3_CONTRACT.columns:
+        if column.kind == "INTEGER":
+            values[column.key] = 0
+        elif column.kind == "DECIMAL":
+            values.setdefault(column.key, Decimal("0.5"))
+    values.update({
+        "order_quantity": 100,
+        "quantity_to_collect": 80,
+        "collected_quantity": 60,
+        "not_collected_quantity": 20,
+        "collected_on_time_quantity": 55,
+    })
+    return values
+
+
 def test_collection_rate_v2_contract_preserves_v1_and_uses_official_fingerprint():
     assert CONTRACTS["collection_rate"].version == 1
     assert len(CONTRACTS["collection_rate"].columns) == 22
@@ -455,6 +525,74 @@ def test_collection_rate_v2_parser_preserves_rows_and_uses_code_only_doomsday_ma
     assert summary.can_publish
 
 
+def test_collection_rate_v3_contract_has_22_official_fields_and_preserves_v1_v2():
+    v1 = CONTRACTS["collection_rate"]
+    assert v1.version == 1
+    assert len(v1.columns) == 22
+    assert CONTRACT_VERSIONS[("collection_rate", 3)] is COLLECTION_RATE_V3_CONTRACT
+    assert len(COLLECTION_RATE_V3_CONTRACT.columns) == 22
+    assert [column.key for column in COLLECTION_RATE_V3_CONTRACT.columns] == [column.key for column in v1.columns]
+    assert [column.header for column in COLLECTION_RATE_V3_CONTRACT.columns] == [column.header for column in v1.columns]
+    assert contract_sha256(COLLECTION_RATE_V3_CONTRACT).hex() == "bfef9de7b0f0b644cc0342ff28f1ae7d206092eb24805d38ee22a26b6fb81ae1"
+    assert len(COLLECTION_RATE_V2_CONTRACT.columns) == 28
+    assert contract_sha256(COLLECTION_RATE_V2_CONTRACT).hex() == "0868bd5df41a2cca1d581da7f2e4b429478b5c44e9b75a79744cc93029053482"
+
+
+def test_collection_rate_v3_parser_uses_unique_name_mapping_and_preserves_unresolved_rows():
+    rows = [
+        _collection_rate_v3_row(date(2026, 10, 13), "Base Norte"),
+        _collection_rate_v3_row(date(2026, 10, 13), "  BASE   NORTE "),
+        _collection_rate_v3_row(date(2026, 10, 14), "Base Sul"),
+        _collection_rate_v3_row(date(2026, 10, 14), "Base Nort"),
+        _collection_rate_v3_row(date(2026, 10, 14), None),
+    ]
+    rows[3]["average_collection_delay_hours"] = Decimal("-1")
+    resolved_rows: list[ValidImportRow] = []
+    resolver = MappingResolver(
+        map_version_id=uuid.UUID("12345678-1234-5678-1234-567812345678").bytes,
+        exact_base_name_candidates={"Base Norte": ("100",), "Base Sul": ("200", "201")},
+        normalized_base_name_candidates={"base norte": ("100",), "base sul": ("200", "201")},
+    )
+    summary = parse_workbook(
+        _xlsx_bytes(COLLECTION_RATE_V3_CONTRACT, rows),
+        COLLECTION_RATE_V3_CONTRACT,
+        resolver,
+        on_valid_row=resolved_rows.append,
+    )
+    assert summary.input_row_count == 5
+    assert summary.valid_row_count == 5
+    assert summary.invalid_row_count == 0
+    assert summary.per_date_counts == {"2026-10-13": 2, "2026-10-14": 3}
+    assert [row.mapping_resolution for row in resolved_rows] == [
+        "NAME_APPROVED", "NAME_APPROVED", "AMBIGUOUS", "UNMAPPED", "MISSING_IDENTIFIER",
+    ]
+    assert [row.resolved_base_code for row in resolved_rows] == ["100", "100", None, None, None]
+    assert resolved_rows[-1].values["reported_region"] == "Regional informada JMS"
+    assert summary.semantic_warnings.count("timelyTryTakingNum: significado operacional ou agregação pendente de validação no JMS") == 1
+    assert any("averageTakingNum: 1 valor(es) negativo(s) preservado(s)" in warning for warning in summary.semantic_warnings)
+    assert any("Último dia 2026-10-14 pode estar incompleto" in warning for warning in summary.semantic_warnings)
+    assert summary.can_publish
+
+
+def test_official_collection_rate_v3_monthly_workbook_sample_when_requested():
+    workbook_path = os.environ.get("TAXA_RATE_V3_VALIDATION_WORKBOOK")
+    if not workbook_path:
+        pytest.skip("Set TAXA_RATE_V3_VALIDATION_WORKBOOK to validate the private JMS sample workbook.")
+    summary = parse_workbook(
+        Path(workbook_path).read_bytes(),
+        COLLECTION_RATE_V3_CONTRACT,
+        MappingResolver(),
+    )
+    assert summary.workbook_validation_errors == []
+    assert summary.input_row_count == summary.valid_row_count == 12_584
+    assert summary.invalid_row_count == 0
+    assert len(summary.per_date_counts) == 19
+    assert min(summary.per_date_counts) == "2026-10-01"
+    assert max(summary.per_date_counts) == "2026-10-19"
+    assert any("averageTakingNum: 1 valor(es) negativo(s) preservado(s)" in warning for warning in summary.semantic_warnings)
+    assert any("Último dia 2026-10-19 pode estar incompleto" in warning for warning in summary.semantic_warnings)
+
+
 def test_collection_rate_versions_select_daily_heads_independently():
     identity = {"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "matrix"}
     v1_plan = _query_plan(
@@ -465,18 +603,24 @@ def test_collection_rate_versions_select_daily_heads_independently():
         "collection_rate", identity, contract_version=2,
         date_from=date(2026, 10, 13), date_to=date(2026, 10, 14),
     )
-    for plan in (v1_plan, v2_plan):
+    v3_plan = _query_plan(
+        "collection_rate", identity, contract_version=3,
+        date_from=date(2026, 10, 13), date_to=date(2026, 10, 14),
+    )
+    for plan in (v1_plan, v2_plan, v3_plan):
         assert "source_publication_dates AS publication_dates" in plan.from_sql
         assert "daily_publication.contract_version = :contract_version" in plan.from_sql
         assert "ROW_NUMBER() OVER" in plan.from_sql
         assert "publication_dates.data_date >= :date_from" in plan.from_sql
         assert "publication_dates.data_date <= :date_to" in plan.from_sql
         assert "source_daily_head" not in plan.from_sql
-        assert plan.parameters["contract_version"] in {1, 2}
+        assert plan.parameters["contract_version"] in {1, 2, 3}
         assert plan.parameters["date_from"] == date(2026, 10, 13)
         assert plan.parameters["date_to"] == date(2026, 10, 14)
     assert "exact_name_candidates" in v1_plan.from_sql
     assert "exact_name_candidates" not in v2_plan.from_sql
+    assert "exact_name_candidates" in v3_plan.from_sql
+    assert "normalized_name_candidates" in v3_plan.from_sql
 
 
 def test_no_movement_v2_parser_preserves_duplicate_base_codes_at_row_grain():

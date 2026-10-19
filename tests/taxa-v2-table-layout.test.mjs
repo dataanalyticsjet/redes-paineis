@@ -4,14 +4,15 @@ import test from "node:test";
 
 const styles = await readFile(new URL("../src/styles/globals.css", import.meta.url), "utf8");
 const dashboard = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
-const collectionRateContract = await readFile(new URL("../src/lib/data-foundation/collection-rate-v2.ts", import.meta.url), "utf8");
+const collectionRateV2Contract = await readFile(new URL("../src/lib/data-foundation/collection-rate-v2.ts", import.meta.url), "utf8");
+const collectionRateV3Contract = await readFile(new URL("../src/lib/data-foundation/collection-rate-v3.ts", import.meta.url), "utf8");
 
-test("Taxa V2 detail table follows the J&T compact table layout with scoped sizing", () => {
-  const selector = ".taxa-v2-detail-card .taxa-v2-detail-table";
+test("Taxa V3 detail table follows the compact J&T layout with scoped sizing", () => {
+  const selector = ".taxa-v2-detail-card .taxa-v3-detail-table";
   assert.match(styles, /\.taxa-v2-detail-card \.taxa-v2-detail-table-wrap\s*\{[^}]*overflow:\s*auto/s);
-  assert.match(styles, /\.taxa-v2-detail-card \.taxa-v2-detail-table\s*\{[^}]*min-width:\s*3315px;[^}]*table-layout:\s*fixed/s);
+  assert.match(styles, /\.taxa-v2-detail-card \.taxa-v3-detail-table\s*\{[^}]*min-width:\s*2920px/s);
   assert.match(styles, /\.taxa-v2-detail-card \.taxa-v2-detail-table thead th\s*\{[^}]*height:\s*50px;[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
-  assert.match(styles, /\.taxa-v2-detail-card \.taxa-v2-detail-table th:nth-child\(28\),[\s\S]*?\.taxa-v2-detail-card \.taxa-v2-detail-table td:nth-child\(28\)\s*\{[^}]*width:\s*142px/s);
+  assert.match(styles, /\.taxa-v2-detail-card \.taxa-v3-detail-table th:nth-child\(22\),[\s\S]*?\.taxa-v2-detail-card \.taxa-v3-detail-table td:nth-child\(22\)\s*\{[^}]*width:\s*144px/s);
   assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-summary-table thead th\s*\{[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
   assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-filter-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
   assert.ok(dashboard.includes('view === "taxa" && isAuthorizedDashboardViewer ? "dashboard-main dashboard-main-taxa-v2"'));
@@ -20,12 +21,16 @@ test("Taxa V2 detail table follows the J&T compact table layout with scoped sizi
   assert.ok(styles.includes(selector));
 });
 
-test("Taxa V2 keeps all 28 official columns ordered and rendered from the source list", () => {
-  const declaration = collectionRateContract.match(/export const COLLECTION_RATE_V2_COLUMNS = \[([\s\S]*?)\] as const;/);
-  assert.ok(declaration, "official Taxa V2 column list exists");
-  const columns = [...declaration[1].matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
-  assert.equal(columns.length, 28);
-  assert.equal(new Set(columns).size, 28);
-  assert.ok(dashboard.includes("COLLECTION_RATE_V2_COLUMNS.map((field) => <th key={field}>"));
-  assert.ok(dashboard.includes("COLLECTION_RATE_V2_COLUMNS.map((field) => <td key={field}>"));
+test("Taxa V3 renders the 22 official columns while preserving the historical V2 contract", () => {
+  const v2Declaration = collectionRateV2Contract.match(/export const COLLECTION_RATE_V2_COLUMNS = \[([\s\S]*?)\] as const;/);
+  const v3Declaration = collectionRateV3Contract.match(/export const COLLECTION_RATE_V3_COLUMNS = \[([\s\S]*?)\] as const;/);
+  assert.ok(v2Declaration, "historical Taxa V2 column list remains available");
+  assert.ok(v3Declaration, "official Taxa V3 column list exists");
+  const v2Columns = [...v2Declaration[1].matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
+  const v3Columns = [...v3Declaration[1].matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
+  assert.equal(v2Columns.length, 28);
+  assert.equal(v3Columns.length, 22);
+  assert.equal(new Set(v3Columns).size, 22);
+  assert.ok(dashboard.includes("COLLECTION_RATE_V3_COLUMNS.map((field) => <th key={field}>"));
+  assert.ok(dashboard.includes("COLLECTION_RATE_V3_COLUMNS.map((field) => <td key={field}>"));
 });

@@ -9559,3 +9559,60 @@ html[data-theme="dark"] .dashboard-main-taxa-v2 .damage-client-row {
 html[data-theme="dark"] .dashboard-main-taxa-v2 .damage-client-track {
   background: var(--surface-input);
 }
+
+/* V3 presents only the 22 physical columns of the monthly JMS contract. */
+.taxa-v2-detail-card .taxa-v3-detail-table {
+  min-width: 2920px;
+}
+
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(1),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(1) { width: 172px; text-align: center; white-space: nowrap; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(2),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(2) { width: 150px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(3),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(3) { width: 180px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(4),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(4) { width: 142px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(5),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(5) { width: 132px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(6),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(6) { width: 116px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(7),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(7) { width: 116px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(8),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(8) { width: 112px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(9),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(9) { width: 112px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(10),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(10) { width: 112px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(11),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(11) { width: 112px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(12),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(12) { width: 152px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(13),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(13) { width: 152px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(14),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(14) { width: 148px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(15),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(15) { width: 186px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(16),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(16) { width: 180px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(17),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(17) { width: 176px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(18),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(18) { width: 142px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(19),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(19) { width: 142px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(20),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(20) { width: 148px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(21),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(21) { width: 144px; }
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(22),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(22) { width: 144px; }
+
+.taxa-v2-detail-card .taxa-v3-detail-table th:nth-child(n + 6),
+.taxa-v2-detail-card .taxa-v3-detail-table td:nth-child(n + 6) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

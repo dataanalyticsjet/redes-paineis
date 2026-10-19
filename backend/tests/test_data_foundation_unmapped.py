@@ -139,6 +139,22 @@ def _create_query_schema(engine) -> None:
             f"CREATE TABLE fact_collection_rate_v2 ({', '.join(v2_column_definitions)})"
         )
 
+        collection_rate_v3 = CONTRACT_VERSIONS[("collection_rate", 3)]
+        v3_column_definitions = [
+            "source_id TEXT NOT NULL",
+            "publication_id BLOB NOT NULL",
+            "map_version_id BLOB NOT NULL",
+            "source_row_no INTEGER NOT NULL",
+            *(f"`{column.key}` {_sqlite_type(column.kind)}" for column in collection_rate_v3.columns),
+            "data_date DATE GENERATED ALWAYS AS (date(deadline_at)) STORED",
+            "resolved_base_code TEXT",
+            "mapping_resolution TEXT NOT NULL",
+            "PRIMARY KEY(publication_id, source_row_no)",
+        ]
+        connection.exec_driver_sql(
+            f"CREATE TABLE fact_collection_rate_v3 ({', '.join(v3_column_definitions)})"
+        )
+
 
 def _row_values(source_id: str, row_no: int, *, duplicate_group: bool = False) -> dict[str, object]:
     contract = CONTRACTS[source_id]
@@ -591,13 +607,14 @@ def test_actual_parser_states_fit_the_source_enums(source_id):
     ] == expected_storage_states
 
 
-def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
+def test_collection_rate_v1_v2_and_v3_select_their_own_latest_daily_publications():
     engine = create_engine("sqlite://")
     _create_query_schema(engine)
     data_day = date(2026, 10, 13)
     old_v1_publication = b"1" * 16
     current_v1_publication = b"2" * 16
     current_v2_publication = b"3" * 16
+    current_v3_publication = b"4" * 16
 
     def row_values(contract, row_no: int, *, base_code: str | None) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -627,6 +644,7 @@ def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
                 (old_v1_publication, 1, 4, "2026-10-13 10:00:00", "2026-10-13 09:00:00"),
                 (current_v1_publication, 1, 5, "2026-10-14 10:00:00", "2026-10-14 09:00:00"),
                 (current_v2_publication, 2, 6, "2026-10-14 11:00:00", "2026-10-14 10:30:00"),
+                (current_v3_publication, 3, 7, "2026-10-14 12:00:00", "2026-10-14 11:30:00"),
             ):
                 connection.execute(text("""
                     INSERT INTO source_publications
@@ -649,6 +667,7 @@ def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
                 (1, old_v1_publication, 1, "NAME_APPROVED", None),
                 (1, current_v1_publication, 2, "NAME_APPROVED", None),
                 (2, current_v2_publication, 3, "CODE_MATCH", "MATCHED-001"),
+                (3, current_v3_publication, 4, "NAME_APPROVED", None),
             ):
                 contract = CONTRACT_VERSIONS[("collection_rate", contract_version)]
                 values = row_values(contract, source_row_no, base_code=source_code)
@@ -657,7 +676,11 @@ def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
                     *(column.key for column in contract.columns),
                     "resolved_base_code", "mapping_resolution",
                 ]
-                table = "fact_collection_rate_v2" if contract_version == 2 else "fact_collection_rate"
+                table = {
+                    1: "fact_collection_rate",
+                    2: "fact_collection_rate_v2",
+                    3: "fact_collection_rate_v3",
+                }[contract_version]
                 payload = {
                     "source_id": "collection_rate",
                     "publication_id": publication_id,
@@ -687,12 +710,22 @@ def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
             limit=250, offset=0, date_from=data_day, date_to=data_day,
             contract_version=2,
         )
+        v3 = get_records(
+            engine, source_id="collection_rate", identity=ADMIN_MATRIX,
+            limit=250, offset=0, date_from=data_day, date_to=data_day,
+            contract_version=3,
+        )
         assert v1["total"] == 1
         assert v1["records"][0]["source_row_no"] == 2
         assert v1["records"][0]["publication_id"] == str(uuid.UUID(bytes=current_v1_publication))
         assert v2["total"] == 1
         assert v2["records"][0]["source_row_no"] == 3
         assert v2["records"][0]["publication_id"] == str(uuid.UUID(bytes=current_v2_publication))
+        assert v3["total"] == 1
+        assert v3["records"][0]["source_row_no"] == 4
+        assert v3["records"][0]["publication_id"] == str(uuid.UUID(bytes=current_v3_publication))
+        assert v3["records"][0]["mapped_region"] == "SPE"
+        assert v3["records"][0]["effective_mapping_resolution"] == "NAME_APPROVED"
         v2_dates = get_date_counts(
             engine, source_id="collection_rate", identity=ADMIN_MATRIX,
             date_from=data_day, date_to=data_day, contract_version=2,
@@ -704,6 +737,18 @@ def test_collection_rate_v1_and_v2_select_their_own_latest_daily_publications():
             "publicationId": str(uuid.UUID(bytes=current_v2_publication)),
             "publishedAt": "2026-10-14 11:00:00",
             "snapshotAsOf": "2026-10-14 10:30:00",
+        }]
+        v3_dates = get_date_counts(
+            engine, source_id="collection_rate", identity=ADMIN_MATRIX,
+            date_from=data_day, date_to=data_day, contract_version=3,
+        )
+        assert v3_dates["hasPublishedPublication"] is True
+        assert v3_dates["dates"] == [{
+            "date": data_day.isoformat(),
+            "rowCount": 1,
+            "publicationId": str(uuid.UUID(bytes=current_v3_publication)),
+            "publishedAt": "2026-10-14 12:00:00",
+            "snapshotAsOf": "2026-10-14 11:30:00",
         }]
     finally:
         engine.dispose()
@@ -1050,3 +1095,158 @@ def test_normalized_unique_name_resolves_automatically_and_ambiguity_stays_unmap
     assert _persisted_mapping_resolution(
         "collection_monitoring", "UNAPPROVED_NORMALIZED_NAME"
     ) == "UNMAPPED"
+
+
+def test_collection_rate_v3_name_mapping_and_feishu_scope_use_official_region_only():
+    engine = create_engine("sqlite://")
+    _create_query_schema(engine)
+    data_day = date(2026, 10, 13)
+    publication_id = uuid.uuid5(uuid.NAMESPACE_URL, "collection-rate-v3-name-scope").bytes
+    try:
+        with engine.begin() as connection:
+            for code, name, region in (
+                ("EXACT-001", "Base Exata", "SPE"),
+                ("NORMALIZED-001", "Base Normalizada", "CE"),
+                ("AMBIGUOUS-001", "Base Ambígua", "SPE"),
+                ("AMBIGUOUS-002", "Base Ambígua", "CE"),
+            ):
+                connection.execute(text("""
+                    INSERT INTO base_mapping_entries
+                      (map_version_id, base_code, base_name, regional_name, uf_code, rm_region, rm_responsible)
+                    VALUES (:map_id, :code, :name, :region, :region, :rm_area, :rm)
+                """), {
+                    "map_id": MAP_VERSION_ID,
+                    "code": code,
+                    "name": name,
+                    "region": region,
+                    "rm_area": f"{region}-RM",
+                    "rm": f"{region} RGM",
+                })
+            connection.execute(text("""
+                INSERT INTO source_publications
+                  (publication_id, source_id, contract_version, version_no, published_at, snapshot_as_of, publication_state)
+                VALUES (:publication_id, 'collection_rate', 3, 1, '2026-10-14 10:00:00', '2026-10-14 09:00:00', 'PUBLISHED')
+            """), {"publication_id": publication_id})
+            connection.execute(text("""
+                INSERT INTO source_publication_dates
+                  (source_id, publication_id, data_date, row_count)
+                VALUES ('collection_rate', :publication_id, :data_day, 5)
+            """), {"publication_id": publication_id, "data_day": data_day})
+            connection.execute(text("""
+                INSERT INTO source_daily_head (source_id, data_date, publication_id)
+                VALUES ('collection_rate', :data_day, :publication_id)
+            """), {"publication_id": publication_id, "data_day": data_day})
+
+            contract = CONTRACT_VERSIONS[("collection_rate", 3)]
+            source_rows = (
+                ("Base Exata", "CE"),
+                ("  BASE\tNORMALIZADA  ", "SPE"),
+                ("Base Ambígua", "SPE"),
+                ("Nome inexistente", "CE"),
+                (None, "CE"),
+            )
+            for row_no, (base_name, reported_region) in enumerate(source_rows, start=1):
+                values = {}
+                for column in contract.columns:
+                    if column.key == "deadline_at":
+                        value = datetime(2026, 10, 13, 9, 0)
+                    elif column.key == "source_base_name":
+                        value = base_name
+                    elif column.key == "reported_region":
+                        value = reported_region
+                    elif column.kind == "INTEGER":
+                        value = row_no
+                    elif column.kind == "DECIMAL":
+                        value = "0.5"
+                    elif column.nullable:
+                        value = None
+                    else:
+                        value = f"{column.key}-{row_no}"
+                    values[column.key] = value
+                columns = [
+                    "source_id", "publication_id", "map_version_id", "source_row_no",
+                    *(column.key for column in contract.columns),
+                    "resolved_base_code", "mapping_resolution",
+                ]
+                payload = {
+                    "source_id": "collection_rate",
+                    "publication_id": publication_id,
+                    "map_version_id": MAP_VERSION_ID,
+                    "source_row_no": row_no,
+                    **values,
+                    "resolved_base_code": None,
+                    "mapping_resolution": "MISSING_IDENTIFIER" if base_name is None else "UNMAPPED",
+                }
+                connection.execute(text(
+                    f"INSERT INTO fact_collection_rate_v3 ({', '.join(chr(34) + column + chr(34) for column in columns)}) "
+                    f"VALUES ({', '.join(':' + column for column in columns)})"
+                ), payload)
+
+        national = get_records(
+            engine,
+            source_id="collection_rate",
+            identity=ADMIN_MATRIX,
+            limit=250,
+            offset=0,
+            date_from=data_day,
+            date_to=data_day,
+            contract_version=3,
+        )
+        assert national["total"] == 5
+        rows = {row["source_row_no"]: row for row in national["records"]}
+        assert rows[1]["effective_base_code"] == "EXACT-001"
+        assert rows[1]["effective_mapping_resolution"] == "NAME_APPROVED"
+        assert rows[1]["mapping_match_method"] == "EXACT_NAME"
+        assert rows[1]["mapped_region"] == "SPE"
+        assert rows[1]["reported_region"] == "CE"
+        assert rows[2]["effective_base_code"] == "NORMALIZED-001"
+        assert rows[2]["mapping_match_method"] == "NORMALIZED_NAME"
+        assert rows[2]["mapped_region"] == "CE"
+        assert rows[2]["reported_region"] == "SPE"
+        assert rows[3]["effective_mapping_resolution"] == "AMBIGUOUS"
+        assert rows[3]["effective_base_code"] is None
+        assert rows[3]["mapped_region"] is None
+        assert rows[4]["effective_mapping_resolution"] == "UNMAPPED"
+        assert rows[4]["effective_base_code"] is None
+        assert rows[5]["effective_mapping_resolution"] == "MISSING_IDENTIFIER"
+        assert rows[5]["mapped_region"] is None
+
+        regional_ce = get_records(
+            engine,
+            source_id="collection_rate",
+            identity={
+                "platform_role": "USER",
+                "organizational_scope": "regional",
+                "home_region": "CE",
+                "role": "regional",
+            },
+            limit=250,
+            offset=0,
+            date_from=data_day,
+            date_to=data_day,
+            contract_version=3,
+        )
+        assert regional_ce["total"] == 1
+        assert regional_ce["records"][0]["source_row_no"] == 2
+        assert regional_ce["records"][0]["mapped_region"] == "CE"
+
+        regional_spe = get_records(
+            engine,
+            source_id="collection_rate",
+            identity={
+                "platform_role": "USER",
+                "organizational_scope": "regional",
+                "home_region": "SPE",
+                "role": "regional",
+            },
+            limit=250,
+            offset=0,
+            date_from=data_day,
+            date_to=data_day,
+            contract_version=3,
+        )
+        assert regional_spe["total"] == 1
+        assert regional_spe["records"][0]["source_row_no"] == 1
+        assert regional_spe["records"][0]["mapped_region"] == "SPE"
+    finally:
+        engine.dispose()

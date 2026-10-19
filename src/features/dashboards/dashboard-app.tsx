@@ -117,20 +117,20 @@ import {
   taxaRate,
 } from "../../lib/taxa-summary";
 import {
-  collectionRateV2FilterOptions,
-  filterCollectionRateV2Rows,
-  groupCollectionRateV2Rows,
-  mapCollectionRateV2Record,
-  summarizeCollectionRateV2,
-  summarizeCollectionRateV2Daily,
-  summarizeCollectionRateV2Monthly,
-  summarizeCollectionRateV2Origins,
-  collectionRateV2ExcelNumberFormat,
-  collectionRateV2ExcelValue,
-  formatCollectionRateV2Cell,
-  type CollectionRateV2DashboardRow,
-  type CollectionRateV2Filters,
-} from "../../lib/data-foundation/collection-rate-v2-dashboard.ts";
+  collectionRateV3FilterOptions,
+  filterCollectionRateV3Rows,
+  groupCollectionRateV3Rows,
+  mapCollectionRateV3Record,
+  summarizeCollectionRateV3,
+  summarizeCollectionRateV3Daily,
+  summarizeCollectionRateV3Monthly,
+  summarizeCollectionRateV3Origins,
+  collectionRateV3ExcelNumberFormat,
+  collectionRateV3ExcelValue,
+  formatCollectionRateV3Cell,
+  type CollectionRateV3DashboardRow,
+  type CollectionRateV3Filters,
+} from "../../lib/data-foundation/collection-rate-v3-dashboard.ts";
 import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
@@ -155,12 +155,12 @@ import {
 } from "../../lib/data-foundation/monitoring";
 import type { DashboardAvailabilityState } from "../../lib/data-foundation/dashboard-availability.ts";
 import {
-  COLLECTION_RATE_V2_COLUMNS,
-  COLLECTION_RATE_V2_HEADERS,
-  CollectionRateV2LoadError,
-  loadPublishedCollectionRateV2,
-  type CollectionRateV2Record,
-} from "../../lib/data-foundation/collection-rate-v2.ts";
+  COLLECTION_RATE_V3_COLUMNS,
+  COLLECTION_RATE_V3_HEADERS,
+  CollectionRateV3LoadError,
+  loadPublishedCollectionRateV3,
+  type CollectionRateV3Record,
+} from "../../lib/data-foundation/collection-rate-v3.ts";
 import {
   loadCurrentNoMovementSnapshot,
   NoMovementV2LoadError,
@@ -2921,16 +2921,19 @@ export function DashboardApp() {
   const [monitoringV2RetryKey, setMonitoringV2RetryKey] = useState(0);
   const [collectionRateV2State, setCollectionRateV2State] = useState(() => {
     const yesterday = yesterdayInSaoPaulo();
+    const today = new Date(`${yesterday}T12:00:00.000Z`);
+    today.setUTCDate(today.getUTCDate() + 1);
     return {
       status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
-      period: { dateFrom: yesterday, dateTo: yesterday },
-      records: [] as CollectionRateV2Record[],
+      period: { dateFrom: `${yesterday.slice(0, 7)}-01`, dateTo: today.toISOString().slice(0, 10) },
+      records: [] as CollectionRateV3Record[],
       receivedCount: 0,
-      columnCount: COLLECTION_RATE_V2_COLUMNS.length,
+      columnCount: COLLECTION_RATE_V3_COLUMNS.length,
       publicationId: null as string | null,
       publicationIds: [] as string[],
       publishedAt: null as string | null,
       snapshotAsOf: null as string | null,
+      latestDayMayBeIncomplete: false,
       error: null as string | null,
     };
   });
@@ -2959,7 +2962,7 @@ export function DashboardApp() {
   const [taxaSelectedBases, setTaxaSelectedBases] = useState<Set<string>>(new Set());
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
-  const [taxaV2Filters, setTaxaV2Filters] = useState<CollectionRateV2Filters>({});
+  const [taxaV2Filters, setTaxaV2Filters] = useState<CollectionRateV3Filters>({});
   const [taxaV2TableQuery, setTaxaV2TableQuery] = useState("");
   const [taxaV2Page, setTaxaV2Page] = useState(1);
   const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
@@ -3107,7 +3110,7 @@ export function DashboardApp() {
     loadedDashboardDataViewerRef.current = null;
     setMonitoringV2Status("idle");
     setMonitoringV2Message(null);
-    setCollectionRateV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, snapshotAsOf: null, error: null }));
+    setCollectionRateV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, snapshotAsOf: null, latestDayMayBeIncomplete: false, error: null }));
     setNoMovementV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, updatedAt: null, collectionDate: null, publishedAt: null, error: null }));
     setPddCollectionFailureV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], updatedAt: null, publishedAt: null, error: null }));
     jtMonitoringV2RequestRef.current?.abort();
@@ -4120,6 +4123,7 @@ export function DashboardApp() {
           publicationIds: [],
           publishedAt: null,
           snapshotAsOf: null,
+          latestDayMayBeIncomplete: false,
           error: null,
         }));
         if (!dateFrom || !dateTo || dateFrom > dateTo) {
@@ -4140,17 +4144,17 @@ export function DashboardApp() {
           const published = await loadCachedDashboardData({
             identityKey: dashboardCacheIdentity,
             sourceId: "collection_rate",
-            contractVersion: 2,
+            contractVersion: 3,
             periodKey: `${dateFrom}:${dateTo}:unfiltered-rows`,
             manifest: (signal) => readDashboardDataManifest({
               sourceId: "collection_rate",
-              contractVersion: 2,
+              contractVersion: 3,
               dateFrom,
               dateTo,
               publicationToken: currentDashboardPublicationToken,
               fetcher: cacheFetcher,
             }, signal),
-            load: (signal) => loadPublishedCollectionRateV2({ dateFrom, dateTo }, cacheFetcher, signal),
+            load: (signal) => loadPublishedCollectionRateV3({ dateFrom, dateTo }, cacheFetcher, signal),
           }, controller.signal);
           if (!active) return;
           setCollectionRateV2State((current) => ({
@@ -4164,13 +4168,14 @@ export function DashboardApp() {
             publicationIds: published.publicationIds,
             publishedAt: published.publishedAt,
             snapshotAsOf: published.snapshotAsOf,
+            latestDayMayBeIncomplete: published.latestDayMayBeIncomplete,
             error: published.rowCount === 0 ? "Sem dados publicados para a data selecionada" : null,
           }));
         } catch (cause) {
           if (!active || controller.signal.aborted) return;
-          const loadError = cause instanceof CollectionRateV2LoadError
+          const loadError = cause instanceof CollectionRateV3LoadError
             ? cause
-            : new CollectionRateV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+            : new CollectionRateV3LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
           setCollectionRateV2State((current) => ({
             ...current,
             status: loadError.kind === "empty" ? "empty" : "error",
@@ -4180,7 +4185,8 @@ export function DashboardApp() {
             publicationIds: [],
             publishedAt: null,
             snapshotAsOf: null,
-            error: loadError.kind === "empty" ? "Sem dados publicados para a data selecionada" : loadError.message,
+            latestDayMayBeIncomplete: false,
+            error: loadError.message,
           }));
         }
       })();
@@ -5588,29 +5594,29 @@ export function DashboardApp() {
   );
 
   const taxaV2Rows = useMemo(
-    () => collectionRateV2State.records.map(mapCollectionRateV2Record),
+    () => collectionRateV2State.records.map(mapCollectionRateV3Record),
     [collectionRateV2State.records],
   );
-  const taxaV2Options = useMemo(() => collectionRateV2FilterOptions(taxaV2Rows), [taxaV2Rows]);
+  const taxaV2Options = useMemo(() => collectionRateV3FilterOptions(taxaV2Rows), [taxaV2Rows]);
   const taxaV2FilteredRows = useMemo(
-    () => filterCollectionRateV2Rows(taxaV2Rows, taxaV2Filters),
+    () => filterCollectionRateV3Rows(taxaV2Rows, taxaV2Filters),
     [taxaV2Rows, taxaV2Filters],
   );
   const taxaV2Summary = useMemo(
-    () => summarizeCollectionRateV2(taxaV2FilteredRows),
+    () => summarizeCollectionRateV3(taxaV2FilteredRows),
     [taxaV2FilteredRows],
   );
-  const taxaV2ByRegion = useMemo(() => groupCollectionRateV2Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
-  const taxaV2ByRmArea = useMemo(() => groupCollectionRateV2Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
-  const taxaV2Daily = useMemo(() => summarizeCollectionRateV2Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
-  const taxaV2Monthly = useMemo(() => summarizeCollectionRateV2Monthly(taxaV2FilteredRows), [taxaV2FilteredRows]);
-  const taxaV2ByOrigin = useMemo(() => summarizeCollectionRateV2Origins(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2ByRegion = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
+  const taxaV2ByRmArea = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
+  const taxaV2Daily = useMemo(() => summarizeCollectionRateV3Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2Monthly = useMemo(() => summarizeCollectionRateV3Monthly(taxaV2FilteredRows), [taxaV2FilteredRows]);
+  const taxaV2ByOrigin = useMemo(() => summarizeCollectionRateV3Origins(taxaV2FilteredRows), [taxaV2FilteredRows]);
   const taxaV2Dates = useMemo(() => [...new Set(taxaV2FilteredRows.map((row) => String(row.data_date)))].sort(), [taxaV2FilteredRows]);
   const taxaV2SearchedRows = useMemo(() => {
     const query = normalizeSearchText(taxaV2TableQuery.trim());
     if (!query) return taxaV2FilteredRows;
     return taxaV2FilteredRows.filter((row) => normalizeSearchText(
-      [...COLLECTION_RATE_V2_COLUMNS.map((field) => String(row[field] ?? "")), row.region, row.rm, row.rmArea, row.rgm, row.base]
+      [...COLLECTION_RATE_V3_COLUMNS.map((field) => String(row[field] ?? "")), row.region, row.rm, row.rmArea, row.rgm, row.base]
         .join(" "),
     ).includes(query));
   }, [taxaV2FilteredRows, taxaV2TableQuery]);
@@ -8933,11 +8939,11 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
             <>
               <section className="dashboard-intro">
                 <div>
-                  <div className="eyebrow"><Target size={15} /> {t("Data Foundation V2")}</div>
+                  <div className="eyebrow"><Target size={15} /> {t("Data Foundation V3")}</div>
                   <h1>{t("Taxa de coleta")}</h1>
-                  <p>{t("Fonte operacional: Excel oficial do Bot 03 JMS. Mapeamentos organizacionais pelo código exato do DoomsDay.")}</p>
+                  <p>{t("Fonte operacional: exportação mensal oficial do JMS. A classificação organizacional usa apenas correspondência única exata ou normalizada de forma conservadora no DoomsDay publicado.")}</p>
                 </div>
-                <div className="dataset-meta" aria-label={t("Fonte oficial V2")}>
+                <div className="dataset-meta" aria-label={t("Fonte oficial V3")}>
                   <span><Database size={16} /> collection_rate</span>
                   <span><Layers3 size={16} /> {t("Contrato: {count} colunas", { count: formatNumber(collectionRateV2State.columnCount) })}</span>
                   <span><Activity size={16} /> {t("{count} linhas no período", { count: formatNumber(collectionRateV2State.receivedCount) })}</span>
@@ -9101,7 +9107,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   data-testid="collection-rate-v2-diagnostic"
                   aria-live="polite"
                 >
-                  <span><strong>{t("Status V2:")}</strong> {collectionRateV2State.status === "idle"
+                  <span><strong>{t("Status da fonte JMS:")}</strong> {collectionRateV2State.status === "idle"
                     ? t("Aguardando consulta")
                     : collectionRateV2State.status === "loading"
                       ? t("Consultando publicação vigente…")
@@ -9115,8 +9121,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <span><strong>{t("Colunas:")}</strong> {formatNumber(collectionRateV2State.columnCount)}</span>
                   <span><strong>{t("Linhas após filtros:")}</strong> {formatNumber(taxaV2FilteredRows.length)}</span>
                   {collectionRateV2State.publicationId ? <span><strong>{t("Publicação utilizada:")}</strong> {collectionRateV2State.publicationId}</span> : collectionRateV2State.publicationIds.length > 1 ? <span><strong>{t("Publicações diárias utilizadas:")}</strong> {formatNumber(collectionRateV2State.publicationIds.length)}</span> : null}
-                  {collectionRateV2State.status === "empty" ? <span>{t("Sem dados publicados para a data selecionada")}</span> : null}
+                  {collectionRateV2State.status === "empty" ? <span>{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</span> : null}
                   {collectionRateV2State.status === "error" && collectionRateV2State.error ? <span>{t(collectionRateV2State.error)}</span> : null}
+                  {collectionRateV2State.latestDayMayBeIncomplete ? <span className="quality-warning">{t("O último dia publicado pode estar incompleto; os valores exibidos não foram ajustados.")}</span> : null}
                 </div>
               </section>
               {collectionRateV2State.status === "ready" ? (
@@ -9180,21 +9187,21 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
 
                   <section className="chart-card bipagem-table-card taxa-v2-detail-card">
                     <div className="card-heading table-card-heading taxa-v2-detail-heading">
-                      <div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2>{t("Dados detalhados — 28 colunas oficiais")}</h2><p>{t("Campos e valores originais da aba Dados, sem deduplicação. O mapeamento usa apenas código exato do DoomsDay.")}</p></div>
-                      <div className="table-tools taxa-v2-detail-tools"><button type="button" className="table-download-button taxa-v2-export-button" onClick={() => void downloadRowsAsExcel(taxaV2SearchedRows, COLLECTION_RATE_V2_COLUMNS.map((field) => ({ header: t(COLLECTION_RATE_V2_HEADERS[field]), value: (row: CollectionRateV2DashboardRow) => collectionRateV2ExcelValue(row[field], field), width: 20, numberFormat: collectionRateV2ExcelNumberFormat(field) })), t("Taxa de Coleta — dados detalhados"), "taxa_coleta_v2_detalhado.xlsx")} disabled={taxaV2SearchedRows.length === 0}><FileSpreadsheet size={16} /> {t("Baixar Excel")}</button><label className="table-search"><Search size={16} /><input value={taxaV2TableQuery} onChange={(event) => { setTaxaV2TableQuery(event.target.value); setTaxaV2Page(1); }} placeholder={t("Buscar nos dados detalhados")} /></label></div>
+                      <div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2>{t("Dados detalhados — 22 colunas oficiais")}</h2><p>{t("Campos e valores originais da aba Dados, sem deduplicação. A classificação organizacional usa apenas correspondência única com o DoomsDay publicado; o nome JMS permanece informativo.")}</p></div>
+                      <div className="table-tools taxa-v2-detail-tools"><button type="button" className="table-download-button taxa-v2-export-button" onClick={() => void downloadRowsAsExcel(taxaV2SearchedRows, COLLECTION_RATE_V3_COLUMNS.map((field) => ({ header: t(COLLECTION_RATE_V3_HEADERS[field]), value: (row: CollectionRateV3DashboardRow) => collectionRateV3ExcelValue(row[field], field), width: 20, numberFormat: collectionRateV3ExcelNumberFormat(field) })), t("Taxa de Coleta — dados detalhados"), "taxa_coleta_v3_detalhado.xlsx")} disabled={taxaV2SearchedRows.length === 0}><FileSpreadsheet size={16} /> {t("Baixar Excel")}</button><label className="table-search"><Search size={16} /><input value={taxaV2TableQuery} onChange={(event) => { setTaxaV2TableQuery(event.target.value); setTaxaV2Page(1); }} placeholder={t("Buscar nos dados detalhados")} /></label></div>
                     </div>
-                    <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap pdd-v2-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table taxa-v2-detail-table"><thead><tr>{COLLECTION_RATE_V2_COLUMNS.map((field) => <th key={field}>{t(COLLECTION_RATE_V2_HEADERS[field])}</th>)}</tr></thead><tbody>{taxaV2VisibleRows.map((row) => <tr key={`${row.publication_id}-${row.source_row_no}`}>{COLLECTION_RATE_V2_COLUMNS.map((field) => <td key={field}>{formatCollectionRateV2Cell(row[field], field, dashboardLocale(activeDashboardLanguage()))}</td>)}</tr>)}</tbody></table>{taxaV2SearchedRows.length === 0 ? <EmptyChart message={t("Não há registros correspondentes aos filtros.")} /> : null}</div>
+                    <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap pdd-v2-detail-table-wrap taxa-v2-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table taxa-v2-detail-table taxa-v3-detail-table"><thead><tr>{COLLECTION_RATE_V3_COLUMNS.map((field) => <th key={field}>{t(COLLECTION_RATE_V3_HEADERS[field])}</th>)}</tr></thead><tbody>{taxaV2VisibleRows.map((row) => <tr key={`${row.publication_id}-${row.source_row_no}`}>{COLLECTION_RATE_V3_COLUMNS.map((field) => <td key={field}>{formatCollectionRateV3Cell(row[field], field, dashboardLocale(activeDashboardLanguage()))}</td>)}</tr>)}</tbody></table>{taxaV2SearchedRows.length === 0 ? <EmptyChart message={t("Não há registros correspondentes aos filtros.")} /> : null}</div>
                     <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(taxaV2SearchedRows.length) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.max(1, current - 1))} disabled={taxaV2ActivePage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(taxaV2ActivePage), total: formatNumber(taxaV2PageCount) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.min(taxaV2PageCount, current + 1))} disabled={taxaV2ActivePage >= taxaV2PageCount}>{t("Próxima")}</button></div>
                   </section>
-                  {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência pelo código oficial permanecem nos totais gerais e sem atribuição de regional ou RM.")}</div> : null}
+                  {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência única no DoomsDay permanecem nos totais gerais e sem atribuição organizacional.")}</div> : null}
                   <div className="quality-note" role="status">{t("Taxa com tentativa e Aguardando Coleta estão pendentes de validação semântica; nenhuma fórmula estimada é apresentada.")}</div>
                 </>
               ) : collectionRateV2State.status === "empty" ? (
-                <div className="quality-note" role="status">{t("Sem dados publicados para a data selecionada")}</div>
+                <div className="quality-note" role="status">{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</div>
               ) : collectionRateV2State.status === "error" ? (
                 <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{collectionRateV2State.error ? t(collectionRateV2State.error) : t("Erro de conexão")}</span></div>
               ) : (
-                <div className="filter-summary" role="status">{collectionRateV2State.status === "loading" ? t("Consultando publicação vigente…") : t("Aguardando consulta à Data Foundation V2")}</div>
+                <div className="filter-summary" role="status">{collectionRateV2State.status === "loading" ? t("Consultando publicação vigente…") : currentDashboardAvailability.status === "unavailable" ? t("Fonte Taxa V3 indisponível. Verifique o registro do contrato e a conexão com a Data Foundation.") : t("Aguardando consulta à Data Foundation V3")}</div>
               )}
             </>
           ) : !taxaLoaded ? (
