@@ -5373,8 +5373,7 @@ tbody tr:hover td {
   scrollbar-color: #c6cbd3 #f4f5f7;
 }
 
-/* The 28-column Taxa V2 table keeps its own compact layout and does not
-   inherit the PDD table's wider sizing rules. */
+/* Taxa V2 follows the compact J&T table rhythm while sizing columns to their data. */
 .taxa-v2-detail-card .taxa-v2-detail-table-wrap {
   max-height: 440px;
   overflow: auto;
@@ -5386,15 +5385,15 @@ tbody tr:hover td {
 
 .taxa-v2-detail-card .taxa-v2-detail-table {
   width: 100%;
-  min-width: 2340px;
+  min-width: 3315px;
   table-layout: fixed;
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .taxa-v2-detail-card .taxa-v2-detail-table th,
 .taxa-v2-detail-card .taxa-v2-detail-table td {
-  height: 34px;
-  padding: 5px 7px;
+  height: 38px;
+  padding: 7px 8px;
   border-right-color: var(--table-grid);
   border-bottom-color: var(--table-grid);
   line-height: 1.25;
@@ -5405,13 +5404,13 @@ tbody tr:hover td {
   position: sticky;
   top: 0;
   z-index: 2;
-  height: 48px;
-  padding: 6px;
+  height: 50px;
+  padding: 8px 7px;
   border-bottom: 1px solid var(--table-header-dark);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0;
-  line-height: 1.15;
+  line-height: 1.2;
   text-align: center;
   vertical-align: middle;
   white-space: normal;
@@ -5419,36 +5418,231 @@ tbody tr:hover td {
   word-break: normal;
 }
 
+/* Identity and description fields have room to wrap; short codes stay compact. */
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(1),
-.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(1) {
-  width: 86px;
-  text-align: center;
-  white-space: nowrap;
-}
-
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(1) { width: 108px; text-align: center; white-space: nowrap; }
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(2),
-.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(4),
-.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(6),
-.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(8) {
-  width: 92px;
-}
-
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(2) { width: 90px; text-align: center; white-space: nowrap; }
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(3),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(3) { width: 130px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(4),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(4) { width: 100px; text-align: center; white-space: nowrap; }
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(5),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(5) { width: 150px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(6),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(6) { width: 94px; text-align: center; white-space: nowrap; }
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(7),
-.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(9) {
-  width: 145px;
-}
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(7) { width: 125px; text-align: left; white-space: normal; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(8),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(8) { width: 95px; text-align: center; white-space: nowrap; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(9),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(9) { width: 135px; text-align: left; white-space: normal; }
 
-.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(n + 10) {
-  width: 112px;
-}
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(10),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(10) { width: 112px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(11),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(11) { width: 125px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(12),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(12) { width: 112px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(13),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(13) { width: 98px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(14),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(14) { width: 112px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(15),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(15) { width: 120px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(16),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(16) { width: 136px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(17),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(17) { width: 118px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(18),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(18) { width: 136px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(19),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(19) { width: 136px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(20),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(20) { width: 104px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(21),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(21) { width: 130px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(22),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(22) { width: 110px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(23),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(23) { width: 104px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(24),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(24) { width: 118px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(25),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(25) { width: 130px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(26),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(26) { width: 115px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(27),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(27) { width: 130px; }
+.taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(28),
+.taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(28) { width: 142px; }
 
 .taxa-v2-detail-card .taxa-v2-detail-table th:nth-child(n + 10),
 .taxa-v2-detail-card .taxa-v2-detail-table td:nth-child(n + 10) {
   text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.dashboard-main-taxa-v2 .dashboard-intro h1 {
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+
+.dashboard-main-taxa-v2 .filters-card-top h2 { font-weight: 600; }
+.dashboard-main-taxa-v2 .card-heading h2 { font-weight: 650; letter-spacing: -0.015em; }
+.dashboard-main-taxa-v2 .card-eyebrow { font-weight: 650; }
+.dashboard-main-taxa-v2 .kpi-top > span { font-weight: 600; }
+.dashboard-main-taxa-v2 .kpi-card > strong { font-weight: 700; }
+
+.dashboard-main-taxa-v2 .taxa-filters-card {
+  overflow: visible;
+}
+
+.dashboard-main-taxa-v2 .taxa-filters-card .multi-select[open] {
+  z-index: 110;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-grid > .chart-card,
+.dashboard-main-taxa-v2 .taxa-v2-monthly-card,
+.dashboard-main-taxa-v2 .taxa-v2-detail-card {
+  min-height: 0;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table-wrap {
+  max-height: 430px;
+  overflow: auto;
+  border: 1px solid var(--table-grid);
+  border-radius: 12px;
+  background: var(--card);
+  overscroll-behavior: contain;
+  scrollbar-color: #c6cbd3 #f4f5f7;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table {
+  width: 100%;
+  min-width: 1120px;
+  table-layout: fixed;
+  font-size: 11.5px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table th,
+.dashboard-main-taxa-v2 .taxa-v2-summary-table td {
+  height: 38px;
+  min-width: 72px;
+  padding: 7px 8px;
+  border-right-color: var(--table-grid);
+  border-bottom-color: var(--table-grid);
+  line-height: 1.25;
+  vertical-align: middle;
+  text-align: center;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 50px;
+  padding: 8px 7px;
+  border-bottom: 1px solid var(--table-header-dark);
+  color: #fff;
+  background: var(--table-header);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-align: center;
+  text-transform: none;
+  vertical-align: middle;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table thead th small {
+  margin-top: 3px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-transform: none;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table th:first-child {
+  text-align: left;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table thead th:first-child {
+  z-index: 4;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table tbody th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-regional-summary-table td:nth-child(3),
+.dashboard-main-taxa-v2 .taxa-v2-rm-summary-table td:nth-child(4),
+.dashboard-main-taxa-v2 .taxa-v2-summary-table td:nth-last-child(-n + 2),
+.dashboard-main-taxa-v2 .taxa-v2-summary-table th:nth-last-child(-n + 2) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table {
+  width: 100%;
+  min-width: 840px;
+  font-size: 11.5px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table thead th {
+  height: 50px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table tbody th,
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table tbody td {
+  height: 38px;
+  padding: 7px 10px;
+  font-size: 11.5px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table tbody th { text-align: left; }
+.dashboard-main-taxa-v2 .taxa-v2-monthly-table tbody td { text-align: right; font-variant-numeric: tabular-nums; }
+
+.dashboard-main-taxa-v2 .taxa-v2-detail-heading {
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px 10px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-detail-tools {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-export-button {
+  min-height: 38px;
+  padding: 0 12px;
+  border-color: rgba(230, 0, 0, 0.24);
+  border-radius: 8px;
+  color: var(--jnt-red);
+  background: #fff7f7;
+  font-size: 12px;
+  font-weight: 650;
+  gap: 7px;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-export-button:hover:not(:disabled) {
+  border-color: rgba(230, 0, 0, 0.45);
+  background: #fff0f0;
 }
 
 html[data-theme="dark"] .taxa-v2-detail-card .taxa-v2-detail-table-wrap {
@@ -9219,4 +9413,149 @@ html[data-theme="dark"] .data-foundation-admin .data-foundation-preview-actions 
   border-color: #70454a;
   background: #593137;
   color: #f2c4c7;
+}
+
+@media screen and (max-width: 1280px) {
+  .dashboard-main-taxa-v2 .taxa-filter-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media screen and (max-width: 900px) {
+  .dashboard-main-taxa-v2 .taxa-filter-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-detail-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-detail-tools {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+@media screen and (max-width: 640px) {
+  .dashboard-main-taxa-v2 .taxa-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-main-taxa-v2 .filters-card-top {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dashboard-main-taxa-v2 .filters-card-top .reset-button {
+    align-self: flex-start;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-detail-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-export-button,
+  .dashboard-main-taxa-v2 .taxa-v2-detail-tools .table-search {
+    width: 100%;
+    min-height: 38px;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-detail-card .table-pagination {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
+@media screen and (max-width: 420px) {
+  .dashboard-main-taxa-v2 .taxa-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Dark theme for Taxa V2 elements that inherit legacy POC classes. */
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table-wrap,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table-wrap {
+  border-color: var(--table-grid);
+  background: var(--card);
+  scrollbar-color: #535b67 #252a32;
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table {
+  background: var(--card);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table thead th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table thead th {
+  border-color: var(--table-grid);
+  background: var(--table-header-dark);
+  color: #fff;
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody td,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody td {
+  background: var(--card);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody tr:nth-child(even) th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody tr:nth-child(even) td,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody tr:nth-child(even) th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody tr:nth-child(even) td {
+  background: var(--table-row-alt);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody tr:hover th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-summary-table tbody tr:hover td,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody tr:hover th,
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-table tbody tr:hover td {
+  background: var(--table-row-hover);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-export-button {
+  border-color: rgba(255, 92, 92, 0.42);
+  color: #ff9b9b;
+  background: #342326;
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-export-button:hover:not(:disabled) {
+  border-color: rgba(255, 124, 124, 0.65);
+  background: #43292d;
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-tools .table-search {
+  border-color: var(--border);
+  background: var(--surface-input);
+  color: var(--text-secondary);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-tools .table-search input {
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-v2-detail-tools .table-search input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .taxa-poc-line-chart {
+  border-color: var(--border);
+  background: linear-gradient(180deg, var(--card), #29242a);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .damage-client-row {
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] .dashboard-main-taxa-v2 .damage-client-track {
+  background: var(--surface-input);
 }
