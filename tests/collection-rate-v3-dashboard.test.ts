@@ -7,9 +7,14 @@ import {
   collectionRateV3FilterOptions,
   filterCollectionRateV3Rows,
   formatCollectionRateV3Cell,
+  groupCollectionRateV3Rows,
   mapCollectionRateV3Record,
   summarizeCollectionRateV3,
   summarizeCollectionRateV3Attempts,
+  summarizeCollectionRateV3Cards,
+  summarizeCollectionRateV3Daily,
+  summarizeCollectionRateV3Monthly,
+  summarizeCollectionRateV3Origins,
 } from "../src/lib/data-foundation/collection-rate-v3-dashboard.ts";
 import {
   COLLECTION_RATE_V3_COLUMNS,
@@ -172,6 +177,79 @@ test("validated V3 card reference for 18 October and zero denominator", () => {
     mapCollectionRateV3Record(record({ quantity_to_collect: 0, collected_plus_attempts_quantity: 5 })),
   ]);
   assert.equal(zeroDenominator.rate, null);
+});
+
+test("single-pass V3 card summaries and filter options preserve existing results", () => {
+  const rows = [
+    mapCollectionRateV3Record(record({
+      deadline_at: "2026-10-18 00:00:00",
+      resolved_base_code: "BASE-01",
+      effective_base_code: "BASE-01",
+      mapping_resolution: "NAME_APPROVED",
+      effective_mapping_resolution: "NAME_APPROVED",
+      mapped_region: "SPE",
+      mapped_rm_area: "Sudeste",
+      mapped_rm: "RM Alfa",
+      mapped_base_name: "Base Alfa",
+      order_quantity: 100,
+      quantity_to_collect: 80,
+      collected_quantity: 60,
+      not_collected_quantity: 20,
+      collected_on_time_quantity: 55,
+      collected_plus_attempts_quantity: 70,
+      order_origin: "Marketplace",
+    })),
+    mapCollectionRateV3Record(record({
+      deadline_at: "2026-10-19 00:00:00",
+      source_row_no: 3,
+      resolved_base_code: "BASE-02",
+      effective_base_code: "BASE-02",
+      mapping_resolution: "CODE_MATCH",
+      effective_mapping_resolution: "CODE_MATCH",
+      mapped_region: "SR",
+      mapped_rm_area: "Sul",
+      mapped_rm: "RM Beta",
+      mapped_base_name: "Base Beta",
+      order_quantity: 30,
+      quantity_to_collect: 20,
+      collected_quantity: 10,
+      not_collected_quantity: 10,
+      collected_on_time_quantity: 8,
+      collected_plus_attempts_quantity: 15,
+      order_origin: "Loja",
+      product_type: "STANDARD",
+    })),
+  ];
+  const cards = summarizeCollectionRateV3Cards(rows);
+  const expectedOptions = {
+    regions: [...new Set(rows.map((row) => row.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    rms: [...new Set(rows.map((row) => row.rm).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    rmAreas: [...new Set(rows.map((row) => row.rmArea).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    rgms: [...new Set(rows.map((row) => row.rgm).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    bases: [...new Set(rows.map((row) => row.base).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    origins: [...new Set(rows.map((row) => row.origin).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    productTypes: [...new Set(rows.map((row) => row.productType).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+  };
+
+  assert.deepEqual(cards.totals, summarizeCollectionRateV3(rows));
+  assert.deepEqual(cards.attempts, summarizeCollectionRateV3Attempts(rows));
+  assert.deepEqual(collectionRateV3FilterOptions(rows), expectedOptions);
+  const byRegion = groupCollectionRateV3Rows(rows, "region");
+  assert.equal(byRegion.length, new Set(rows.map((row) => row.region)).size);
+  assert.equal(byRegion.reduce((sum, group) => sum + group.planned, 0), cards.totals.planned);
+  assert.ok(byRegion.every((group) => group.daily.size > 0));
+  for (const group of byRegion) {
+    const matchingRows = rows.filter((row) => row.region === group.region);
+    const planned = matchingRows.reduce((sum, row) => sum + Number(row.quantity_to_collect), 0);
+    const collected = matchingRows.reduce((sum, row) => sum + Number(row.collected_quantity), 0);
+    assert.equal(group.collectionRate, planned > 0 ? collected / planned : null);
+    assert.equal(group.daily.get(matchingRows[0]?.data_date ?? "")?.planned, planned);
+  }
+  const byRmArea = groupCollectionRateV3Rows(rows, "rmArea");
+  assert.equal(byRmArea.reduce((sum, group) => sum + group.planned, 0), cards.totals.planned);
+  assert.deepEqual(summarizeCollectionRateV3Daily(rows).map((item) => item.date), ["2026-10-18", "2026-10-19"]);
+  assert.deepEqual(summarizeCollectionRateV3Monthly(rows).map((item) => item.month), ["2026-10"]);
+  assert.deepEqual(summarizeCollectionRateV3Origins(rows).map((item) => item.origin), ["Marketplace", "Loja"]);
 });
 
 test("V3 numeric formatting and Excel export preserve native numeric values", () => {

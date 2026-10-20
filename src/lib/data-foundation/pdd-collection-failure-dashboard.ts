@@ -88,6 +88,19 @@ export interface PddCollectionFailureV2Filters {
   origins: ReadonlySet<string>;
 }
 
+export type PddCollectionFailureV2Selections = {
+  [Dimension in keyof PddCollectionFailureV2Filters]?: ReadonlySet<string> | null;
+};
+
+export interface PddCollectionFailureV2Analysis {
+  options: ReturnType<typeof pddCollectionFailureV2FilterOptions>;
+  filteredRecords: PddCollectionFailureV2Record[];
+  summary: PddCollectionFailureV2Metrics;
+  regionalSummary: PddCollectionFailureV2RegionalSummary[];
+  rmSummary: PddCollectionFailureV2RmSummary[];
+  baseSummary: PddCollectionFailureV2BaseSummary[];
+}
+
 function text(value: unknown, fallback = "—"): string {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
   return normalized || fallback;
@@ -121,17 +134,31 @@ export function pddCollectionFailureV2Dimensions(
 }
 
 export function pddCollectionFailureV2FilterOptions(records: readonly PddCollectionFailureV2Record[]) {
-  const dimensions = records.map(pddCollectionFailureV2Dimensions);
-  const options = (values: readonly string[]) => [...new Set(values)].sort((left, right) =>
+  const regions = new Set<string>();
+  const rms = new Set<string>();
+  const rgms = new Set<string>();
+  const bases = new Set<string>();
+  const origins = new Set<string>();
+  const rmAreas = new Set<string>();
+  for (const record of records) {
+    const dimensions = pddCollectionFailureV2Dimensions(record);
+    regions.add(dimensions.region);
+    rms.add(dimensions.rm);
+    rgms.add(dimensions.rgm);
+    bases.add(dimensions.base);
+    origins.add(dimensions.origin);
+    rmAreas.add(dimensions.rmArea);
+  }
+  const options = (values: ReadonlySet<string>) => [...values].sort((left, right) =>
     left.localeCompare(right, "pt-BR", { numeric: true }),
   );
   return {
-    regions: options(dimensions.map((item) => item.region)),
-    rms: options(dimensions.map((item) => item.rm)),
-    rgms: options(dimensions.map((item) => item.rgm)),
-    bases: options(dimensions.map((item) => item.base)),
-    origins: options(dimensions.map((item) => item.origin)),
-    rmAreas: options(dimensions.map((item) => item.rmArea)),
+    regions: options(regions),
+    rms: options(rms),
+    rgms: options(rgms),
+    bases: options(bases),
+    origins: options(origins),
+    rmAreas: options(rmAreas),
   };
 }
 
@@ -234,4 +261,126 @@ export function summarizePddCollectionFailureV2ByBase(
     ...group,
     collectionFailureRate: group.totalOrders === 0 ? 0 : group.ordersUnscannedAtCollection / group.totalOrders,
   })).sort((left, right) => right.ordersUnscannedAtCollection - left.ordersUnscannedAtCollection || left.base.localeCompare(right.base, "pt-BR", { numeric: true }));
+}
+
+function finalizeMetrics(metrics: PddCollectionFailureV2Metrics): PddCollectionFailureV2Metrics {
+  return {
+    ...metrics,
+    collectionFailureRate: metrics.totalOrders === 0
+      ? 0
+      : metrics.ordersUnscannedAtCollection / metrics.totalOrders,
+  };
+}
+
+/**
+ * Build the PDD filter options and all filtered summaries in one source-row pass.
+ * This keeps the official formulas and grouping keys shared with the legacy helpers.
+ */
+export function analyzePddCollectionFailureV2(
+  records: readonly PddCollectionFailureV2Record[],
+  selections: PddCollectionFailureV2Selections = {},
+): PddCollectionFailureV2Analysis {
+  const optionSets = {
+    regions: new Set<string>(),
+    rms: new Set<string>(),
+    rgms: new Set<string>(),
+    bases: new Set<string>(),
+    origins: new Set<string>(),
+    rmAreas: new Set<string>(),
+  };
+  const filteredRecords: PddCollectionFailureV2Record[] = [];
+  const summary = emptyMetrics();
+  const regions = new Map<string, {
+    dimensions: PddCollectionFailureV2Dimensions;
+    metrics: PddCollectionFailureV2Metrics;
+    bases: Set<string>;
+  }>();
+  const rms = new Map<string, {
+    dimensions: PddCollectionFailureV2Dimensions;
+    metrics: PddCollectionFailureV2Metrics;
+    bases: Set<string>;
+  }>();
+  const bases = new Map<string, PddCollectionFailureV2BaseSummary>();
+
+  for (const record of records) {
+    const dimensions = pddCollectionFailureV2Dimensions(record);
+    optionSets.regions.add(dimensions.region);
+    optionSets.rms.add(dimensions.rm);
+    optionSets.rgms.add(dimensions.rgm);
+    optionSets.bases.add(dimensions.base);
+    optionSets.origins.add(dimensions.origin);
+    optionSets.rmAreas.add(dimensions.rmArea);
+
+    if (
+      (selections.regions && !selections.regions.has(dimensions.region)) ||
+      (selections.rms && !selections.rms.has(dimensions.rm)) ||
+      (selections.rgms && !selections.rgms.has(dimensions.rgm)) ||
+      (selections.bases && !selections.bases.has(dimensions.base)) ||
+      (selections.origins && !selections.origins.has(dimensions.origin))
+    ) continue;
+
+    filteredRecords.push(record);
+    addRecord(summary, record);
+
+    const baseIdentity = `${dimensions.baseCode}\u0000${dimensions.base}`;
+    let regionGroup = regions.get(dimensions.region);
+    if (!regionGroup) {
+      regionGroup = { dimensions, metrics: emptyMetrics(), bases: new Set<string>() };
+      regions.set(dimensions.region, regionGroup);
+    }
+    addRecord(regionGroup.metrics, record);
+    regionGroup.bases.add(baseIdentity);
+
+    const rmKey = JSON.stringify([dimensions.region, dimensions.rmArea, dimensions.rm, dimensions.rgm]);
+    let rmGroup = rms.get(rmKey);
+    if (!rmGroup) {
+      rmGroup = { dimensions, metrics: emptyMetrics(), bases: new Set<string>() };
+      rms.set(rmKey, rmGroup);
+    }
+    addRecord(rmGroup.metrics, record);
+    rmGroup.bases.add(baseIdentity);
+
+    const baseKey = JSON.stringify([dimensions.region, dimensions.baseCode, dimensions.base]);
+    let baseGroup = bases.get(baseKey);
+    if (!baseGroup) {
+      baseGroup = { key: baseKey, ...dimensions, ...emptyMetrics() };
+      bases.set(baseKey, baseGroup);
+    }
+    addRecord(baseGroup, record);
+  }
+
+  assertSingleOperationalDate(filteredRecords);
+  const sortedOptions = (values: ReadonlySet<string>) => [...values].sort((left, right) =>
+    left.localeCompare(right, "pt-BR", { numeric: true }),
+  );
+  return {
+    options: {
+      regions: sortedOptions(optionSets.regions),
+      rms: sortedOptions(optionSets.rms),
+      rgms: sortedOptions(optionSets.rgms),
+      bases: sortedOptions(optionSets.bases),
+      origins: sortedOptions(optionSets.origins),
+      rmAreas: sortedOptions(optionSets.rmAreas),
+    },
+    filteredRecords,
+    summary: finalizeMetrics(summary),
+    regionalSummary: [...regions].map(([region, group]) => ({
+      region,
+      rgm: group.dimensions.rgm,
+      baseCount: group.bases.size,
+      ...finalizeMetrics(group.metrics),
+    })).sort((left, right) => right.totalOrders - left.totalOrders || left.region.localeCompare(right.region, "pt-BR")),
+    rmSummary: [...rms.values()].map((group) => ({
+      region: group.dimensions.region,
+      rmArea: group.dimensions.rmArea,
+      rm: group.dimensions.rm,
+      rgm: group.dimensions.rgm,
+      baseCount: group.bases.size,
+      ...finalizeMetrics(group.metrics),
+    })).sort((left, right) => right.totalOrders - left.totalOrders || left.rm.localeCompare(right.rm, "pt-BR")),
+    baseSummary: [...bases.values()].map((group) => ({
+      ...group,
+      collectionFailureRate: group.totalOrders === 0 ? 0 : group.ordersUnscannedAtCollection / group.totalOrders,
+    })).sort((left, right) => right.ordersUnscannedAtCollection - left.ordersUnscannedAtCollection || left.base.localeCompare(right.base, "pt-BR", { numeric: true })),
+  };
 }

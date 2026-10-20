@@ -121,8 +121,7 @@ import {
   filterCollectionRateV3Rows,
   groupCollectionRateV3Rows,
   mapCollectionRateV3Record,
-  summarizeCollectionRateV3,
-  summarizeCollectionRateV3Attempts,
+  summarizeCollectionRateV3Cards,
   summarizeCollectionRateV3Daily,
   summarizeCollectionRateV3Monthly,
   summarizeCollectionRateV3Origins,
@@ -186,16 +185,10 @@ import {
   type PddCollectionFailureV2Record,
 } from "../../lib/data-foundation/pdd-collection-failure";
 import {
-  filterPddCollectionFailureV2Records,
+  analyzePddCollectionFailureV2,
   isPddCollectionFailureV2SingleOperationalDate,
   pddCollectionFailureV2Dimensions,
-  pddCollectionFailureV2FilterOptions,
-  summarizePddCollectionFailureV2,
-  summarizePddCollectionFailureV2ByBase,
-  summarizePddCollectionFailureV2ByRegion,
-  summarizePddCollectionFailureV2ByRm,
   PDD_COLLECTION_FAILURE_V2_FIELDS,
-  type PddCollectionFailureV2Filters,
 } from "../../lib/data-foundation/pdd-collection-failure-dashboard";
 import {
   JT_MONITORING_V2_COLUMNS,
@@ -2602,7 +2595,6 @@ function PddCollectionFailureV2Dashboard({
   onPeriodChange,
   t,
 }: PddCollectionFailureV2DashboardProps) {
-  const options = useMemo(() => pddCollectionFailureV2FilterOptions(records), [records]);
   const [selectedRegions, setSelectedRegions] = useState<Set<string> | null>(null);
   const [selectedRms, setSelectedRms] = useState<Set<string> | null>(null);
   const [selectedRgms, setSelectedRgms] = useState<Set<string> | null>(null);
@@ -2611,21 +2603,14 @@ function PddCollectionFailureV2Dashboard({
   const [tableQuery, setTableQuery] = useState("");
   const [page, setPage] = useState(1);
 
-  const currentFilters = useMemo<PddCollectionFailureV2Filters>(() => ({
-    regions: selectedRegions ?? new Set(options.regions),
-    rms: selectedRms ?? new Set(options.rms),
-    rgms: selectedRgms ?? new Set(options.rgms),
-    bases: selectedBases ?? new Set(options.bases),
-    origins: selectedOrigins ?? new Set(options.origins),
-  }), [selectedRegions, selectedRms, selectedRgms, selectedBases, selectedOrigins, options]);
-  const filteredRecords = useMemo(
-    () => filterPddCollectionFailureV2Records(records, currentFilters),
-    [records, currentFilters],
-  );
-  const summary = useMemo(() => summarizePddCollectionFailureV2(filteredRecords), [filteredRecords]);
-  const regionalSummary = useMemo(() => summarizePddCollectionFailureV2ByRegion(filteredRecords), [filteredRecords]);
-  const rmSummary = useMemo(() => summarizePddCollectionFailureV2ByRm(filteredRecords), [filteredRecords]);
-  const baseSummary = useMemo(() => summarizePddCollectionFailureV2ByBase(filteredRecords), [filteredRecords]);
+  const analysis = useMemo(() => analyzePddCollectionFailureV2(records, {
+    regions: selectedRegions,
+    rms: selectedRms,
+    rgms: selectedRgms,
+    bases: selectedBases,
+    origins: selectedOrigins,
+  }), [records, selectedRegions, selectedRms, selectedRgms, selectedBases, selectedOrigins]);
+  const { options, filteredRecords, summary, regionalSummary, rmSummary, baseSummary } = analysis;
   const searchedRecords = useMemo(() => {
     const query = normalizeSearchText(tableQuery.trim());
     if (!query) return filteredRecords;
@@ -5604,14 +5589,12 @@ export function DashboardApp() {
     () => filterCollectionRateV3Rows(taxaV2Rows, taxaV2Filters),
     [taxaV2Rows, taxaV2Filters],
   );
-  const taxaV2Summary = useMemo(
-    () => summarizeCollectionRateV3(taxaV2FilteredRows),
+  const taxaV2CardSummaries = useMemo(
+    () => summarizeCollectionRateV3Cards(taxaV2FilteredRows),
     [taxaV2FilteredRows],
   );
-  const taxaV2AttemptRate = useMemo(
-    () => summarizeCollectionRateV3Attempts(taxaV2FilteredRows),
-    [taxaV2FilteredRows],
-  );
+  const taxaV2Summary = taxaV2CardSummaries.totals;
+  const taxaV2AttemptRate = taxaV2CardSummaries.attempts;
   const taxaV2ByRegion = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
   const taxaV2ByRmArea = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
   const taxaV2Daily = useMemo(() => summarizeCollectionRateV3Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);

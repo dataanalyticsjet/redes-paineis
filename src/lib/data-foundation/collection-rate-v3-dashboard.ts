@@ -43,6 +43,11 @@ export interface CollectionRateV3AttemptRate {
   rate: number | null;
 }
 
+export interface CollectionRateV3CardSummaries {
+  totals: CollectionRateV3Totals;
+  attempts: CollectionRateV3AttemptRate;
+}
+
 export interface CollectionRateV3Options {
   regions: string[];
   rms: string[];
@@ -96,19 +101,32 @@ export function mapCollectionRateV3Record(record: CollectionRateV3Record): Colle
   };
 }
 
-function unique(values: Iterable<string>): string[] {
-  return [...new Set([...values].filter(Boolean))].sort((left, right) => left.localeCompare(right, "pt-BR"));
-}
-
 export function collectionRateV3FilterOptions(rows: readonly CollectionRateV3DashboardRow[]): CollectionRateV3Options {
+  const regions = new Set<string>();
+  const rms = new Set<string>();
+  const rmAreas = new Set<string>();
+  const rgms = new Set<string>();
+  const bases = new Set<string>();
+  const origins = new Set<string>();
+  const productTypes = new Set<string>();
+  for (const row of rows) {
+    if (row.region) regions.add(row.region);
+    if (row.rm) rms.add(row.rm);
+    if (row.rmArea) rmAreas.add(row.rmArea);
+    if (row.rgm) rgms.add(row.rgm);
+    if (row.base) bases.add(row.base);
+    if (row.origin) origins.add(row.origin);
+    if (row.productType) productTypes.add(row.productType);
+  }
+  const sorted = (values: ReadonlySet<string>) => [...values].sort((left, right) => left.localeCompare(right, "pt-BR"));
   return {
-    regions: unique(rows.map((row) => row.region)),
-    rms: unique(rows.map((row) => row.rm)),
-    rmAreas: unique(rows.map((row) => row.rmArea)),
-    rgms: unique(rows.map((row) => row.rgm)),
-    bases: unique(rows.map((row) => row.base)),
-    origins: unique(rows.map((row) => row.origin)),
-    productTypes: unique(rows.map((row) => row.productType)),
+    regions: sorted(regions),
+    rms: sorted(rms),
+    rmAreas: sorted(rmAreas),
+    rgms: sorted(rgms),
+    bases: sorted(bases),
+    origins: sorted(origins),
+    productTypes: sorted(productTypes),
   };
 }
 
@@ -141,27 +159,50 @@ function addTotals(target: CollectionRateV3Totals, row: CollectionRateV3Dashboar
   target.collected += quantity(row.collected_quantity);
   target.notCollected += quantity(row.not_collected_quantity);
   target.collectedOnTime += quantity(row.collected_on_time_quantity);
+}
+
+function finalizeTotals(target: CollectionRateV3Totals): CollectionRateV3Totals {
   target.collectionRate = target.planned > 0 ? target.collected / target.planned : null;
   target.onTimeRate = target.planned > 0 ? target.collectedOnTime / target.planned : null;
+  return target;
 }
 
 export function summarizeCollectionRateV3(rows: readonly CollectionRateV3DashboardRow[]): CollectionRateV3Totals {
   const summary = emptyTotals();
   for (const row of rows) addTotals(summary, row);
-  return summary;
+  return finalizeTotals(summary);
+}
+
+export function summarizeCollectionRateV3Cards(
+  rows: readonly CollectionRateV3DashboardRow[],
+): CollectionRateV3CardSummaries {
+  const totals = emptyTotals();
+  let collectedPlusAttempts = 0;
+  let quantityToCollect = 0;
+  for (const row of rows) {
+    addTotals(totals, row);
+    collectedPlusAttempts += quantity(row.collected_plus_attempts_quantity);
+    quantityToCollect += quantity(row.quantity_to_collect);
+  }
+  return {
+    totals: finalizeTotals(totals),
+    attempts: {
+      collectedPlusAttempts,
+      quantityToCollect,
+      rate: quantityToCollect > 0 ? collectedPlusAttempts / quantityToCollect : null,
+    },
+  };
 }
 
 export function summarizeCollectionRateV3Attempts(
   rows: readonly CollectionRateV3DashboardRow[],
 ): CollectionRateV3AttemptRate {
-  const collectedPlusAttempts = rows.reduce(
-    (sum, row) => sum + quantity(row.collected_plus_attempts_quantity),
-    0,
-  );
-  const quantityToCollect = rows.reduce(
-    (sum, row) => sum + quantity(row.quantity_to_collect),
-    0,
-  );
+  let collectedPlusAttempts = 0;
+  let quantityToCollect = 0;
+  for (const row of rows) {
+    collectedPlusAttempts += quantity(row.collected_plus_attempts_quantity);
+    quantityToCollect += quantity(row.quantity_to_collect);
+  }
   return {
     collectedPlusAttempts,
     quantityToCollect,
@@ -210,7 +251,11 @@ export function groupCollectionRateV3Rows(
     }
   }
   const result = [...groups.values()];
-  for (const group of result) group.baseCount = basesByGroup.get(group.key)?.size ?? 0;
+  for (const group of result) {
+    finalizeTotals(group);
+    for (const daily of group.daily.values()) finalizeTotals(daily);
+    group.baseCount = basesByGroup.get(group.key)?.size ?? 0;
+  }
   return result.sort((left, right) => right.planned - left.planned || left.label.localeCompare(right.label, "pt-BR"));
 }
 
@@ -223,7 +268,8 @@ export function summarizeCollectionRateV3Origins(rows: readonly CollectionRateV3
     addTotals(summary, row);
     groups.set(row.origin, summary);
   }
-  return [...groups.values()].sort((left, right) => right.planned - left.planned || left.origin.localeCompare(right.origin, "pt-BR"));
+  return [...groups.values()].map((summary) => { finalizeTotals(summary); return summary; })
+    .sort((left, right) => right.planned - left.planned || left.origin.localeCompare(right.origin, "pt-BR"));
 }
 
 export interface CollectionRateV3DailySummary extends CollectionRateV3Totals { date: string; }
@@ -236,7 +282,8 @@ export function summarizeCollectionRateV3Daily(rows: readonly CollectionRateV3Da
     addTotals(summary, row);
     groups.set(date, summary);
   }
-  return [...groups.values()].sort((left, right) => left.date.localeCompare(right.date));
+  return [...groups.values()].map((summary) => { finalizeTotals(summary); return summary; })
+    .sort((left, right) => left.date.localeCompare(right.date));
 }
 
 export interface CollectionRateV3MonthlySummary extends CollectionRateV3Totals { month: string; }
@@ -250,7 +297,8 @@ export function summarizeCollectionRateV3Monthly(rows: readonly CollectionRateV3
     addTotals(summary, row);
     groups.set(month, summary);
   }
-  return [...groups.values()].sort((left, right) => left.month.localeCompare(right.month));
+  return [...groups.values()].map((summary) => { finalizeTotals(summary); return summary; })
+    .sort((left, right) => left.month.localeCompare(right.month));
 }
 
 const QUANTITY_FIELDS = new Set<string>([

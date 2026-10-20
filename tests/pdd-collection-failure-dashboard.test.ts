@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  analyzePddCollectionFailureV2,
   filterPddCollectionFailureV2Records,
   isPddCollectionFailureV2SingleOperationalDate,
   pddCollectionFailureV2Dimensions,
@@ -139,4 +140,52 @@ test("filtros, tabelas regional, RM e base preservam as linhas e agrupam dimens�
   assert.equal(summarizePddCollectionFailureV2ByRm(rows).length, 2);
   assert.equal(summarizePddCollectionFailureV2ByBase(rows).length, 2);
   assert.equal(new Set(rows.map((row) => `${row.publication_id}:${row.source_row_no}`)).size, rows.length);
+});
+
+test("a análise consolidada do PDD preserva opções, linhas filtradas e resumos", () => {
+  const rows = [
+    record(2, { total_orders: 100, orders_unscanned_at_receipt: 20, orders_unscanned_at_collection: 10 }),
+    record(3, { total_orders: 300, orders_unscanned_at_receipt: 60, orders_unscanned_at_collection: 90 }),
+    record(4, {
+      source_base_code: "00456",
+      source_base_name: "Base Beta",
+      effective_base_code: "00456",
+      effective_base_name: "Base Beta",
+      effective_region: "SR",
+      effective_rm_area: "SR-RS",
+      effective_rm: "RM Beta",
+      effective_rgm: "RGM SR",
+      order_origin: "Marketplace",
+      total_orders: 50,
+      orders_unscanned_at_receipt: 5,
+      orders_unscanned_at_collection: 5,
+    }),
+  ];
+  const selections = {
+    regions: new Set(["SPE"]),
+    rms: null,
+    rgms: new Set(["RGM Alfa"]),
+    bases: null,
+    origins: new Set(["Loja virtual"]),
+  };
+  const filtered = filterPddCollectionFailureV2Records(rows, {
+    regions: selections.regions!,
+    rms: new Set(["RM Alfa"]),
+    rgms: selections.rgms!,
+    bases: new Set(["Base Alfa"]),
+    origins: selections.origins!,
+  });
+  const analysis = analyzePddCollectionFailureV2(rows, selections);
+
+  assert.deepEqual(analysis.options, pddCollectionFailureV2FilterOptions(rows));
+  assert.deepEqual(analysis.filteredRecords, filtered);
+  assert.deepEqual(analysis.summary, summarizePddCollectionFailureV2(filtered));
+  assert.deepEqual(analysis.regionalSummary, summarizePddCollectionFailureV2ByRegion(filtered));
+  assert.deepEqual(analysis.rmSummary, summarizePddCollectionFailureV2ByRm(filtered));
+  assert.deepEqual(analysis.baseSummary, summarizePddCollectionFailureV2ByBase(filtered));
+
+  const noneSelected = analyzePddCollectionFailureV2(rows, { regions: new Set() });
+  assert.equal(noneSelected.filteredRecords.length, 0);
+  assert.equal(noneSelected.summary.totalOrders, 0);
+  assert.deepEqual(noneSelected.options, analysis.options);
 });
