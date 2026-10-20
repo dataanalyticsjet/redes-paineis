@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiFetch } from "../../lib/api-url";
-import { loadIndependently } from "../../lib/data-foundation/admin-metadata";
+import {
+  loadIndependently,
+  PUBLICATION_HISTORY_LIMIT,
+  PUBLICATION_SUMMARY_LIMIT,
+  publicationHeadChanged,
+  publicationRequestPlan,
+} from "../../lib/data-foundation/admin-metadata";
 import type { DashboardTranslator } from "../../lib/i18n";
 import { invalidateDashboardDataCache } from "../../lib/data-foundation/dashboard-data-cache.ts";
 import { AlertTriangle, Check, Clock3, Database, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
@@ -29,11 +35,14 @@ type Contract = {
 type Publication = {
   publicationId: string;
   version: number;
+  contractVersion: number;
   publishedAt: string | null;
   visibleRowCount: number;
   periodStart: string | null;
   periodEnd: string | null;
 };
+
+type PublicationsResponse = { publications: Publication[]; total: number };
 
 type Preview = {
   jobId: string;
@@ -124,6 +133,20 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   throw new Error(detail);
 }
 
+async function requestPublications(sourceId: string, limit: number, signal: AbortSignal): Promise<PublicationsResponse> {
+  try {
+    return await requestJson<PublicationsResponse>(
+      `/api/v2/data-sources/${encodeURIComponent(sourceId)}/publications?limit=${limit}&offset=0`,
+      { signal },
+    );
+  } catch (caught) {
+    if (caught instanceof Error && caught.message === "data_foundation_v2_disabled") {
+      return { publications: [], total: 0 };
+    }
+    throw caught;
+  }
+}
+
 function formatCount(value: number): string {
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 }).format(value);
 }
@@ -167,14 +190,117 @@ export function DataFoundationAdmin({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [publicationHistoryLoading, setPublicationHistoryLoading] = useState<Record<string, boolean>>({});
   const metadataLoadGeneration = useRef(0);
   const metadataAbortController = useRef<AbortController | null>(null);
+  const selectedSourceRef = useRef("");
+  const publicationValuesRef = useRef<Record<string, Publication[]>>({});
+  const detailedHistorySourcesRef = useRef(new Set<string>());
+  const selectedHistoryAbortController = useRef<AbortController | null>(null);
+  const selectedHistoryRequestGeneration = useRef(0);
+  const initialSummaryLoad = useRef<Promise<void>>(Promise.resolve());
+
+  const fetchFullHistory = useCallback(async (sourceId: string, loadGeneration: number) => {
+    selectedHistoryAbortController.current?.abort();
+    const controller = new AbortController();
+    selectedHistoryAbortController.current = controller;
+    const requestGeneration = ++selectedHistoryRequestGeneration.current;
+    const isCurrentRequest = () => (
+      metadataLoadGeneration.current === loadGeneration
+      && selectedHistoryRequestGeneration.current === requestGeneration
+      && selectedSourceRef.current === sourceId
+      && !controller.signal.aborted
+    );
+
+    setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: true }));
+    setPublicationErrors((current) => {
+      if (!current[sourceId]) return current;
+      const next = { ...current };
+      delete next[sourceId];
+      return next;
+    });
+    try {
+      const result = await requestPublications(sourceId, PUBLICATION_HISTORY_LIMIT, controller.signal);
+      if (!isCurrentRequest()) return;
+      publicationValuesRef.current[sourceId] = result.publications;
+      detailedHistorySourcesRef.current.add(sourceId);
+      setPublications((current) => ({ ...current, [sourceId]: result.publications }));
+    } catch (caught) {
+      if (!isCurrentRequest()) return;
+      publicationValuesRef.current[sourceId] = [];
+      detailedHistorySourcesRef.current.delete(sourceId);
+      setPublications((current) => ({ ...current, [sourceId]: [] }));
+      setPublicationErrors((current) => ({
+        ...current,
+        [sourceId]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+      }));
+    } finally {
+      if (isCurrentRequest()) {
+        setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
+      }
+    }
+  }, []);
+
+  const ensureSourceHistory = useCallback(async (sourceId: string) => {
+    const loadGeneration = metadataLoadGeneration.current;
+    await initialSummaryLoad.current;
+    if (
+      metadataLoadGeneration.current !== loadGeneration
+      || selectedSourceRef.current !== sourceId
+    ) return;
+
+    if (!detailedHistorySourcesRef.current.has(sourceId)) {
+      await fetchFullHistory(sourceId, loadGeneration);
+      return;
+    }
+
+    selectedHistoryAbortController.current?.abort();
+    const controller = new AbortController();
+    selectedHistoryAbortController.current = controller;
+    const requestGeneration = ++selectedHistoryRequestGeneration.current;
+    const isCurrentRequest = () => (
+      metadataLoadGeneration.current === loadGeneration
+      && selectedHistoryRequestGeneration.current === requestGeneration
+      && selectedSourceRef.current === sourceId
+      && !controller.signal.aborted
+    );
+    setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: true }));
+    try {
+      const head = await requestPublications(sourceId, 1, controller.signal);
+      if (!isCurrentRequest()) return;
+      const cachedLatest = publicationValuesRef.current[sourceId]?.[0] ?? null;
+      const currentLatest = head.publications[0] ?? null;
+      if (!publicationHeadChanged(cachedLatest, currentLatest)) {
+        setPublicationErrors((current) => {
+          if (!current[sourceId]) return current;
+          const next = { ...current };
+          delete next[sourceId];
+          return next;
+        });
+        setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
+        return;
+      }
+      await fetchFullHistory(sourceId, loadGeneration);
+    } catch (caught) {
+      if (!isCurrentRequest()) return;
+      publicationValuesRef.current[sourceId] = [];
+      detailedHistorySourcesRef.current.delete(sourceId);
+      setPublications((current) => ({ ...current, [sourceId]: [] }));
+      setPublicationErrors((current) => ({
+        ...current,
+        [sourceId]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+      }));
+      setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
+    }
+  }, [fetchFullHistory]);
 
   const loadMetadata = useCallback(async () => {
     metadataAbortController.current?.abort();
+    selectedHistoryAbortController.current?.abort();
     const controller = new AbortController();
     metadataAbortController.current = controller;
     const loadGeneration = ++metadataLoadGeneration.current;
+    selectedHistoryRequestGeneration.current += 1;
     const isCurrentLoad = () => (
       metadataLoadGeneration.current === loadGeneration && !controller.signal.aborted
     );
@@ -183,6 +309,10 @@ export function DataFoundationAdmin({
     setNotice(null);
     setContracts({});
     setPublications({});
+    publicationValuesRef.current = {};
+    detailedHistorySourcesRef.current.clear();
+    initialSummaryLoad.current = Promise.resolve();
+    setPublicationHistoryLoading({});
     setContractErrors({});
     setPublicationErrors({});
     setMapping(null);
@@ -192,8 +322,15 @@ export function DataFoundationAdmin({
       const result = await requestJson<{ sources: Source[] }>("/api/v2/data-sources", { signal: controller.signal });
       if (!isCurrentLoad()) return;
       setSources(result.sources);
-      setSelectedSource((current) => current || result.sources[0]?.source_id || "");
+      const selectedStillExists = result.sources.some((source) => source.source_id === selectedSourceRef.current);
+      const activeSource = selectedStillExists ? selectedSourceRef.current : result.sources[0]?.source_id ?? "";
+      selectedSourceRef.current = activeSource;
+      setSelectedSource(activeSource);
       setLoading(false);
+
+      const publicationPlan = publicationRequestPlan(result.sources, activeSource);
+      const activeHistory = publicationPlan.find((item) => item.limit === PUBLICATION_HISTORY_LIMIT);
+      if (activeHistory) void fetchFullHistory(activeHistory.source.source_id, loadGeneration);
 
       void requestJson<MappingStatus>("/api/v2/base-mapping/current", { signal: controller.signal })
         .then((status) => {
@@ -234,38 +371,32 @@ export function DataFoundationAdmin({
         },
       );
 
-      void loadIndependently(
-        result.sources,
-        async (source) => {
-          try {
-            return await requestJson<{ publications: Publication[] }>(
-              `/api/v2/data-sources/${encodeURIComponent(source.source_id)}/publications?limit=50`,
-              { signal: controller.signal },
-            );
-          } catch (caught) {
-            if (caught instanceof Error && caught.message === "data_foundation_v2_disabled") {
-              return { publications: [] };
-            }
-            throw caught;
-          }
-        },
-        (source, history) => {
+      initialSummaryLoad.current = loadIndependently(
+        publicationPlan.filter((item) => item.limit === PUBLICATION_SUMMARY_LIMIT),
+        (item) => requestPublications(
+          item.source.source_id,
+          item.limit,
+          controller.signal,
+        ),
+        (item, history) => {
           if (!isCurrentLoad()) return;
-          setPublications((current) => ({ ...current, [source.source_id]: history.publications }));
+          publicationValuesRef.current[item.source.source_id] = history.publications;
+          setPublications((current) => ({ ...current, [item.source.source_id]: history.publications }));
           setPublicationErrors((current) => {
-            if (!current[source.source_id]) return current;
+            if (!current[item.source.source_id]) return current;
             const next = { ...current };
-            delete next[source.source_id];
+            delete next[item.source.source_id];
             return next;
           });
         },
-        (source, caught) => {
+        (item, caught) => {
           if (!isCurrentLoad()) return;
           setPublicationErrors((current) => ({
             ...current,
-            [source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+            [item.source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
           }));
         },
+        2,
       );
     } catch (caught) {
       if (isCurrentLoad()) {
@@ -275,7 +406,7 @@ export function DataFoundationAdmin({
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
-  }, []);
+  }, [fetchFullHistory]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -284,13 +415,35 @@ export function DataFoundationAdmin({
     return () => {
       window.cancelAnimationFrame(frame);
       metadataAbortController.current?.abort();
+      selectedHistoryAbortController.current?.abort();
       metadataLoadGeneration.current += 1;
+      selectedHistoryRequestGeneration.current += 1;
     };
   }, [loadMetadata]);
+
+  const selectSource = useCallback((sourceId: string) => {
+    if (sourceId === selectedSourceRef.current || loading) return;
+    const previousSourceId = selectedSourceRef.current;
+    selectedSourceRef.current = sourceId;
+    selectedHistoryAbortController.current?.abort();
+    selectedHistoryRequestGeneration.current += 1;
+    setPublicationHistoryLoading((current) => ({
+      ...current,
+      ...(previousSourceId ? { [previousSourceId]: false } : {}),
+      [sourceId]: true,
+    }));
+    setSelectedSource(sourceId);
+    setPreview(null);
+    setCandidates([]);
+    setMappingReviewDirty(false);
+    setFile(null);
+    void ensureSourceHistory(sourceId);
+  }, [ensureSourceHistory, loading]);
 
   const contract = contracts[selectedSource];
   const sourcePublications = publications[selectedSource] ?? [];
   const latestPublication = sourcePublications[0];
+  const sourceHistoryLoading = publicationHistoryLoading[selectedSource] ?? false;
   const importActionsEnabled = canImport && error !== "data_foundation_v2_disabled";
   const visibleCandidates = useMemo(() => {
     const query = normalize(candidateQuery.trim());
@@ -514,11 +667,12 @@ export function DataFoundationAdmin({
                   type="button"
                   key={source.source_id}
                   className={`data-foundation-source${selectedSource === source.source_id ? " is-selected" : ""}`}
-                  onClick={() => { setSelectedSource(source.source_id); setPreview(null); setCandidates([]); setMappingReviewDirty(false); setFile(null); }}
+                  onClick={() => selectSource(source.source_id)}
+                  disabled={loading}
                 >
                   <FileSpreadsheet size={18} />
                   <span><strong>{t(source.display_name)}</strong><small>{sourceContract ? `${sourceContract.columns.length} ${t("colunas")} · v${sourceContract.version}` : contractErrors[source.source_id] ? t("Contrato indisponível") : t("Carregando contrato…")}</small></span>
-                  <small>{last ? `v${last.version}` : publicationErrors[source.source_id] ? t("Histórico indisponível") : publications[source.source_id] ? t("Sem publicação") : t("Carregando…")}</small>
+                  <small>{publicationHistoryLoading[source.source_id] ? t("Carregando…") : last ? `v${last.version}` : publicationErrors[source.source_id] ? t("Histórico indisponível") : publications[source.source_id] ? t("Sem publicação") : t("Carregando…")}</small>
                 </button>
               );
             })}
@@ -540,9 +694,9 @@ export function DataFoundationAdmin({
                 </section>
 
                 <section className="data-foundation-card">
-                  <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PUBLICAÇÕES")}</span><h2>{t("Última publicação e histórico")}</h2></div>{latestPublication ? <span className="data-foundation-state is-ready">{t("Versão {version}", { version: latestPublication.version })}</span> : <span className="data-foundation-state">{t("Sem publicação")}</span>}</div>
-                  {latestPublication ? <p className="data-foundation-latest"><Clock3 size={15} /> {formatDateTime(latestPublication.publishedAt)} · {formatCount(latestPublication.visibleRowCount)} {t("registros visíveis")}{latestPublication.periodStart ? ` · ${latestPublication.periodStart} – ${latestPublication.periodEnd}` : ""}</p> : null}
-                  {publicationErrors[selectedSource] ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o histórico desta fonte.")} {displayApiError(publicationErrors[selectedSource], t)}</span></div> : sourcePublications.length ? <div className="data-foundation-history">{sourcePublications.map((publication) => <div key={publication.publicationId}><span>{t("Versão {version}", { version: publication.version })}</span><span>{formatDateTime(publication.publishedAt)}</span><strong>{formatCount(publication.visibleRowCount)} {t("registros")}</strong><small>{publication.periodStart ? `${publication.periodStart} – ${publication.periodEnd}` : t("Snapshot")}</small></div>)}</div> : publications[selectedSource] ? <p className="data-foundation-empty">{t("Ainda não há publicações visíveis para este escopo.")}</p> : <p className="data-foundation-loading">{t("Carregando histórico…")}</p>}
+                  <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PUBLICAÇÕES")}</span><h2>{t("Última publicação e histórico")}</h2></div>{sourceHistoryLoading ? <span className="data-foundation-state">{t("Carregando…")}</span> : latestPublication ? <span className="data-foundation-state is-ready">{t("Versão {version}", { version: latestPublication.version })}</span> : <span className="data-foundation-state">{t("Sem publicação")}</span>}</div>
+                  {!sourceHistoryLoading && latestPublication ? <p className="data-foundation-latest"><Clock3 size={15} /> {formatDateTime(latestPublication.publishedAt)} · {formatCount(latestPublication.visibleRowCount)} {t("registros visíveis")}{latestPublication.periodStart ? ` · ${latestPublication.periodStart} – ${latestPublication.periodEnd}` : ""}</p> : null}
+                  {sourceHistoryLoading ? <p className="data-foundation-loading">{t("Carregando histórico…")}</p> : publicationErrors[selectedSource] ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o histórico desta fonte.")} {displayApiError(publicationErrors[selectedSource], t)}</span></div> : sourcePublications.length ? <div className="data-foundation-history">{sourcePublications.map((publication) => <div key={publication.publicationId}><span>{t("Versão {version}", { version: publication.version })}</span><span>{formatDateTime(publication.publishedAt)}</span><strong>{formatCount(publication.visibleRowCount)} {t("registros")}</strong><small>{publication.periodStart ? `${publication.periodStart} – ${publication.periodEnd}` : t("Snapshot")}</small></div>)}</div> : publications[selectedSource] ? <p className="data-foundation-empty">{t("Ainda não há publicações visíveis para este escopo.")}</p> : <p className="data-foundation-loading">{t("Carregando histórico…")}</p>}
                 </section>
 
                 <section className="data-foundation-card">
