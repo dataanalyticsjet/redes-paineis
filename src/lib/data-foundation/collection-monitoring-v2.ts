@@ -1,0 +1,235 @@
+import { apiFetch } from "../api-url.ts";
+
+export const COLLECTION_MONITORING_V2_SOURCE_ID = "collection_monitoring";
+export const COLLECTION_MONITORING_V2_CONTRACT_VERSION = 2;
+export const COLLECTION_MONITORING_V2_PAGE_SIZE = 250;
+
+export const COLLECTION_MONITORING_V2_COLUMNS = [
+  "data_date", "reported_origin_region", "source_base_name", "order_origin",
+  "seller_collection_rate", "collection_visit_rate", "expected_dropoff", "expected_pickup",
+  "pending_dropoff", "pending_pickup", "status_collected", "status_received_at_base",
+  "status_dispatched_from_base", "status_in_transit_from_base", "in_transit_to_center",
+  "in_transit_to_distribution", "arrived_sorting_center", "departed_sorting_center",
+  "distribution_in_transit", "arrived_sc", "package_created_at_base", "processed_problem_items",
+  "unprocessed_problem_items",
+] as const;
+
+export const COLLECTION_MONITORING_V2_HEADERS: Readonly<Record<(typeof COLLECTION_MONITORING_V2_COLUMNS)[number], string>> = {
+  data_date: "Data",
+  reported_origin_region: "Regional Origem",
+  source_base_name: "PDD de saida",
+  order_origin: "Origem do Pedido",
+  seller_collection_rate: "Taxa de coleta do vendedor",
+  collection_visit_rate: "Taxa de Visita de Coleta",
+  expected_dropoff: "Coleta Prevista Drop-off",
+  expected_pickup: "Coleta Prevista Pick-up",
+  pending_dropoff: "Aguardando Coleta Drop-off",
+  pending_pickup: "Aguardando Coleta Pick-up",
+  status_collected: "Status atual – Coletado",
+  status_received_at_base: "Status atual – Recebido na base",
+  status_dispatched_from_base: "Expedida pela Base",
+  status_in_transit_from_base: "Status atual – Em trânsito a partir da base",
+  in_transit_to_center: "网点发件在途(中心)",
+  in_transit_to_distribution: "网点发件在途(集散)",
+  arrived_sorting_center: "Chegada ao Centro de Triagem",
+  departed_sorting_center: "Expedido pelo Centro de Triagem",
+  distribution_in_transit: "集散发件在途",
+  arrived_sc: "Status atual – Chegou ao SC",
+  package_created_at_base: "Pacote Criado pela Base",
+  processed_problem_items: "已处理问题件",
+  unprocessed_problem_items: "未处理问题件",
+};
+
+const INTEGER_COLUMNS = new Set<string>([
+  "expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup", "status_collected",
+  "status_received_at_base", "status_dispatched_from_base", "status_in_transit_from_base",
+  "in_transit_to_center", "in_transit_to_distribution", "arrived_sorting_center",
+  "departed_sorting_center", "distribution_in_transit", "arrived_sc", "package_created_at_base",
+  "processed_problem_items", "unprocessed_problem_items",
+]);
+const DECIMAL_COLUMNS = new Set<string>(["seller_collection_rate", "collection_visit_rate"]);
+const NULLABLE_COLUMNS = new Set<string>([
+  "reported_origin_region", "source_base_name", "seller_collection_rate", "collection_visit_rate",
+]);
+
+export interface CollectionMonitoringV2Record extends Record<string, unknown> {
+  data_date: unknown;
+  reported_origin_region: unknown;
+  source_base_name: unknown;
+  order_origin: unknown;
+  publication_id: unknown;
+  source_row_no: unknown;
+  resolved_base_code: unknown;
+  effective_base_code: unknown;
+  mapping_resolution: unknown;
+  effective_mapping_resolution: unknown;
+  mapped_base_name?: unknown;
+  mapped_region?: unknown;
+  mapped_uf?: unknown;
+  mapped_rm_area?: unknown;
+  mapped_rm?: unknown;
+}
+
+export interface CollectionMonitoringV2Date {
+  date: string;
+  rowCount: number;
+  publicationId: string;
+  publishedAt: string | null;
+  snapshotAsOf: string | null;
+}
+
+export interface PublishedCollectionMonitoringV2 {
+  dates: CollectionMonitoringV2Date[];
+  period: { dateFrom: string; dateTo: string };
+  records: CollectionMonitoringV2Record[];
+  rowCount: number;
+  publicationIds: string[];
+  publishedAt: string | null;
+  columnCount: typeof COLLECTION_MONITORING_V2_COLUMNS["length"];
+}
+
+export class CollectionMonitoringV2LoadError extends Error {
+  readonly kind: "empty" | "request" | "inconsistent" | "invalid_data";
+
+  constructor(kind: CollectionMonitoringV2LoadError["kind"], message: string) {
+    super(message);
+    this.name = "CollectionMonitoringV2LoadError";
+    this.kind = kind;
+  }
+}
+
+type Fetcher = (path: string, init?: RequestInit) => Promise<Response>;
+interface DatesResponse { sourceId: string; dates: CollectionMonitoringV2Date[]; hasPublishedPublication: boolean; }
+interface RecordsPage { sourceId: string; records: CollectionMonitoringV2Record[]; total: number; limit: number; offset: number; }
+
+function validDate(value: unknown): string {
+  const candidate = String(value ?? "").slice(0, 10);
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? new Date(`${candidate}T00:00:00Z`) : null;
+  if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== candidate) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "A publicação contém uma data inválida.");
+  }
+  return candidate;
+}
+
+function signature(dates: readonly CollectionMonitoringV2Date[]): string {
+  return [...dates].map((item) =>
+    `${validDate(item.date)}:${item.rowCount}:${item.publicationId}:${item.publishedAt ?? ""}:${item.snapshotAsOf ?? ""}`
+  ).sort().join("|");
+}
+
+async function json<T>(path: string, fetcher: Fetcher, signal?: AbortSignal): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetcher(path, { cache: "no-store", signal });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new CollectionMonitoringV2LoadError("request", "Não foi possível conectar à Data Foundation V2.");
+  }
+  if (!response.ok) {
+    let detail = "";
+    try { detail = String((await response.json() as { detail?: unknown }).detail ?? ""); } catch { /* omit response body */ }
+    const message = response.status === 401
+      ? "Sua sessão expirou. Entre novamente para consultar o Monitoramento de Coleta."
+      : response.status === 403
+        ? "O acesso aos dados desta fonte não está autorizado para sua regional."
+        : detail === "data_store_unavailable"
+          ? "O serviço de dados está indisponível. Tente novamente mais tarde."
+          : `A consulta do Monitoramento de Coleta falhou (HTTP ${response.status}).`;
+    throw new CollectionMonitoringV2LoadError("request", message);
+  }
+  try { return await response.json() as T; } catch {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "A Data Foundation V2 retornou uma resposta inválida.");
+  }
+}
+
+function query(period?: { dateFrom?: string; dateTo?: string }): string {
+  const params = new URLSearchParams({ contract_version: String(COLLECTION_MONITORING_V2_CONTRACT_VERSION) });
+  if (period?.dateFrom) params.set("date_from", validDate(period.dateFrom));
+  if (period?.dateTo) params.set("date_to", validDate(period.dateTo));
+  return params.toString();
+}
+
+function rowId(row: CollectionMonitoringV2Record): string {
+  const publication = String(row.publication_id ?? "");
+  const rowNo = Number(row.source_row_no);
+  if (!publication || !Number.isSafeInteger(rowNo) || rowNo < 1) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "Uma linha retornada não possui referência física válida.");
+  }
+  return `${publication}:${rowNo}`;
+}
+
+function validateRow(row: CollectionMonitoringV2Record): void {
+  for (const column of COLLECTION_MONITORING_V2_COLUMNS) {
+    if (!Object.hasOwn(row, column)) throw new CollectionMonitoringV2LoadError("invalid_data", "A publicação não corresponde às 23 colunas da V2.");
+    const value = row[column];
+    if (value == null && NULLABLE_COLUMNS.has(column)) continue;
+    if (column === "data_date") validDate(value);
+    else if (INTEGER_COLUMNS.has(column)) {
+      const number = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(number) || number < 0) throw new CollectionMonitoringV2LoadError("invalid_data", `A quantidade ${column} é inválida.`);
+    } else if (DECIMAL_COLUMNS.has(column)) {
+      const number = typeof value === "number" ? value : Number(String(value));
+      if (!Number.isFinite(number) || number < 0 || number > 1) throw new CollectionMonitoringV2LoadError("invalid_data", `A taxa ${column} é inválida.`);
+    } else if (typeof value !== "string") {
+      throw new CollectionMonitoringV2LoadError("invalid_data", `O campo ${column} é inválido.`);
+    }
+  }
+}
+
+export async function loadPublishedCollectionMonitoringV2(
+  period?: { dateFrom?: string; dateTo?: string },
+  fetcher: Fetcher = apiFetch,
+  signal?: AbortSignal,
+): Promise<PublishedCollectionMonitoringV2> {
+  const base = `/api/v2/data-sources/${COLLECTION_MONITORING_V2_SOURCE_ID}`;
+  const initial = await json<DatesResponse>(`${base}/dates?${query(period)}`, fetcher, signal);
+  if (initial.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID) throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
+  if (!initial.hasPublishedPublication || initial.dates.length === 0) throw new CollectionMonitoringV2LoadError("empty", "Aguardando primeira importação.");
+  const dates = [...initial.dates].map((item) => ({ ...item, date: validDate(item.date) }));
+  const dateFrom = period?.dateFrom ? validDate(period.dateFrom) : dates.reduce((min, item) => item.date < min ? item.date : min, dates[0].date);
+  const dateTo = period?.dateTo ? validDate(period.dateTo) : dates.reduce((max, item) => item.date > max ? item.date : max, dates[0].date);
+  if (dateFrom > dateTo) throw new CollectionMonitoringV2LoadError("invalid_data", "O período informado é inválido.");
+  const expectedDates = dates.filter((item) => item.date >= dateFrom && item.date <= dateTo);
+  const expectedCount = expectedDates.reduce((sum, item) => sum + item.rowCount, 0);
+  const records: CollectionMonitoringV2Record[] = [];
+  const identities = new Set<string>();
+  let expectedOffset = 0;
+  let reportedTotal: number | null = null;
+  const params = query({ dateFrom, dateTo });
+  for (;;) {
+    const page = await json<RecordsPage>(`${base}/records?${params}&limit=${COLLECTION_MONITORING_V2_PAGE_SIZE}&offset=${expectedOffset}`, fetcher, signal);
+    if (page.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || page.offset !== expectedOffset || page.limit !== COLLECTION_MONITORING_V2_PAGE_SIZE) {
+      throw new CollectionMonitoringV2LoadError("inconsistent", "A paginação da publicação mudou durante a consulta.");
+    }
+    if (!Number.isSafeInteger(page.total) || page.total < 0 || (reportedTotal !== null && page.total !== reportedTotal)) {
+      throw new CollectionMonitoringV2LoadError("inconsistent", "A quantidade de registros mudou durante a consulta.");
+    }
+    reportedTotal = page.total;
+    for (const row of page.records) {
+      validateRow(row);
+      const identity = rowId(row);
+      if (identities.has(identity)) throw new CollectionMonitoringV2LoadError("inconsistent", "A paginação retornou uma linha repetida.");
+      identities.add(identity);
+      records.push(row);
+    }
+    expectedOffset += page.records.length;
+    if (expectedOffset >= page.total) break;
+    if (page.records.length === 0) throw new CollectionMonitoringV2LoadError("inconsistent", "A consulta terminou antes de carregar todas as linhas.");
+  }
+  if (reportedTotal !== expectedCount || records.length !== expectedCount) {
+    throw new CollectionMonitoringV2LoadError("inconsistent", "A quantidade de linhas não corresponde às partições diárias publicadas.");
+  }
+  const confirmed = await json<DatesResponse>(`${base}/dates?${query({ dateFrom, dateTo })}`, fetcher, signal);
+  if (signature(confirmed.dates) !== signature(expectedDates)) {
+    throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação foi alterada durante o carregamento. Tente novamente.");
+  }
+  return {
+    dates: expectedDates,
+    period: { dateFrom, dateTo },
+    records,
+    rowCount: records.length,
+    columnCount: COLLECTION_MONITORING_V2_COLUMNS.length,
+    publicationIds: [...new Set(expectedDates.map((item) => item.publicationId))],
+    publishedAt: expectedDates.map((item) => item.publishedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null,
+  };
+}

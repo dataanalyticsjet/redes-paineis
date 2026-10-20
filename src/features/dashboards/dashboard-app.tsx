@@ -147,6 +147,7 @@ import {
 import { aggregateTaxaRmPoc } from "../../lib/taxa-rm-poc";
 import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loader";
 import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
+import { CollectionMonitoringV2Dashboard } from "./collection-monitoring-v2";
 import {
   canReadDashboardV2Data,
   canReadMonitoringV2,
@@ -3973,7 +3974,7 @@ export function DashboardApp() {
   }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
 
   useEffect(() => {
-    if (view !== "monitoramento" || !isFirstMileUnderReview || !viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady) return undefined;
+    if (view !== "monitoramento" || !isFirstMileUnderReview || !viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady || !import.meta.env.DEV || !referenceBaseTestRequested) return undefined;
 
     let active = true;
     const controller = new AbortController();
@@ -4101,7 +4102,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [currentDashboardPublicationToken, dashboardCacheIdentity, dashboardSourcesReady, isFirstMileUnderReview, isAuthorizedDashboardViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
+  }, [currentDashboardPublicationToken, dashboardCacheIdentity, dashboardSourcesReady, isFirstMileUnderReview, isAuthorizedDashboardViewer, monitoringV2PeriodEnd, monitoringV2PeriodStart, monitoringV2RetryKey, referenceBaseTestRequested, viewerAuthorization, viewerIdentity, responsibilityLoaded, view]);
 
   useEffect(() => {
     if (view !== "taxa") return undefined;
@@ -9825,6 +9826,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
               </footer>
             </>
           )
+        ) : isAuthorizedDashboardViewer && !referenceBaseTestRequested ? (
+          <CollectionMonitoringV2Dashboard key={dashboardCacheIdentity} t={t} language={language} scopeKey={dashboardCacheIdentity} />
         ) : !loaded ||
           (isAuthorizedDashboardViewer && loaded.sourceType !== "DATA_FOUNDATION_V2") ||
           (loaded.sourceType === "DATA_FOUNDATION_V2" && !isAuthorizedDashboardViewer) ? (

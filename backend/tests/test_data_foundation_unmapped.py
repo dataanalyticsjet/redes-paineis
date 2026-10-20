@@ -840,6 +840,11 @@ def test_central_mapping_resolution_uses_unique_official_names_and_keeps_every_f
                 INSERT INTO source_daily_head (source_id, data_date, publication_id)
                 VALUES ('collection_monitoring', '2026-10-05', :publication_id)
             """), {"publication_id": publication_id})
+            connection.execute(text("""
+                INSERT INTO source_publication_dates
+                  (source_id, publication_id, data_date, row_count)
+                VALUES ('collection_monitoring', :publication_id, '2026-10-05', 6)
+            """), {"publication_id": publication_id})
 
             names = [
                 "Base Rio RS",

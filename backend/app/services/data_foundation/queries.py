@@ -171,7 +171,11 @@ def _query_plan(
              AND selected_publication.publication_state = 'PUBLISHED'
         """
         params["contract_version"] = contract.version
-    elif source_id == "collection_rate" and contract.version in {1, 2, 3}:
+    elif (
+        source_id == "collection_rate" and contract.version in {1, 2, 3}
+    ) or (
+        source_id == "collection_monitoring" and contract.version in {1, 2}
+    ):
         # source_daily_head is source-wide rather than contract-versioned.
         # Select the current partition independently for each contract version
         # so a newer monthly format cannot hide preserved V1/V2 facts.
@@ -429,7 +433,11 @@ def get_date_counts(
         with engine.connect() as connection:
             count = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} WHERE {plan.where_sql}"), plan.parameters).scalar_one())
         return {"sourceId": source_id, "dates": [], "snapshotRowCount": count}
-    if source_id == "collection_rate" and contract_version in {2, 3}:
+    if (
+        source_id == "collection_rate" and contract_version in {2, 3}
+    ) or (
+        source_id == "collection_monitoring" and contract_version == 2
+    ):
         with engine.connect() as connection:
             has_published_publication = bool(connection.execute(text("""
                 SELECT EXISTS (

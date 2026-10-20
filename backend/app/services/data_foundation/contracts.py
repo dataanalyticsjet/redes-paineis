@@ -80,6 +80,34 @@ _COLLECTION_MONITORING = (
     _c("unprocessed_problem_items", "未处理问题件", "INTEGER"),
 )
 
+_COLLECTION_MONITORING_V2 = (
+    _c("data_date", "Data", "DATE"),
+    _c("reported_origin_region", "Regional Origem", "TEXT", nullable=True, max_length=64),
+    # Keep the established source_base_name key: the V1 contract already maps
+    # this exact JMS field (PDD de saida) against the official base catalogue.
+    _c("source_base_name", "PDD de saida", "TEXT", nullable=True, max_length=191),
+    _c("order_origin", "Origem do Pedido", "TEXT", max_length=96),
+    _c("seller_collection_rate", "Taxa de coleta do vendedor", "DECIMAL", nullable=True),
+    _c("collection_visit_rate", "Taxa de Visita de Coleta", "DECIMAL", nullable=True),
+    _c("expected_dropoff", "Coleta Prevista Drop-off", "INTEGER"),
+    _c("expected_pickup", "Coleta Prevista Pick-up", "INTEGER"),
+    _c("pending_dropoff", "Aguardando Coleta Drop-off", "INTEGER"),
+    _c("pending_pickup", "Aguardando Coleta Pick-up", "INTEGER"),
+    _c("status_collected", "Status atual – Coletado", "INTEGER"),
+    _c("status_received_at_base", "Status atual – Recebido na base", "INTEGER"),
+    _c("status_dispatched_from_base", "Expedida pela Base", "INTEGER"),
+    _c("status_in_transit_from_base", "Status atual – Em trânsito a partir da base", "INTEGER"),
+    _c("in_transit_to_center", "网点发件在途(中心)", "INTEGER"),
+    _c("in_transit_to_distribution", "网点发件在途(集散)", "INTEGER"),
+    _c("arrived_sorting_center", "Chegada ao Centro de Triagem", "INTEGER"),
+    _c("departed_sorting_center", "Expedido pelo Centro de Triagem", "INTEGER"),
+    _c("distribution_in_transit", "集散发件在途", "INTEGER"),
+    _c("arrived_sc", "Status atual – Chegou ao SC", "INTEGER"),
+    _c("package_created_at_base", "Pacote Criado pela Base", "INTEGER"),
+    _c("processed_problem_items", "已处理问题件", "INTEGER"),
+    _c("unprocessed_problem_items", "未处理问题件", "INTEGER"),
+)
+
 _COLLECTION_RATE = (
     _c("deadline_at", "Horário de término do prazo de coleta", "DATETIME"),
     _c("reported_region", "Nome da regional", "TEXT", nullable=True, max_length=64),
@@ -345,12 +373,30 @@ COLLECTION_RATE_V3_CONTRACT = SourceContract(
     expected_sample_rows=None,
 )
 
+COLLECTION_MONITORING_V2_CONTRACT = SourceContract(
+    source_id="collection_monitoring",
+    display_name="Monitoramento de Coleta",
+    workbook_name="揽收监控Resumo26331320261020082216.xlsx",
+    sheet_name="sheet0",
+    header_row=1,
+    version=2,
+    history_policy="DAILY_REPLACE_DATES",
+    grain_description=(
+        "Uma linha por linha física da aba sheet0 do resumo JMS. A publicação "
+        "substitui somente as datas presentes; nomes PDD são associados apenas "
+        "pelo mecanismo oficial de correspondência única por nome."
+    ),
+    columns=_COLLECTION_MONITORING_V2,
+    expected_sample_rows=None,
+)
+
 CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
     (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
 }
 CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CONTRACT
 CONTRACT_VERSIONS[("collection_rate", 2)] = COLLECTION_RATE_V2_CONTRACT
 CONTRACT_VERSIONS[("collection_rate", 3)] = COLLECTION_RATE_V3_CONTRACT
+CONTRACT_VERSIONS[("collection_monitoring", 2)] = COLLECTION_MONITORING_V2_CONTRACT
 
 
 def get_contract(source_id: str, version: int | None = None) -> SourceContract:

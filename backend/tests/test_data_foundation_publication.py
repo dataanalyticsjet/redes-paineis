@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import create_engine, event, text
 
 from app.services.data_foundation.contracts import (
+    COLLECTION_MONITORING_V2_CONTRACT,
     COLLECTION_RATE_V3_CONTRACT,
     COLLECTION_RATE_V2_CONTRACT,
     CONTRACTS,
@@ -26,6 +27,7 @@ from app.services.data_foundation import repository as data_foundation_repositor
 from app.services.data_foundation.repository import (
     DataFoundationError,
     FACT_TABLES,
+    FACT_TABLES_BY_VERSION,
     create_preview_job,
     get_name_mapping_candidates,
     load_mapping_resolver,
@@ -621,6 +623,105 @@ def test_collection_rate_versions_select_daily_heads_independently():
     assert "exact_name_candidates" not in v2_plan.from_sql
     assert "exact_name_candidates" in v3_plan.from_sql
     assert "normalized_name_candidates" in v3_plan.from_sql
+
+
+def test_collection_monitoring_v2_contract_preserves_v1_and_uses_own_fact_table_and_daily_head():
+    assert len(CONTRACTS["collection_monitoring"].columns) == 22
+    assert len(COLLECTION_MONITORING_V2_CONTRACT.columns) == 23
+    assert COLLECTION_MONITORING_V2_CONTRACT.version == 2
+    assert COLLECTION_MONITORING_V2_CONTRACT.approval_state == "DISCOVERED"
+    assert COLLECTION_MONITORING_V2_CONTRACT.headers == (
+        "Data", "Regional Origem", "PDD de saida", "Origem do Pedido",
+        "Taxa de coleta do vendedor", "Taxa de Visita de Coleta",
+        "Coleta Prevista Drop-off", "Coleta Prevista Pick-up", "Aguardando Coleta Drop-off",
+        "Aguardando Coleta Pick-up", "Status atual – Coletado", "Status atual – Recebido na base",
+        "Expedida pela Base", "Status atual – Em trânsito a partir da base", "网点发件在途(中心)",
+        "网点发件在途(集散)", "Chegada ao Centro de Triagem", "Expedido pelo Centro de Triagem",
+        "集散发件在途", "Status atual – Chegou ao SC", "Pacote Criado pela Base", "已处理问题件", "未处理问题件",
+    )
+    assert FACT_TABLES_BY_VERSION[("collection_monitoring", 1)] == "fact_collection_monitoring"
+    assert FACT_TABLES_BY_VERSION[("collection_monitoring", 2)] == "fact_collection_monitoring_v2"
+    identity = {"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "matrix"}
+    v1 = _query_plan("collection_monitoring", identity, contract_version=1)
+    v2 = _query_plan("collection_monitoring", identity, contract_version=2)
+    assert "fact_collection_monitoring`" in v1.from_sql
+    assert "fact_collection_monitoring_v2`" in v2.from_sql
+    for plan, version in ((v1, 1), (v2, 2)):
+        assert "source_publication_dates AS publication_dates" in plan.from_sql
+        assert "daily_publication.contract_version = :contract_version" in plan.from_sql
+        assert plan.parameters["contract_version"] == version
+
+
+def test_collection_monitoring_v2_parses_all_physical_rows_when_xml_dimension_is_a1():
+    contract = COLLECTION_MONITORING_V2_CONTRACT
+    row = {}
+    for column in contract.columns:
+        if column.key == "data_date":
+            row[column.key] = date(2026, 10, 18)
+        elif column.key in {"reported_origin_region", "source_base_name", "seller_collection_rate", "collection_visit_rate"}:
+            row[column.key] = None if column.key in {"seller_collection_rate", "collection_visit_rate"} else "Source label"
+        elif column.kind == "INTEGER":
+            row[column.key] = 7
+        elif column.kind == "DECIMAL":
+            row[column.key] = Decimal("0.75")
+        else:
+            row[column.key] = "Marketplace"
+
+    workbook = _xlsx_bytes(contract, [row, row])
+    with zipfile.ZipFile(BytesIO(workbook), "r") as source:
+        parts = {name: source.read(name) for name in source.namelist()}
+    sheet_path = "xl/worksheets/sheet1.xml"
+    sheet = parts[sheet_path].decode("utf-8")
+    sheet = sheet.replace(
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/>',
+        1,
+    )
+    parts[sheet_path] = sheet.encode("utf-8")
+    patched = BytesIO()
+    with zipfile.ZipFile(patched, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, content in parts.items():
+            target.writestr(name, content)
+
+    imported = []
+    summary = parse_workbook(
+        patched.getvalue(), contract,
+        MappingResolver(
+            map_version_id=b"0123456789abcdef",
+            exact_base_name_candidates={"Source label": ("BASE-1",)},
+        ),
+        on_valid_row=imported.append,
+    )
+
+    assert summary.input_row_count == summary.valid_row_count == 2
+    assert summary.invalid_row_count == 0
+    assert summary.exact_duplicate_count == 1
+    assert len(imported) == 2
+    assert imported[0].values["data_date"] == date(2026, 10, 18)
+    assert imported[0].values["seller_collection_rate"] is None
+    assert imported[0].values["collection_visit_rate"] is None
+    assert imported[0].values["order_origin"] == "Marketplace"
+    assert imported[0].mapping_resolution == imported[1].mapping_resolution == "NAME_APPROVED"
+
+
+def test_official_collection_monitoring_v2_workbook_sample_when_requested():
+    workbook_path = os.environ.get("COLLECTION_MONITORING_V2_VALIDATION_WORKBOOK")
+    if not workbook_path:
+        pytest.skip("Set COLLECTION_MONITORING_V2_VALIDATION_WORKBOOK to validate the supplied JMS sample.")
+    imported = []
+    summary = parse_workbook(
+        Path(workbook_path).read_bytes(), COLLECTION_MONITORING_V2_CONTRACT,
+        MappingResolver(), on_valid_row=imported.append,
+    )
+    assert summary.workbook_validation_errors == []
+    assert summary.input_row_count == summary.valid_row_count == len(imported) == 72
+    assert summary.invalid_row_count == 0
+    assert summary.per_date_counts == {"2026-10-18": 72}
+    assert len({row.values["reported_origin_region"] for row in imported if row.values["reported_origin_region"]}) == 9
+    assert sum(int(row.values["expected_dropoff"]) for row in imported) == 873
+    assert sum(int(row.values["expected_pickup"]) for row in imported) == 26_236
+    assert sum(int(row.values["pending_dropoff"]) for row in imported) == 0
+    assert sum(int(row.values["pending_pickup"]) for row in imported) == 0
 
 
 def test_no_movement_v2_parser_preserves_duplicate_base_codes_at_row_grain():

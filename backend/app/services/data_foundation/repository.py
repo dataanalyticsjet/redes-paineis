@@ -50,6 +50,7 @@ FACT_TABLES_BY_VERSION: dict[tuple[str, int], str] = {
 FACT_TABLES_BY_VERSION[("pdd_collection_failure", 2)] = "fact_pdd_collection_failure_v2"
 FACT_TABLES_BY_VERSION[("collection_rate", 2)] = "fact_collection_rate_v2"
 FACT_TABLES_BY_VERSION[("collection_rate", 3)] = "fact_collection_rate_v3"
+FACT_TABLES_BY_VERSION[("collection_monitoring", 2)] = "fact_collection_monitoring_v2"
 
 
 def fact_table_for_contract(source_id: str, contract_version: int | None = None) -> str:
