@@ -9675,6 +9675,7 @@ html[data-theme="dark"] .dashboard-main-taxa-v2 .damage-client-track {
 .collection-monitoring-v2-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--muted, #64748b); font-size: 12px; }
 .collection-monitoring-v2-pagination > div { display: flex; gap: 8px; }
 .collection-monitoring-v2-state { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-height: 180px; padding: 24px; border: 1px solid var(--border, #e5e7eb); border-radius: 16px; color: var(--muted, #64748b); background: var(--card, #fff); }
+.collection-monitoring-v2-state > div { display: grid; flex: 1; gap: 10px; min-width: min(100%, 320px); }
 .collection-monitoring-v2-state h1 { flex-basis: 100%; margin: 0; color: var(--ink-strong, #172033); font-size: 22px; }
 .collection-monitoring-v2-state p { flex-basis: 100%; margin: 0; }
 .collection-monitoring-v2-state.error { border-color: rgb(215 25 32 / 25%); }

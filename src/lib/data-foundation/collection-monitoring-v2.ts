@@ -3,6 +3,7 @@ import { apiFetch } from "../api-url.ts";
 export const COLLECTION_MONITORING_V2_SOURCE_ID = "collection_monitoring";
 export const COLLECTION_MONITORING_V2_CONTRACT_VERSION = 2;
 export const COLLECTION_MONITORING_V2_PAGE_SIZE = 250;
+export const COLLECTION_MONITORING_V2_REQUEST_TIMEOUT_MS = 30_000;
 
 export const COLLECTION_MONITORING_V2_COLUMNS = [
   "data_date", "reported_origin_region", "source_base_name", "order_origin",
@@ -89,7 +90,7 @@ export interface PublishedCollectionMonitoringV2 {
 }
 
 export class CollectionMonitoringV2LoadError extends Error {
-  readonly kind: "empty" | "request" | "inconsistent" | "invalid_data";
+  readonly kind: "empty" | "request" | "timeout" | "inconsistent" | "invalid_data";
 
   constructor(kind: CollectionMonitoringV2LoadError["kind"], message: string) {
     super(message);
@@ -99,6 +100,10 @@ export class CollectionMonitoringV2LoadError extends Error {
 }
 
 type Fetcher = (path: string, init?: RequestInit) => Promise<Response>;
+export interface CollectionMonitoringV2LoadOptions {
+  requestTimeoutMs?: number;
+  onProgress?: (loadedRows: number, totalRows: number) => void;
+}
 interface DatesResponse { sourceId: string; dates: CollectionMonitoringV2Date[]; hasPublishedPublication: boolean; }
 interface RecordsPage { sourceId: string; records: CollectionMonitoringV2Record[]; total: number; limit: number; offset: number; }
 
@@ -117,33 +122,58 @@ function signature(dates: readonly CollectionMonitoringV2Date[]): string {
   ).sort().join("|");
 }
 
-async function json<T>(path: string, fetcher: Fetcher, signal?: AbortSignal): Promise<T> {
-  let response: Response;
+async function json<T>(path: string, fetcher: Fetcher, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
+  if (signal?.aborted) throw new Error("Request aborted");
+  const controller = new AbortController();
+  let timedOut = false;
+  let rejectTimeout: ((reason?: unknown) => void) | undefined;
+  let rejectAbort: ((reason?: unknown) => void) | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const abortFromParent = () => {
+    controller.abort(signal?.reason);
+    rejectAbort?.(new Error("Request aborted"));
+  };
+  signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    rejectTimeout?.(new CollectionMonitoringV2LoadError("timeout", "A consulta demorou mais que o esperado. Tente novamente ou selecione um período menor."));
+  }, timeoutMs);
   try {
-    response = await fetcher(path, { cache: "no-store", signal });
+    const request = (async () => {
+      const response = await fetcher(path, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) {
+        let detail = "";
+        try { detail = String((await response.json() as { detail?: unknown }).detail ?? ""); } catch { /* omit response body */ }
+        const message = response.status === 401
+          ? "Sua sessão expirou. Entre novamente para consultar o Monitoramento de Coleta."
+          : response.status === 403
+            ? "O acesso aos dados desta fonte não está autorizado para sua regional."
+            : detail === "data_store_unavailable"
+              ? "O serviço de dados está indisponível. Tente novamente mais tarde."
+              : `A consulta do Monitoramento de Coleta falhou (HTTP ${response.status}).`;
+        throw new CollectionMonitoringV2LoadError("request", message);
+      }
+      try { return await response.json() as T; } catch {
+        throw new CollectionMonitoringV2LoadError("invalid_data", "A Data Foundation V2 retornou uma resposta inválida.");
+      }
+    })();
+    return await Promise.race([request, timeout, aborted]);
   } catch (error) {
     if (signal?.aborted) throw error;
+    if (error instanceof CollectionMonitoringV2LoadError) throw error;
+    if (timedOut) throw new CollectionMonitoringV2LoadError("timeout", "A consulta demorou mais que o esperado. Tente novamente ou selecione um período menor.");
     throw new CollectionMonitoringV2LoadError("request", "Não foi possível conectar à Data Foundation V2.");
-  }
-  if (!response.ok) {
-    let detail = "";
-    try { detail = String((await response.json() as { detail?: unknown }).detail ?? ""); } catch { /* omit response body */ }
-    const message = response.status === 401
-      ? "Sua sessão expirou. Entre novamente para consultar o Monitoramento de Coleta."
-      : response.status === 403
-        ? "O acesso aos dados desta fonte não está autorizado para sua regional."
-        : detail === "data_store_unavailable"
-          ? "O serviço de dados está indisponível. Tente novamente mais tarde."
-          : `A consulta do Monitoramento de Coleta falhou (HTTP ${response.status}).`;
-    throw new CollectionMonitoringV2LoadError("request", message);
-  }
-  try { return await response.json() as T; } catch {
-    throw new CollectionMonitoringV2LoadError("invalid_data", "A Data Foundation V2 retornou uma resposta inválida.");
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", abortFromParent);
   }
 }
 
-function query(period?: { dateFrom?: string; dateTo?: string }): string {
+function query(period?: { dateFrom?: string; dateTo?: string }, latestOnly = false): string {
   const params = new URLSearchParams({ contract_version: String(COLLECTION_MONITORING_V2_CONTRACT_VERSION) });
+  if (latestOnly) params.set("latest_only", "true");
   if (period?.dateFrom) params.set("date_from", validDate(period.dateFrom));
   if (period?.dateTo) params.set("date_to", validDate(period.dateTo));
   return params.toString();
@@ -180,24 +210,41 @@ export async function loadPublishedCollectionMonitoringV2(
   period?: { dateFrom?: string; dateTo?: string },
   fetcher: Fetcher = apiFetch,
   signal?: AbortSignal,
+  options: CollectionMonitoringV2LoadOptions = {},
 ): Promise<PublishedCollectionMonitoringV2> {
   const base = `/api/v2/data-sources/${COLLECTION_MONITORING_V2_SOURCE_ID}`;
-  const initial = await json<DatesResponse>(`${base}/dates?${query(period)}`, fetcher, signal);
+  const timeoutMs = options.requestTimeoutMs ?? COLLECTION_MONITORING_V2_REQUEST_TIMEOUT_MS;
+  const hasPeriod = Boolean(period?.dateFrom || period?.dateTo);
+  const initial = await json<DatesResponse>(`${base}/dates?${query(period, !hasPeriod)}`, fetcher, signal, timeoutMs);
   if (initial.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID) throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
-  if (!initial.hasPublishedPublication || initial.dates.length === 0) throw new CollectionMonitoringV2LoadError("empty", "Aguardando primeira importação.");
-  const dates = [...initial.dates].map((item) => ({ ...item, date: validDate(item.date) }));
-  const dateFrom = period?.dateFrom ? validDate(period.dateFrom) : dates.reduce((min, item) => item.date < min ? item.date : min, dates[0].date);
-  const dateTo = period?.dateTo ? validDate(period.dateTo) : dates.reduce((max, item) => item.date > max ? item.date : max, dates[0].date);
+  if (!initial.hasPublishedPublication || initial.dates.length === 0) {
+    const message = hasPeriod ? "Não há dados publicados para o período selecionado." : "Aguardando primeira importação.";
+    throw new CollectionMonitoringV2LoadError("empty", message);
+  }
+  const availableDates = [...initial.dates].map((item) => ({ ...item, date: validDate(item.date) }));
+  const latestAvailableDate = availableDates.reduce((latest, item) => item.date > latest ? item.date : latest, availableDates[0].date);
+  const dateFrom = period?.dateFrom
+    ? validDate(period.dateFrom)
+    : hasPeriod
+      ? availableDates.reduce((min, item) => item.date < min ? item.date : min, availableDates[0].date)
+      : latestAvailableDate;
+  const dateTo = period?.dateTo
+    ? validDate(period.dateTo)
+    : hasPeriod
+      ? availableDates.reduce((max, item) => item.date > max ? item.date : max, availableDates[0].date)
+      : latestAvailableDate;
   if (dateFrom > dateTo) throw new CollectionMonitoringV2LoadError("invalid_data", "O período informado é inválido.");
+  const dates = hasPeriod ? availableDates : availableDates.filter((item) => item.date === latestAvailableDate);
   const expectedDates = dates.filter((item) => item.date >= dateFrom && item.date <= dateTo);
   const expectedCount = expectedDates.reduce((sum, item) => sum + item.rowCount, 0);
+  options.onProgress?.(0, expectedCount);
   const records: CollectionMonitoringV2Record[] = [];
   const identities = new Set<string>();
   let expectedOffset = 0;
   let reportedTotal: number | null = null;
   const params = query({ dateFrom, dateTo });
   for (;;) {
-    const page = await json<RecordsPage>(`${base}/records?${params}&limit=${COLLECTION_MONITORING_V2_PAGE_SIZE}&offset=${expectedOffset}`, fetcher, signal);
+    const page = await json<RecordsPage>(`${base}/records?${params}&limit=${COLLECTION_MONITORING_V2_PAGE_SIZE}&offset=${expectedOffset}`, fetcher, signal, timeoutMs);
     if (page.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || page.offset !== expectedOffset || page.limit !== COLLECTION_MONITORING_V2_PAGE_SIZE) {
       throw new CollectionMonitoringV2LoadError("inconsistent", "A paginação da publicação mudou durante a consulta.");
     }
@@ -213,13 +260,14 @@ export async function loadPublishedCollectionMonitoringV2(
       records.push(row);
     }
     expectedOffset += page.records.length;
+    options.onProgress?.(expectedOffset, expectedCount);
     if (expectedOffset >= page.total) break;
     if (page.records.length === 0) throw new CollectionMonitoringV2LoadError("inconsistent", "A consulta terminou antes de carregar todas as linhas.");
   }
   if (reportedTotal !== expectedCount || records.length !== expectedCount) {
     throw new CollectionMonitoringV2LoadError("inconsistent", "A quantidade de linhas não corresponde às partições diárias publicadas.");
   }
-  const confirmed = await json<DatesResponse>(`${base}/dates?${query({ dateFrom, dateTo })}`, fetcher, signal);
+  const confirmed = await json<DatesResponse>(`${base}/dates?${query({ dateFrom, dateTo })}`, fetcher, signal, timeoutMs);
   if (signature(confirmed.dates) !== signature(expectedDates)) {
     throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação foi alterada durante o carregamento. Tente novamente.");
   }

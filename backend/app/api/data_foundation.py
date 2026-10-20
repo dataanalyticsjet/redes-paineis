@@ -463,6 +463,7 @@ def data_source_dates(
     base_code: str | None = Query(default=None, max_length=64),
     region: str | None = Query(default=None, max_length=64),
     publication_id: str | None = Query(default=None, max_length=36),
+    latest_only: bool = Query(default=False),
     viewer: AuthenticatedViewer = Depends(get_current_viewer),
 ) -> dict[str, object]:
     _require_feature()
@@ -471,6 +472,7 @@ def data_source_dates(
             _engine(), source_id=source_id, identity=viewer.identity,
             date_from=date_from, date_to=date_to, base_code=base_code, region=region,
             publication_id=publication_id, contract_version=contract_version,
+            latest_only=latest_only,
         )
     except DataFoundationError as error:
         raise _error(error) from None

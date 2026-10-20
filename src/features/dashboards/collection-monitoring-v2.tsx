@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CalendarDays, Download, Filter, RefreshCw, ShieldCheck } from "lucide-react";
 import { subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
 import { dashboardLocale, type DashboardLanguage, type DashboardTranslator } from "../../lib/i18n";
@@ -36,6 +36,8 @@ function errorText(error: unknown): string {
     : "Não foi possível carregar a publicação do Monitoramento de Coleta.";
 }
 
+type CollectionMonitoringV2Period = { dateFrom?: string; dateTo?: string };
+
 async function downloadExcel(rows: readonly CollectionMonitoringV2Row[], period: CollectionMonitoringV2Filters): Promise<void> {
   const XLSXModule = await import("xlsx-js-style");
   const XLSX = XLSXModule.default ?? XLSXModule;
@@ -61,27 +63,42 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [reload, setReload] = useState(0);
   const [rows, setRows] = useState<CollectionMonitoringV2Row[]>([]);
+  const [requestedPeriod, setRequestedPeriod] = useState<CollectionMonitoringV2Period | undefined>();
+  const [progress, setProgress] = useState({ loaded: 0, total: 0 });
+  const [progressScope, setProgressScope] = useState<string | null>(null);
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [publishedAt, setPublishedAt] = useState<string | null>(null);
   const [publicationCount, setPublicationCount] = useState(0);
   const [filters, setFilters] = useState<CollectionMonitoringV2Filters>({});
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const activeRequest = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
-    void loadPublishedCollectionMonitoringV2(undefined, undefined, controller.signal).then((result) => {
+    activeRequest.current = controller;
+    void loadPublishedCollectionMonitoringV2(requestedPeriod, undefined, controller.signal, {
+      onProgress: (loaded, total) => {
+        if (active) {
+          setProgressScope(scopeKey);
+          setProgress({ loaded, total });
+        }
+      },
+    }).then((result) => {
       if (!active) return;
       const mapped = result.records.map(mapCollectionMonitoringV2Record);
       setRows(mapped);
       setPublishedAt(result.publishedAt);
       setPublicationCount(result.publicationIds.length);
-      setFilters({ dateFrom: result.period.dateFrom, dateTo: result.period.dateTo });
+      setFilters((current) => ({ ...current, dateFrom: result.period.dateFrom, dateTo: result.period.dateTo }));
+      setLoadedScope(scopeKey);
       setStatus(mapped.length ? "ready" : "empty");
     }).catch((cause: unknown) => {
       if (!active || controller.signal.aborted) return;
       setRows([]);
+      setLoadedScope(scopeKey);
       if (cause instanceof CollectionMonitoringV2LoadError && cause.kind === "empty") {
         setStatus("empty");
         setError(cause.message);
@@ -93,14 +110,17 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     return () => {
       active = false;
       controller.abort();
+      if (activeRequest.current === controller) activeRequest.current = null;
     };
-  }, [scopeKey, reload]);
+  }, [scopeKey, reload, requestedPeriod]);
 
   useEffect(() => subscribeToProtectedApiAuthorizationFailure(() => {
+    activeRequest.current?.abort();
     setRows([]);
+    setLoadedScope(scopeKey);
     setStatus("error");
     setError(t("O acesso aos dados mudou. Atualize a autorização para continuar."));
-  }), [t]);
+  }), [scopeKey, t]);
 
   const options = useMemo(() => collectionMonitoringV2FilterOptions(rows), [rows]);
   const filteredRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, filters), [rows, filters]);
@@ -125,9 +145,43 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   }, [filteredRows, language, page, query]);
 
   function updateFilter<K extends keyof CollectionMonitoringV2Filters>(key: K, value: CollectionMonitoringV2Filters[K]) {
-    setFilters((current) => ({ ...current, [key]: value }));
+    const next = { ...filters, [key]: value };
+    setFilters(next);
     setPage(1);
+    if (key === "dateFrom" || key === "dateTo") {
+      activeRequest.current?.abort();
+      setRows([]);
+      setLoadedScope(null);
+      setStatus("loading");
+      setError(null);
+      setProgress({ loaded: 0, total: 0 });
+      setProgressScope(null);
+      setRequestedPeriod({ dateFrom: next.dateFrom, dateTo: next.dateTo });
+    }
   }
+
+  function clearFilters() {
+    setQuery("");
+    setPage(1);
+    if (requestedPeriod) {
+      activeRequest.current?.abort();
+      setRows([]);
+      setLoadedScope(null);
+      setStatus("loading");
+      setError(null);
+      setProgress({ loaded: 0, total: 0 });
+      setProgressScope(null);
+      setRequestedPeriod(undefined);
+      setFilters({});
+      return;
+    }
+    setFilters({ dateFrom: filters.dateFrom, dateTo: filters.dateTo });
+  }
+
+  const dateFilters = <>
+    <label className="collection-monitoring-v2-filter"><span>{t("Data inicial")}</span><input type="date" value={filters.dateFrom ?? ""} onChange={(event) => updateFilter("dateFrom", event.target.value || undefined)} /></label>
+    <label className="collection-monitoring-v2-filter"><span>{t("Data final")}</span><input type="date" value={filters.dateTo ?? ""} onChange={(event) => updateFilter("dateTo", event.target.value || undefined)} /></label>
+  </>;
 
   const percent = (value: number | null) => value === null
     ? "—"
@@ -165,9 +219,10 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     </section>
   );
 
-  if (status === "loading") return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" />{t("Carregando publicação do Monitoramento de Coleta…")}</section>;
-  if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ?? t("Aguardando primeira importação.")}</p></section>;
-  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error}</p><button type="button" onClick={() => { setRows([]); setStatus("loading"); setError(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
+  const periodSelector = <div className="collection-monitoring-v2-filter-grid">{dateFilters}</div>;
+  if (status === "loading" || loadedScope !== scopeKey) return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" /><div><p>{t("Carregando publicação do Monitoramento de Coleta…")}</p>{progressScope === scopeKey && progress.total > 0 ? <p>{t("Carregando {loaded} de {total} registros do período…", { loaded: number(progress.loaded), total: number(progress.total) })}</p> : null}{periodSelector}</div></section>;
+  if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : t("Aguardando primeira importação.")}</p>{periodSelector}</section>;
+  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
 
   return <div className="collection-monitoring-v2" data-testid="collection-monitoring-v2-dashboard">
     <section className="dashboard-intro collection-monitoring-v2-intro">
@@ -175,10 +230,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       <div className="collection-monitoring-v2-meta"><span>{t("Contrato V2 · 23 colunas")}</span><span>{number(rows.length)} {t("registros visíveis")}</span><span>{number(rows.filter((row) => !row.mappingConfirmed).length)} {t("linhas sem vínculo único")}</span><span>{number(publicationCount)} {t("publicações no período")}</span><span>{publishedAt ? `${t("Publicada em")} ${new Intl.DateTimeFormat(dashboardLocale(language), { dateStyle: "short", timeStyle: "short" }).format(new Date(publishedAt))}` : t("Publicação vigente")}</span></div>
     </section>
     <section className="collection-monitoring-v2-filters collection-monitoring-v2-card" aria-label={t("Filtros operacionais")}>
-      <div className="collection-monitoring-v2-section-heading"><h2><Filter size={17} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={() => { setFilters({}); setQuery(""); setPage(1); }}>{t("Limpar filtros")}</button></div>
+      <div className="collection-monitoring-v2-section-heading"><h2><Filter size={17} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={clearFilters}>{t("Limpar filtros")}</button></div>
       <div className="collection-monitoring-v2-filter-grid">
-        <label className="collection-monitoring-v2-filter"><span>{t("Data inicial")}</span><input type="date" value={filters.dateFrom ?? ""} onChange={(event) => updateFilter("dateFrom", event.target.value || undefined)} /></label>
-        <label className="collection-monitoring-v2-filter"><span>{t("Data final")}</span><input type="date" value={filters.dateTo ?? ""} onChange={(event) => updateFilter("dateTo", event.target.value || undefined)} /></label>
+        {dateFilters}
         {select("region", "Regional", options.regions)}
         {select("rm", "RM", [...new Set(rmFiltered.map((row) => row.rm))].sort())}
         {select("rmArea", "Região do RM", [...new Set(rmFiltered.map((row) => row.rmArea))].sort())}
