@@ -22,6 +22,11 @@ class ScopedQuery:
     select_sql: str
 
 
+def _is_active_text_filter(value: str | None) -> bool:
+    """Match the query planner's existing truthiness rule for text filters."""
+    return bool(value)
+
+
 def _scope_clause(
     identity: dict[str, Any],
     params: dict[str, object],
@@ -254,10 +259,10 @@ def _query_plan(
     if date_to:
         where_parts.append("fact.data_date <= :date_to")
         params["date_to"] = date_to
-    if base_code:
+    if _is_active_text_filter(base_code):
         where_parts.append("effective_entry.base_code = :filter_base_code")
         params["filter_base_code"] = base_code
-    if region:
+    if _is_active_text_filter(region):
         if region == "Sem regional":
             where_parts.append("effective_entry.base_code IS NULL")
         elif sql_dialect == "sqlite":
@@ -321,6 +326,103 @@ def _is_resolved_matrix_scope(identity: dict[str, Any]) -> bool:
         str(identity.get("organizational_scope") or "").strip().lower() == "matrix"
         and str(identity.get("role") or "").strip().lower() == "matrix"
     )
+
+
+def _matrix_collection_rate_v3_metadata_eligible(
+    identity: dict[str, Any],
+    *,
+    source_id: str,
+    contract_version: int | None,
+    base_code: str | None,
+    region: str | None,
+    publication_id: str | None,
+) -> bool:
+    """Return whether unfiltered V3 metadata can represent this matrix query.
+
+    Date bounds only select daily partitions and can be applied directly to
+    publication-date metadata. A base, region, or historical-publication
+    filter changes the visible set and must keep using the fact query.
+    """
+    return (
+        source_id == "collection_rate"
+        and contract_version == 3
+        and _is_resolved_matrix_scope(identity)
+        and not _is_active_text_filter(base_code)
+        and not _is_active_text_filter(region)
+        and publication_id is None
+    )
+
+
+def _collection_rate_v3_metadata_dates_cte(
+    *,
+    date_from: date | None,
+    date_to: date | None,
+) -> str:
+    """Select the latest published V3 partition for each requested day."""
+    date_filters = []
+    if date_from is not None:
+        date_filters.append("publication_dates.data_date >= :date_from")
+    if date_to is not None:
+        date_filters.append("publication_dates.data_date <= :date_to")
+    date_filter_sql = " AND " + " AND ".join(date_filters) if date_filters else ""
+    return f"""
+        WITH ranked_metadata_dates AS (
+            SELECT publication_dates.source_id, publication_dates.data_date,
+                   publication_dates.publication_id, publication_dates.row_count,
+                   daily_publication.published_at, daily_publication.snapshot_as_of,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY publication_dates.source_id, publication_dates.data_date
+                       ORDER BY daily_publication.version_no DESC
+                   ) AS publication_rank
+            FROM source_publication_dates AS publication_dates
+            JOIN source_publications AS daily_publication
+              ON daily_publication.source_id = publication_dates.source_id
+             AND daily_publication.publication_id = publication_dates.publication_id
+            WHERE daily_publication.source_id = :source_id
+              AND daily_publication.contract_version = :contract_version
+              AND daily_publication.publication_state = 'PUBLISHED'
+              {date_filter_sql}
+        )
+    """
+
+
+def _daily_metadata_consistency_expression(dialect: str) -> str:
+    """Check published V3 row/date metadata before trusting its fast path.
+
+    Facts and their per-date counts are written in one publication
+    transaction. This inexpensive metadata-only guard also detects incomplete
+    publication metadata and routes such histories through the legacy query.
+    """
+    if dialect == "sqlite":
+        period_start_differs = "publication.period_start IS NOT daily_metadata.period_start"
+        period_end_differs = "publication.period_end IS NOT daily_metadata.period_end"
+    else:
+        period_start_differs = "NOT (publication.period_start <=> daily_metadata.period_start)"
+        period_end_differs = "NOT (publication.period_end <=> daily_metadata.period_end)"
+    return f"""NOT EXISTS (
+        SELECT 1
+        FROM source_publications AS publication
+        LEFT JOIN (
+            SELECT source_id, publication_id,
+                   MIN(data_date) AS period_start,
+                   MAX(data_date) AS period_end,
+                   SUM(row_count) AS row_count
+            FROM source_publication_dates
+            WHERE source_id = :source_id
+            GROUP BY source_id, publication_id
+        ) AS daily_metadata
+          ON daily_metadata.source_id = publication.source_id
+         AND daily_metadata.publication_id = publication.publication_id
+        WHERE publication.source_id = :source_id
+          AND publication.contract_version = :contract_version
+          AND publication.publication_state = 'PUBLISHED'
+          AND (
+                publication.row_count <> COALESCE(daily_metadata.row_count, 0)
+             OR {period_start_differs}
+             OR {period_end_differs}
+          )
+        LIMIT 1
+    )"""
 
 
 def _publication_contract_filter(
@@ -509,8 +611,36 @@ def get_records(
     _assert_map_available(engine)
     where = f"WHERE {plan.where_sql}"
     order = "fact.data_date DESC, fact.source_row_no ASC" if source_id in DAILY_SOURCES else "fact.source_row_no ASC"
+    use_metadata_count = _matrix_collection_rate_v3_metadata_eligible(
+        identity,
+        source_id=source_id,
+        contract_version=contract_version,
+        base_code=base_code,
+        region=region,
+        publication_id=publication_id,
+    )
     with engine.connect() as connection:
-        total = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} {where}"), plan.parameters).scalar_one())
+        if use_metadata_count:
+            metadata_count = connection.execute(text(f"""
+                {_collection_rate_v3_metadata_dates_cte(date_from=date_from, date_to=date_to)}
+                SELECT COALESCE(SUM(metadata.row_count), 0) AS total,
+                       CASE WHEN {_daily_metadata_consistency_expression(engine.dialect.name)}
+                            THEN 1 ELSE 0 END AS metadata_consistent
+                FROM ranked_metadata_dates AS metadata
+                WHERE metadata.publication_rank = 1
+                  AND metadata.row_count > 0
+            """), plan.parameters).mappings().one()
+            if metadata_count["metadata_consistent"]:
+                total = int(metadata_count["total"])
+            else:
+                # Do not trust incomplete metadata: retain the existing fact
+                # count for this exceptional publication history.
+                total = int(connection.execute(
+                    text(f"SELECT COUNT(*) {plan.from_sql} {where}"),
+                    plan.parameters,
+                ).scalar_one())
+        else:
+            total = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} {where}"), plan.parameters).scalar_one())
         result = connection.execute(text(f"""
             SELECT {plan.select_sql}
             {plan.from_sql}
@@ -555,6 +685,55 @@ def get_date_counts(
         sql_dialect=engine.dialect.name,
     )
     _assert_map_available(engine)
+    metadata_fallback_has_published: bool | None = None
+    use_metadata_dates = _matrix_collection_rate_v3_metadata_eligible(
+        identity,
+        source_id=source_id,
+        contract_version=contract_version,
+        base_code=base_code,
+        region=region,
+        publication_id=publication_id,
+    )
+    if use_metadata_dates:
+        with engine.connect() as connection:
+            publication_state = connection.execute(text(f"""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM source_publications
+                    WHERE source_id = :source_id
+                      AND contract_version = :contract_version
+                      AND publication_state = 'PUBLISHED'
+                ) AS has_published_publication,
+                CASE WHEN {_daily_metadata_consistency_expression(engine.dialect.name)}
+                     THEN 1 ELSE 0 END AS metadata_consistent
+            """), plan.parameters).mappings().one()
+            metadata_fallback_has_published = bool(publication_state["has_published_publication"])
+            if publication_state["metadata_consistent"]:
+                rows = connection.execute(text(f"""
+                    {_collection_rate_v3_metadata_dates_cte(date_from=date_from, date_to=date_to)}
+                    SELECT metadata.data_date AS date, metadata.row_count AS row_count,
+                           metadata.publication_id, metadata.published_at,
+                           metadata.snapshot_as_of
+                    FROM ranked_metadata_dates AS metadata
+                    WHERE metadata.publication_rank = 1
+                      AND metadata.row_count > 0
+                    ORDER BY metadata.data_date DESC
+                """), plan.parameters).mappings()
+                dates = [
+                    {
+                        "date": row["date"],
+                        "rowCount": int(row["row_count"]),
+                        "publicationId": str(uuid.UUID(bytes=bytes(row["publication_id"]))),
+                        "publishedAt": row["published_at"],
+                        "snapshotAsOf": row["snapshot_as_of"],
+                    }
+                    for row in rows
+                ]
+                return {
+                    "sourceId": source_id,
+                    "dates": dates,
+                    "hasPublishedPublication": metadata_fallback_has_published,
+                }
     if source_id == "no_movement":
         with engine.connect() as connection:
             count = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} WHERE {plan.where_sql}"), plan.parameters).scalar_one())
@@ -565,15 +744,17 @@ def get_date_counts(
         source_id == "collection_monitoring" and contract_version == 2
     ):
         with engine.connect() as connection:
-            has_published_publication = bool(connection.execute(text("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM source_publications
-                    WHERE source_id = :source_id
-                      AND contract_version = :contract_version
-                      AND publication_state = 'PUBLISHED'
-                )
-            """), plan.parameters).scalar_one())
+            has_published_publication = metadata_fallback_has_published
+            if has_published_publication is None:
+                has_published_publication = bool(connection.execute(text("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM source_publications
+                        WHERE source_id = :source_id
+                          AND contract_version = :contract_version
+                          AND publication_state = 'PUBLISHED'
+                    )
+                """), plan.parameters).scalar_one())
             rows = connection.execute(text(f"""
                 SELECT fact.data_date AS date, fact.publication_id,
                        daily_publication.published_at, daily_publication.snapshot_as_of,

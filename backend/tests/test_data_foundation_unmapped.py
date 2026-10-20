@@ -1290,3 +1290,381 @@ def test_collection_rate_v3_name_mapping_and_feishu_scope_use_official_region_on
         assert regional_spe["records"][0]["mapped_region"] == "SPE"
     finally:
         engine.dispose()
+
+
+def _insert_v3_publication(connection, publication_id, version, rows, start, end, state="PUBLISHED"):
+    connection.execute(text("""
+        INSERT INTO source_publications
+          (publication_id, source_id, contract_version, version_no, published_at,
+           snapshot_as_of, row_count, period_start, period_end, publication_state)
+        VALUES (:id, 'collection_rate', 3, :version, '2026-10-20 10:00:00',
+                '2026-10-20 09:00:00', :rows, :start, :end, :state)
+    """), {"id": publication_id, "version": version, "rows": rows,
+           "start": start, "end": end, "state": state})
+
+
+def _insert_v3_fact(connection, publication_id, row_no, day, base_name):
+    contract = CONTRACT_VERSIONS[("collection_rate", 3)]
+    values = {}
+    for column in contract.columns:
+        if column.key == "deadline_at" or column.kind == "DATETIME":
+            value = datetime.combine(day, datetime.min.time())
+        elif column.key == "source_base_name":
+            value = base_name
+        elif column.kind == "DATE":
+            value = day
+        elif column.kind == "INTEGER":
+            value = 1
+        elif column.kind == "DECIMAL":
+            value = 1.0
+        elif column.kind == "BASE_CODE" or column.nullable:
+            value = None
+        else:
+            value = "test"
+        values[column.key] = value
+    mapped = base_name == "Mapped base"
+    payload = {
+        "source_id": "collection_rate", "publication_id": publication_id,
+        "map_version_id": MAP_VERSION_ID, "source_row_no": row_no, **values,
+        "resolved_base_code": "MATCHED-001" if mapped else None,
+        "mapping_resolution": "NAME_APPROVED" if mapped else (
+            "MISSING_IDENTIFIER" if not base_name else "UNMAPPED"
+        ),
+    }
+    columns = ["source_id", "publication_id", "map_version_id", "source_row_no",
+               *(column.key for column in contract.columns),
+               "resolved_base_code", "mapping_resolution"]
+    connection.execute(text(
+        f"INSERT INTO fact_collection_rate_v3 ({', '.join(f'`{key}`' for key in columns)}) "
+        f"VALUES ({', '.join(f':{key}' for key in columns)})"
+    ), payload)
+
+
+def test_matrix_v3_metadata_fast_paths_keep_partition_and_scope_semantics():
+    engine = create_engine("sqlite://")
+    _create_query_schema(engine)
+    older, current, prepared, empty_publication = (uuid.uuid4().bytes for _ in range(4))
+    first_day, second_day = date(2026, 10, 18), date(2026, 10, 19)
+    statements = []
+    statement_connections = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            statements.append(statement)
+            statement_connections.append((id(_connection), statement))
+
+    matrix_user = {"platform_role": "USER", "organizational_scope": "matrix", "role": "matrix"}
+    try:
+        with engine.begin() as connection:
+            _insert_v3_publication(connection, older, 1, 3, "2026-10-18", "2026-10-19")
+            _insert_v3_publication(connection, current, 2, 2, "2026-10-18", "2026-10-18")
+            _insert_v3_publication(connection, prepared, 99, 50, "2026-10-19", "2026-10-19", "PREPARED")
+            _insert_v3_publication(connection, empty_publication, 3, 0, None, None)
+            connection.execute(text("""
+                INSERT INTO source_publication_dates
+                  (source_id, publication_id, data_date, row_count)
+                VALUES
+                  ('collection_rate', :older, '2026-10-18', 2),
+                  ('collection_rate', :older, '2026-10-19', 1),
+                  ('collection_rate', :current, '2026-10-18', 2),
+                  ('collection_rate', :prepared, '2026-10-19', 50)
+            """), {"older": older, "current": current, "prepared": prepared})
+            for row_no, (day, name) in enumerate((
+                (first_day, "Mapped base"), (first_day, "Older row"), (second_day, None),
+            ), start=1):
+                _insert_v3_fact(connection, older, row_no, day, name)
+            for row_no, name in enumerate(("Mapped base", "Unmapped replacement"), start=1):
+                _insert_v3_fact(connection, current, row_no, first_day, name)
+
+        first_page = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=2, offset=0,
+            date_from=first_day, date_to=second_day, contract_version=3,
+        )
+        second_page = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=2, offset=2,
+            date_from=first_day, date_to=second_day, contract_version=3,
+        )
+        rows = first_page["records"] + second_page["records"]
+        assert first_page["total"] == second_page["total"] == 3
+        assert len(rows) == len({(row["publication_id"], row["source_row_no"]) for row in rows}) == 3
+        assert [row["publication_id"] for row in first_page["records"]] == [
+            str(uuid.UUID(bytes=older)), str(uuid.UUID(bytes=current)),
+        ]
+        metadata_counts = [s for s in statements if "SUM(metadata.row_count)" in s]
+        assert len(metadata_counts) == 2
+        assert all("fact_collection_rate_v3" not in s for s in metadata_counts)
+        metadata_connection_id = next(
+            connection_id for connection_id, statement in statement_connections
+            if "SUM(metadata.row_count)" in statement
+        )
+        detail_connection_id = next(
+            connection_id for connection_id, statement in statement_connections
+            if "FROM `fact_collection_rate_v3` AS fact" in statement
+            and "ORDER BY fact.data_date" in statement
+        )
+        assert metadata_connection_id == detail_connection_id
+
+        statements.clear()
+        statement_connections.clear()
+        dates = get_date_counts(
+            engine, source_id="collection_rate", identity=matrix_user,
+            date_from=first_day, date_to=second_day, contract_version=3,
+        )
+        assert dates["hasPublishedPublication"] is True
+        assert [(row["date"], row["rowCount"], row["publicationId"]) for row in dates["dates"]] == [
+            ("2026-10-19", 1, str(uuid.UUID(bytes=older))),
+            ("2026-10-18", 2, str(uuid.UUID(bytes=current))),
+        ]
+        assert all("fact_collection_rate_v3" not in s for s in statements)
+        date_state_connection_id = next(
+            connection_id for connection_id, statement in statement_connections
+            if "has_published_publication" in statement
+        )
+        date_rows_connection_id = next(
+            connection_id for connection_id, statement in statement_connections
+            if "FROM ranked_metadata_dates AS metadata" in statement
+        )
+        assert date_state_connection_id == date_rows_connection_id
+
+        empty = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=10, offset=0,
+            date_from=date(2026, 10, 20), date_to=date(2026, 10, 20), contract_version=3,
+        )
+        assert empty["total"] == 0 and empty["records"] == []
+        no_dates = get_date_counts(
+            engine, source_id="collection_rate", identity=matrix_user,
+            date_from=date(2026, 10, 20), date_to=date(2026, 10, 20), contract_version=3,
+        )
+        assert no_dates["hasPublishedPublication"] is True and no_dates["dates"] == []
+
+        statements.clear()
+        regional_admin = get_records(
+            engine, source_id="collection_rate", identity={
+                "platform_role": "ADMIN", "organizational_scope": "regional",
+                "role": "regional", "effective_regions": ["SPE"],
+            }, limit=10, offset=0, date_from=first_day, date_to=second_day, contract_version=3,
+        )
+        assert regional_admin["total"] == 1
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        statements.clear()
+        regional_dates = get_date_counts(
+            engine, source_id="collection_rate", identity={
+                "platform_role": "ADMIN", "organizational_scope": "regional",
+                "role": "regional", "effective_regions": ["SPE"],
+            }, date_from=first_day, date_to=second_day, contract_version=3,
+        )
+        assert [(row["date"], row["rowCount"]) for row in regional_dates["dates"]] == [
+            ("2026-10-18", 1),
+        ]
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        statements.clear()
+        base_user = get_records(
+            engine, source_id="collection_rate", identity={
+                "platform_role": "USER", "organizational_scope": "base",
+                "role": "regional", "home_base": "MATCHED-001", "home_region": "SPE",
+            }, limit=10, offset=0, date_from=first_day, date_to=second_day,
+            contract_version=3,
+        )
+        assert base_user["total"] == 1
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        statements.clear()
+        unmapped_filter = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=10, offset=0,
+            region="Sem regional", date_from=first_day, date_to=second_day,
+            contract_version=3,
+        )
+        assert unmapped_filter["total"] == 2
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        statements.clear()
+        historical = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=10, offset=0,
+            publication_id=str(uuid.UUID(bytes=older)), contract_version=3,
+        )
+        assert historical["total"] == 3
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        statements.clear()
+        filtered = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=10, offset=0,
+            base_code="MATCHED-001", contract_version=3,
+        )
+        assert filtered["total"] == 1
+        assert all("ranked_metadata_dates" not in s for s in statements)
+
+        with engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_publications SET row_count = 99 WHERE publication_id = :id"
+            ), {"id": current})
+        statements.clear()
+        fallback_records = get_records(
+            engine, source_id="collection_rate", identity=matrix_user, limit=10, offset=0,
+            date_from=first_day, date_to=first_day, contract_version=3,
+        )
+        assert fallback_records["total"] == 2
+        assert any("COUNT(*)" in s.upper() and "fact_collection_rate_v3" in s for s in statements)
+        statements.clear()
+        fallback_dates = get_date_counts(
+            engine, source_id="collection_rate", identity=matrix_user,
+            date_from=first_day, date_to=first_day, contract_version=3,
+        )
+        assert fallback_dates["dates"][0]["rowCount"] == 2
+        assert any("fact_collection_rate_v3" in s for s in statements)
+    finally:
+        engine.dispose()
+
+
+def test_matrix_v3_metadata_eligibility_matches_active_filter_semantics():
+    engine = create_engine("sqlite://")
+    _create_query_schema(engine)
+    publication_id = uuid.uuid4().bytes
+    first_day, second_day = date(2026, 10, 18), date(2026, 10, 19)
+    statements = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            statements.append(statement)
+
+    def uses_fact_count_query(statement):
+        return (
+            statement.lstrip().upper().startswith("SELECT COUNT(*)")
+            and "fact_collection_rate_v3" in statement
+        )
+
+    matrix_user = {"platform_role": "USER", "organizational_scope": "matrix", "role": "matrix"}
+    regional_admin = {
+        "platform_role": "ADMIN", "organizational_scope": "regional",
+        "role": "regional", "effective_regions": ["SPE"],
+    }
+    try:
+        with engine.begin() as connection:
+            _insert_v3_publication(
+                connection, publication_id, 1, 4, "2026-10-18", "2026-10-19",
+            )
+            connection.execute(text("""
+                INSERT INTO source_publication_dates
+                  (source_id, publication_id, data_date, row_count)
+                VALUES
+                  ('collection_rate', :publication_id, '2026-10-18', 2),
+                  ('collection_rate', :publication_id, '2026-10-19', 2)
+            """), {"publication_id": publication_id})
+            for row_no, (day, name) in enumerate((
+                (first_day, "Mapped base"), (first_day, "Unmapped base"),
+                (second_day, "Mapped base"), (second_day, None),
+            ), start=1):
+                _insert_v3_fact(connection, publication_id, row_no, day, name)
+
+        # No filters and empty strings are inactive under the existing SQL
+        # planner semantics, so the matrix metadata fast path remains eligible.
+        for filters in ({}, {"base_code": ""}, {"region": ""}):
+            statements.clear()
+            records = get_records(
+                engine, source_id="collection_rate", identity=matrix_user,
+                limit=10, offset=0, date_from=first_day, date_to=second_day,
+                contract_version=3, **filters,
+            )
+            assert records["total"] == len(records["records"]) == 4
+            assert any("SUM(metadata.row_count)" in sql for sql in statements)
+            assert not any(uses_fact_count_query(sql) for sql in statements)
+
+            statements.clear()
+            dates = get_date_counts(
+                engine, source_id="collection_rate", identity=matrix_user,
+                date_from=first_day, date_to=second_day, contract_version=3, **filters,
+            )
+            assert [(row["date"], row["rowCount"]) for row in dates["dates"]] == [
+                ("2026-10-19", 2), ("2026-10-18", 2),
+            ]
+            assert any("ranked_metadata_dates" in sql for sql in statements)
+            assert not any("fact_collection_rate_v3" in sql for sql in statements)
+
+        # Every non-empty text value is an active filter, including whitespace.
+        for filters in (
+            {"base_code": "   "}, {"region": "   "},
+            {"base_code": "   ", "region": "   "},
+        ):
+            statements.clear()
+            records = get_records(
+                engine, source_id="collection_rate", identity=matrix_user,
+                limit=10, offset=0, date_from=first_day, date_to=second_day,
+                contract_version=3, **filters,
+            )
+            assert records["total"] == len(records["records"]) == 0
+            assert any(uses_fact_count_query(sql) for sql in statements)
+            assert not any("ranked_metadata_dates" in sql for sql in statements)
+
+            statements.clear()
+            dates = get_date_counts(
+                engine, source_id="collection_rate", identity=matrix_user,
+                date_from=first_day, date_to=second_day, contract_version=3, **filters,
+            )
+            assert dates["dates"] == []
+            assert dates["hasPublishedPublication"] is True
+            assert any("fact_collection_rate_v3" in sql for sql in statements)
+            assert not any("ranked_metadata_dates" in sql for sql in statements)
+
+        # Valid base and regional filters continue using the scoped fact query.
+        for filters in ({"base_code": "MATCHED-001"}, {"region": "SPE"}):
+            statements.clear()
+            records = get_records(
+                engine, source_id="collection_rate", identity=matrix_user,
+                limit=10, offset=0, date_from=first_day, date_to=second_day,
+                contract_version=3, **filters,
+            )
+            assert records["total"] == len(records["records"]) == 2
+            assert any(uses_fact_count_query(sql) for sql in statements)
+            assert not any("ranked_metadata_dates" in sql for sql in statements)
+
+            statements.clear()
+            dates = get_date_counts(
+                engine, source_id="collection_rate", identity=matrix_user,
+                date_from=first_day, date_to=second_day, contract_version=3, **filters,
+            )
+            assert [(row["date"], row["rowCount"]) for row in dates["dates"]] == [
+                ("2026-10-19", 1), ("2026-10-18", 1),
+            ]
+            assert any("fact_collection_rate_v3" in sql for sql in statements)
+            assert not any("ranked_metadata_dates" in sql for sql in statements)
+
+        # Unmapped rows remain visible to the national "Sem regional" filter,
+        # but never use national metadata to answer that filtered request.
+        statements.clear()
+        sem_regional = get_records(
+            engine, source_id="collection_rate", identity=matrix_user,
+            limit=10, offset=0, date_from=first_day, date_to=second_day,
+            region="Sem regional", contract_version=3,
+        )
+        assert sem_regional["total"] == len(sem_regional["records"]) == 2
+        assert all(row["mapped_region"] is None for row in sem_regional["records"])
+        assert any(uses_fact_count_query(sql) for sql in statements)
+
+        statements.clear()
+        sem_regional_dates = get_date_counts(
+            engine, source_id="collection_rate", identity=matrix_user,
+            date_from=first_day, date_to=second_day, region="Sem regional",
+            contract_version=3,
+        )
+        assert [(row["date"], row["rowCount"]) for row in sem_regional_dates["dates"]] == [
+            ("2026-10-19", 1), ("2026-10-18", 1),
+        ]
+        assert any("fact_collection_rate_v3" in sql for sql in statements)
+        assert not any("ranked_metadata_dates" in sql for sql in statements)
+
+        # Matrix USER may use national metadata; ADMIN regional remains scoped.
+        statements.clear()
+        scoped_admin = get_records(
+            engine, source_id="collection_rate", identity=regional_admin,
+            limit=10, offset=0, date_from=first_day, date_to=second_day,
+            contract_version=3,
+        )
+        assert scoped_admin["total"] == len(scoped_admin["records"]) == 2
+        assert all(row["mapped_region"] == "SPE" for row in scoped_admin["records"])
+        assert any(uses_fact_count_query(sql) for sql in statements)
+        assert not any("ranked_metadata_dates" in sql for sql in statements)
+    finally:
+        engine.dispose()
