@@ -310,6 +310,132 @@ def _assert_map_available(engine: Engine) -> None:
         raise DataFoundationError("official_mapping_unavailable", 503)
 
 
+def _is_resolved_matrix_scope(identity: dict[str, Any]) -> bool:
+    """Use publication metadata only for the backend-resolved national scope.
+
+    `platform_role` is intentionally not considered here: ADMIN authorization
+    and data scope are independent. The `role` and `organizational_scope`
+    values are populated by the authenticated backend identity.
+    """
+    return (
+        str(identity.get("organizational_scope") or "").strip().lower() == "matrix"
+        and str(identity.get("role") or "").strip().lower() == "matrix"
+    )
+
+
+def _publication_contract_filter(
+    contracts: list[tuple[int, Any]],
+    parameters: dict[str, object],
+    *,
+    alias: str = "publication",
+) -> str:
+    """Build a SQL filter for contract versions supported by this code."""
+    placeholders = []
+    for index, (version, _contract) in enumerate(contracts):
+        key = f"supported_contract_version_{index}"
+        parameters[key] = version
+        placeholders.append(f":{key}")
+    return f"{alias}.contract_version IN ({', '.join(placeholders)})"
+
+
+def _daily_publication_metadata_is_consistent(
+    engine: Engine,
+    *,
+    source_id: str,
+    publication_filter: str,
+    parameters: dict[str, object],
+) -> bool:
+    """Check publication row/date metadata without reading a fact table.
+
+    The publisher writes `source_publications` and `source_publication_dates`
+    in the same transaction as fact insertion. This check detects incomplete
+    or inconsistent daily metadata and lets the caller retain the legacy fact
+    aggregation path for those exceptional histories.
+    """
+    if engine.dialect.name == "sqlite":
+        period_start_differs = "publication.period_start IS NOT daily_metadata.period_start"
+        period_end_differs = "publication.period_end IS NOT daily_metadata.period_end"
+    else:
+        period_start_differs = "NOT (publication.period_start <=> daily_metadata.period_start)"
+        period_end_differs = "NOT (publication.period_end <=> daily_metadata.period_end)"
+
+    with engine.connect() as connection:
+        inconsistent = connection.execute(text(f"""
+            SELECT 1
+            FROM source_publications AS publication
+            LEFT JOIN (
+                SELECT source_id, publication_id,
+                       MIN(data_date) AS period_start,
+                       MAX(data_date) AS period_end,
+                       SUM(row_count) AS row_count
+                FROM source_publication_dates
+                WHERE source_id = :source_id
+                GROUP BY source_id, publication_id
+            ) AS daily_metadata
+              ON daily_metadata.source_id = publication.source_id
+             AND daily_metadata.publication_id = publication.publication_id
+            WHERE {publication_filter}
+              AND (
+                    publication.row_count <> COALESCE(daily_metadata.row_count, 0)
+                 OR {period_start_differs}
+                 OR {period_end_differs}
+              )
+            LIMIT 1
+        """), parameters).first()
+    return inconsistent is None
+
+
+def _get_matrix_publications_from_metadata(
+    engine: Engine,
+    *,
+    source_id: str,
+    publication_filter: str,
+    parameters: dict[str, object],
+    limit: int,
+    offset: int,
+) -> dict[str, object]:
+    """List visible matrix publication history from publication metadata only."""
+    with engine.connect() as connection:
+        total = int(connection.execute(text(f"""
+            SELECT COUNT(*)
+            FROM source_publications AS publication
+            WHERE {publication_filter}
+              AND publication.row_count > 0
+        """), parameters).scalar_one())
+        rows = connection.execute(text(f"""
+            SELECT publication.publication_id, publication.version_no,
+                   publication.contract_version, publication.published_at,
+                   publication.snapshot_as_of,
+                   publication.row_count AS visible_row_count,
+                   publication.period_start, publication.period_end
+            FROM source_publications AS publication
+            WHERE {publication_filter}
+              AND publication.row_count > 0
+            ORDER BY publication.version_no DESC
+            LIMIT :limit OFFSET :offset
+        """), {**parameters, "limit": limit, "offset": offset}).mappings()
+        publications = [
+            {
+                "publicationId": str(uuid.UUID(bytes=bytes(row["publication_id"]))),
+                "version": int(row["version_no"]),
+                "contractVersion": int(row["contract_version"]),
+                "publishedAt": row["published_at"],
+                "snapshotAsOf": row["snapshot_as_of"],
+                "visibleRowCount": int(row["visible_row_count"]),
+                "periodStart": row["period_start"],
+                "periodEnd": row["period_end"],
+            }
+            for row in rows
+        ]
+    return {
+        "sourceId": source_id,
+        "publications": publications,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> dict[str, object]:
     """Return current map metadata and only the base count visible to this identity."""
     parameters: dict[str, object] = {}
@@ -551,18 +677,45 @@ def get_publications(
     ]
     if not contracts:
         raise DataFoundationError("data_source_contract_version_not_supported", 404)
-    # Publication history is data too: row counts and period metadata must be
-    # computed from facts visible to this identity. Do not expose national
-    # counts to regional/base viewers or fall back to global counts when scope
-    # is unknown. Matrix viewers retain unmapped rows because their scope
-    # predicate is intentionally empty.
+    # Scoped publication history is data too: regional/base row counts and
+    # periods must be computed from facts visible to this identity. Matrix
+    # viewers retain unmapped rows and can use publication metadata only after
+    # the publisher's count/period invariants have been checked.
     parameters: dict[str, object] = {"source_id": source_id}
+    matrix_scope = _is_resolved_matrix_scope(identity)
     scope = _scope_clause(identity, parameters, dialect=engine.dialect.name)
     _assert_map_available(engine)
     publication_filter = "publication.source_id = :source_id AND publication.publication_state = 'PUBLISHED'"
     if contract_version is not None:
         parameters["contract_version"] = contract_version
         publication_filter += " AND publication.contract_version = :contract_version"
+
+    if matrix_scope:
+        metadata_parameters = dict(parameters)
+        metadata_filter = (
+            publication_filter
+            + " AND "
+            + _publication_contract_filter(contracts, metadata_parameters)
+        )
+        metadata_is_consistent = (
+            source_id not in DAILY_SOURCES
+            or _daily_publication_metadata_is_consistent(
+                engine,
+                source_id=source_id,
+                publication_filter=metadata_filter,
+                parameters=metadata_parameters,
+            )
+        )
+        if metadata_is_consistent:
+            return _get_matrix_publications_from_metadata(
+                engine,
+                source_id=source_id,
+                publication_filter=metadata_filter,
+                parameters=metadata_parameters,
+                limit=limit,
+                offset=offset,
+            )
+
     if source_id in DAILY_SOURCES:
         date_select = "MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end"
     elif source_id == "no_movement":

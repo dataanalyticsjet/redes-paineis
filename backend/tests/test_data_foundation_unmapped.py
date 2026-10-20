@@ -71,7 +71,7 @@ def _create_query_schema(engine) -> None:
         connection.exec_driver_sql("CREATE TABLE base_mapping_current (current_key TEXT PRIMARY KEY, map_version_id BLOB)")
         connection.exec_driver_sql("CREATE TABLE base_mapping_entries (map_version_id BLOB, base_code TEXT, regional_name TEXT, base_name TEXT, uf_code TEXT, rm_region TEXT, rm_responsible TEXT)")
         connection.exec_driver_sql("CREATE TABLE base_mapping_name_decisions (map_version_id BLOB, source_id TEXT, source_base_name TEXT, resolution_state TEXT, target_base_code TEXT)")
-        connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, contract_version INTEGER NOT NULL DEFAULT 1, version_no INTEGER, period_start TEXT, period_end TEXT, snapshot_as_of TEXT, published_at TEXT, publication_state TEXT)")
+        connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, contract_version INTEGER NOT NULL DEFAULT 1, version_no INTEGER, period_start TEXT, period_end TEXT, snapshot_as_of TEXT, published_at TEXT, row_count INTEGER NOT NULL DEFAULT 0, publication_state TEXT)")
         connection.exec_driver_sql("CREATE TABLE source_publication_dates (source_id TEXT, publication_id BLOB, data_date DATE, row_count INTEGER, PRIMARY KEY(source_id, publication_id, data_date))")
         connection.exec_driver_sql("CREATE TABLE source_daily_head (source_id TEXT, data_date DATE, publication_id BLOB, PRIMARY KEY(source_id, data_date))")
         connection.exec_driver_sql("CREATE TABLE source_snapshot_head (source_id TEXT PRIMARY KEY, publication_id BLOB)")
@@ -353,12 +353,17 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
 
                 connection.execute(text("""
                     INSERT INTO source_publications
-                      (publication_id, source_id, contract_version, version_no, published_at, publication_state)
-                    VALUES (:publication_id, :source_id, :contract_version, 1, '2026-10-09', 'PUBLISHED')
+                      (publication_id, source_id, contract_version, version_no, published_at,
+                       period_start, period_end, row_count, publication_state)
+                    VALUES (:publication_id, :source_id, :contract_version, 1, '2026-10-09',
+                            :period_start, :period_end, :row_count, 'PUBLISHED')
                 """), {
                     "publication_id": publication_ids[source_id],
                     "source_id": source_id,
                     "contract_version": CONTRACTS[source_id].version,
+                    "period_start": "2026-10-01" if source_id in repository.DAILY_SOURCES else None,
+                    "period_end": "2026-10-01" if source_id in repository.DAILY_SOURCES else None,
+                    "row_count": expected_count,
                 })
                 if source_id in repository.DAILY_SOURCES:
                     connection.execute(text("""
@@ -441,6 +446,36 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
             assert visible_publication_rows == regional_records["total"]
             assert regional_publications["total"] == (1 if regional_records["total"] else 0)
             assert regional_records["total"] <= expected_count
+
+            if source_id == "collection_monitoring":
+                base_identity = {
+                    "platform_role": "USER",
+                    "organizational_scope": "base",
+                    "role": "regional",
+                    "home_region": "SPE",
+                    "home_base": "MATCHED-001",
+                }
+                base_records = get_records(
+                    engine,
+                    source_id=source_id,
+                    identity=base_identity,
+                    limit=10_000,
+                    offset=0,
+                )
+                base_publications = get_publications(
+                    engine,
+                    source_id=source_id,
+                    identity=base_identity,
+                    limit=10,
+                    offset=0,
+                )
+                base_visible_rows = (
+                    base_publications["publications"][0]["visibleRowCount"]
+                    if base_publications["publications"]
+                    else 0
+                )
+                assert base_visible_rows == base_records["total"]
+                assert base_records["total"] <= expected_count
 
             counts = get_date_counts(engine, source_id=source_id, identity=identity)
             if source_id == "no_movement":
