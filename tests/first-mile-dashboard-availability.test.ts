@@ -118,8 +118,9 @@ test("Taxa V3 renders its published dashboard while unfinished First Mile panels
   assert.match(source, /collectionRateV2State\.error \?\? "Sem dados publicados para a data selecionada"/);
   assert.match(source, /\) : view === "taxa" \? \(\s+isAuthorizedDashboardViewer \? \(/);
   assert.match(source, /data-testid="taxa-v2-kpi-grid"/);
-  assert.match(source, /label=\{t\("Taxa com tentativa"\)\} value=\{t\("Pendente de validação"\)\}/);
-  assert.match(source, /label=\{t\("Aguardando coleta"\)\} value=\{t\("Pendente de validação"\)\}/);
+  assert.match(source, /label=\{t\("Taxa com tentativa"\)\} value=\{formatTaxaRate\(taxaV2AttemptRate\.rate\)\}/);
+  assert.match(source, /label=\{t\("Aguardando coleta"\)\} value=\{formatCompact\(taxaV2Summary\.notCollected\)\}/);
+  assert.match(source, /summarizeCollectionRateV3Attempts\(taxaV2FilteredRows\)/);
   assert.match(source, /view === "home" \|\| view === "data-foundation" \|\| isFirstMileUnderReview/);
   assert.match(source, /const isFirstMileUnderReview = Object\.hasOwn\(DASHBOARD_V2_SOURCE_BY_PANEL, view\)/);
   assert.match(source, /if \(view !== "movimentacao"\) return undefined/);

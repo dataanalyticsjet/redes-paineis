@@ -9,6 +9,7 @@ import {
   formatCollectionRateV3Cell,
   mapCollectionRateV3Record,
   summarizeCollectionRateV3,
+  summarizeCollectionRateV3Attempts,
 } from "../src/lib/data-foundation/collection-rate-v3-dashboard.ts";
 import {
   COLLECTION_RATE_V3_COLUMNS,
@@ -120,6 +121,57 @@ test("summary rates are recalculated from quantities and filters retain source r
     collectionRate: 0.75,
     onTimeRate: 55 / 80,
   });
+});
+
+test("validated V3 cards use filtered quantities and the official attempts numerator", () => {
+  const rows = [
+    mapCollectionRateV3Record(record({
+      deadline_at: "2026-10-01 00:00:00",
+      quantity_to_collect: 10_000_000,
+      collected_quantity: 8_183_663,
+      not_collected_quantity: 1_816_337,
+      collected_plus_attempts_quantity: 9_260_000,
+      order_origin: "Marketplace",
+    })),
+    mapCollectionRateV3Record(record({
+      deadline_at: "2026-10-02 00:00:00",
+      quantity_to_collect: 500_000,
+      collected_plus_attempts_quantity: 100_000,
+      not_collected_quantity: 50_000,
+      source_row_no: 3,
+      order_origin: "Loja",
+    })),
+  ];
+  const filtered = filterCollectionRateV3Rows(rows, { origins: new Set(["Marketplace"]) });
+  const totals = summarizeCollectionRateV3(filtered);
+  const attempts = summarizeCollectionRateV3Attempts(filtered);
+
+  assert.equal(totals.notCollected, 1_816_337);
+  assert.equal(attempts.collectedPlusAttempts, 9_260_000);
+  assert.equal(attempts.quantityToCollect, 10_000_000);
+  assert.equal(attempts.rate, 0.926);
+});
+
+test("validated V3 card reference for 18 October and zero denominator", () => {
+  const row = mapCollectionRateV3Record(record({
+    deadline_at: "2026-10-18 00:00:00",
+    quantity_to_collect: 1_365_000,
+    collected_quantity: 823_316,
+    not_collected_quantity: 541_684,
+    collected_plus_attempts_quantity: 541_905,
+  }));
+  const dailyRows = [row].filter((item) => item.data_date === "2026-10-18");
+  const totals = summarizeCollectionRateV3(dailyRows);
+  const attempts = summarizeCollectionRateV3Attempts(dailyRows);
+
+  assert.equal(totals.notCollected, 541_684);
+  assert.equal(attempts.rate, 0.397);
+  assert.ok(Number(row.collected_plus_attempts_quantity) < Number(row.collected_quantity));
+
+  const zeroDenominator = summarizeCollectionRateV3Attempts([
+    mapCollectionRateV3Record(record({ quantity_to_collect: 0, collected_plus_attempts_quantity: 5 })),
+  ]);
+  assert.equal(zeroDenominator.rate, null);
 });
 
 test("V3 numeric formatting and Excel export preserve native numeric values", () => {

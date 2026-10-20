@@ -37,6 +37,12 @@ export interface CollectionRateV3Totals {
   onTimeRate: number | null;
 }
 
+export interface CollectionRateV3AttemptRate {
+  collectedPlusAttempts: number;
+  quantityToCollect: number;
+  rate: number | null;
+}
+
 export interface CollectionRateV3Options {
   regions: string[];
   rms: string[];
@@ -143,6 +149,24 @@ export function summarizeCollectionRateV3(rows: readonly CollectionRateV3Dashboa
   const summary = emptyTotals();
   for (const row of rows) addTotals(summary, row);
   return summary;
+}
+
+export function summarizeCollectionRateV3Attempts(
+  rows: readonly CollectionRateV3DashboardRow[],
+): CollectionRateV3AttemptRate {
+  const collectedPlusAttempts = rows.reduce(
+    (sum, row) => sum + quantity(row.collected_plus_attempts_quantity),
+    0,
+  );
+  const quantityToCollect = rows.reduce(
+    (sum, row) => sum + quantity(row.quantity_to_collect),
+    0,
+  );
+  return {
+    collectedPlusAttempts,
+    quantityToCollect,
+    rate: quantityToCollect > 0 ? collectedPlusAttempts / quantityToCollect : null,
+  };
 }
 
 function groupKey(row: CollectionRateV3DashboardRow, dimension: "region" | "rmArea"): string {

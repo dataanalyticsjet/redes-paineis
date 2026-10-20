@@ -122,6 +122,7 @@ import {
   groupCollectionRateV3Rows,
   mapCollectionRateV3Record,
   summarizeCollectionRateV3,
+  summarizeCollectionRateV3Attempts,
   summarizeCollectionRateV3Daily,
   summarizeCollectionRateV3Monthly,
   summarizeCollectionRateV3Origins,
@@ -5606,6 +5607,10 @@ export function DashboardApp() {
     () => summarizeCollectionRateV3(taxaV2FilteredRows),
     [taxaV2FilteredRows],
   );
+  const taxaV2AttemptRate = useMemo(
+    () => summarizeCollectionRateV3Attempts(taxaV2FilteredRows),
+    [taxaV2FilteredRows],
+  );
   const taxaV2ByRegion = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
   const taxaV2ByRmArea = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
   const taxaV2Daily = useMemo(() => summarizeCollectionRateV3Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
@@ -9130,9 +9135,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                 <>
                   <section className="kpi-grid" aria-label={t("Indicadores de taxa de coleta")} data-testid="taxa-v2-kpi-grid">
                     <KpiCard icon={<Target size={20} />} label={t("Taxa de coleta")} value={formatTaxaRate(taxaV2Summary.collectionRate)} detail={t("{count} coletados de {planned} previstos", { count: formatNumber(taxaV2Summary.collected), planned: formatNumber(taxaV2Summary.planned) })} />
-                    <KpiCard icon={<TrendingUp size={20} />} label={t("Taxa com tentativa")} value={t("Pendente de validação")} detail={t("A fórmula JMS ainda precisa de confirmação operacional.")} tone="orange" />
+                    <KpiCard icon={<TrendingUp size={20} />} label={t("Taxa com tentativa")} value={formatTaxaRate(taxaV2AttemptRate.rate)} detail={t("{count} com coleta/tentativa", { count: formatNumber(taxaV2AttemptRate.collectedPlusAttempts) })} tone="orange" />
                     <KpiCard icon={<Layers3 size={20} />} label={t("Previsto a coletar")} value={formatCompact(taxaV2Summary.planned)} detail={t("SUM(Quantidade prevista para coleta)")} tone="dark" />
-                    <KpiCard icon={<CircleAlert size={20} />} label={t("Aguardando coleta")} value={t("Pendente de validação")} detail={t("O campo correspondente à regra ainda não foi confirmado.")} tone="soft" />
+                    <KpiCard icon={<CircleAlert size={20} />} label={t("Aguardando coleta")} value={formatCompact(taxaV2Summary.notCollected)} detail={t("Não coletados")} tone="soft" />
                   </section>
 
                   <section className="charts-grid taxa-v2-summary-grid">
@@ -9194,7 +9199,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(taxaV2SearchedRows.length) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.max(1, current - 1))} disabled={taxaV2ActivePage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(taxaV2ActivePage), total: formatNumber(taxaV2PageCount) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.min(taxaV2PageCount, current + 1))} disabled={taxaV2ActivePage >= taxaV2PageCount}>{t("Próxima")}</button></div>
                   </section>
                   {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência única no DoomsDay permanecem nos totais gerais e sem atribuição organizacional.")}</div> : null}
-                  <div className="quality-note" role="status">{t("Taxa com tentativa e Aguardando Coleta estão pendentes de validação semântica; nenhuma fórmula estimada é apresentada.")}</div>
+                  <div className="quality-note" role="status">{t("As tabelas analíticas de taxa com tentativa permanecem pendentes de validação.")}</div>
                 </>
               ) : collectionRateV2State.status === "empty" ? (
                 <div className="quality-note" role="status">{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</div>

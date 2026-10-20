@@ -630,6 +630,7 @@ const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "Taxa no prazo": { en: "On-time rate", zh: "及时揽收率" },
   "{count} coletados no prazo": { en: "{count} collected on time", zh: "及时揽收 {count}" },
   "Taxa com tentativa": { en: "Rate with attempts", zh: "含尝试揽收率" },
+  "As tabelas analíticas de taxa com tentativa permanecem pendentes de validação.": { en: "Attempt-rate analytical tables remain pending validation.", zh: "尝试揽收率分析表仍待验证。" },
   "{count} com coleta/tentativa": { en: "{count} collected/attempted", zh: "已揽收/尝试 {count}" },
   "Qtd a coletar": { en: "To collect", zh: "待揽收量" },
   "{collected} coletados + {open} não coletados": { en: "{collected} collected + {open} not collected", zh: "已揽收 {collected} + 未揽收 {open}" },
