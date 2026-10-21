@@ -21,7 +21,7 @@ from app.services.data_foundation.repository import (
     save_uploaded_workbook_stream,
     write_preview_manifest,
 )
-from app.services.data_foundation.xlsx_parser import parse_workbook
+from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
 from app.services.data_foundation.repository import DataFoundationError
 from test_data_foundation_publication import _sql_compatibility_for_sqlite, _sqlite_schema, _xlsx_bytes
 
@@ -173,14 +173,41 @@ def test_t4t5_validation_streams_workbook_and_preserves_duplicate_rows_and_text_
     assert hashlib.sha256(_content).hexdigest() == status["fileSha256"]
 
 
+def test_t4t5_parser_rejects_changed_file_hash_before_emitting_rows(import_environment):
+    engine, map_version_id, staging_directory = import_environment
+    _job_id, stored_key, _content, _status = _create_validated_job(
+        engine, map_version_id, staging_directory, [_workbook_row(20)],
+    )
+    with engine.connect() as connection:
+        resolver = load_mapping_resolver(connection, source_id=T4T5_SOURCE)
+    emitted_rows = []
+
+    with pytest.raises(WorkbookValidationError, match="import_source_hash_mismatch"):
+        parse_workbook(
+            staging_directory / stored_key,
+            CONTRACTS[T4T5_SOURCE],
+            resolver,
+            expected_file_sha256="0" * 64,
+            on_valid_row=emitted_rows.append,
+        )
+
+    assert emitted_rows == []
+
+
 def test_t4t5_rejects_a_second_upload_while_the_source_is_processing(import_environment):
     engine, map_version_id, staging_directory = import_environment
     first_job_id, _, _, _ = _create_validated_job(
         engine, map_version_id, staging_directory, [_workbook_row(20)],
     )
-    queue_t4t5_publication(
+    queued = queue_t4t5_publication(
         engine, job_id=first_job_id, actor_user_id=ACTOR_ID, staging_directory=staging_directory,
     )
+    assert queued["phase"] == "PUBLICATION"
+    assert queued["inputRowCount"] == 0
+    assert queued["analyzedRowCount"] == 0
+    assert queued["writtenRowCount"] == 0
+    assert queued["committedRowCount"] == 0
+    assert queued["totalExpectedRowCount"] == 1
 
     content = _xlsx_bytes(CONTRACTS[T4T5_SOURCE], [_workbook_row(19, seller_id="000789")])
     stored_key, file_size, file_sha256 = save_uploaded_workbook_stream(
@@ -245,21 +272,26 @@ def test_t4t5_publication_failure_keeps_old_heads_and_resume_does_not_duplicate_
     queue_t4t5_publication(
         engine, job_id=job_id, actor_user_id=ACTOR_ID, staging_directory=staging_directory,
     )
-    original_batch_size = repository.FACT_BATCH_SIZE
+    original_batch_size = repository.T4T5_FACT_BATCH_SIZE
     original_parse = repository.parse_workbook
-    monkeypatch.setattr(repository, "FACT_BATCH_SIZE", 2)
+    monkeypatch.setattr(repository, "T4T5_FACT_BATCH_SIZE", 2)
 
-    def fail_after_first_committed_batch(content, contract, resolver, *, on_valid_row=None, on_progress=None):
+    def fail_after_first_committed_batch(
+        content, contract, resolver, *, on_valid_row=None, on_progress=None,
+        trusted_file_sha256=None, expected_file_sha256=None,
+    ):
         def interrupt_after_batch(row):
             if on_valid_row is not None:
                 on_valid_row(row)
-            if row.source_row_no == 3:
+            if row.source_row_no == 4:
                 raise RuntimeError("simulated interruption after committed batch")
 
         return original_parse(
             content, contract, resolver,
             on_valid_row=interrupt_after_batch,
             on_progress=on_progress,
+            trusted_file_sha256=trusted_file_sha256,
+            expected_file_sha256=expected_file_sha256,
         )
 
     monkeypatch.setattr(repository, "parse_workbook", fail_after_first_committed_batch)
@@ -276,6 +308,10 @@ def test_t4t5_publication_failure_keeps_old_heads_and_resume_does_not_duplicate_
     assert failed["state"] == "FAILED"
     assert failed["phase"] == "PUBLICATION"
     assert failed["canPublish"] is True
+    assert failed["analyzedRowCount"] == 3
+    assert failed["writtenRowCount"] == 2
+    assert failed["committedRowCount"] == 2
+    assert failed["totalExpectedRowCount"] == 3
     with engine.connect() as connection:
         prepared = connection.execute(text("""
             SELECT publication_id, publication_state
@@ -298,7 +334,7 @@ def test_t4t5_publication_failure_keeps_old_heads_and_resume_does_not_duplicate_
         engine, job_id=job_id, actor_user_id=ACTOR_ID, staging_directory=staging_directory,
     )
     monkeypatch.setattr(repository, "parse_workbook", original_parse)
-    monkeypatch.setattr(repository, "FACT_BATCH_SIZE", original_batch_size)
+    monkeypatch.setattr(repository, "T4T5_FACT_BATCH_SIZE", original_batch_size)
     publish_t4t5_import_job(
         engine,
         job_id=job_id,
@@ -310,6 +346,10 @@ def test_t4t5_publication_failure_keeps_old_heads_and_resume_does_not_duplicate_
 
     published = get_job_status(engine, job_id, ACTOR_ID, staging_directory=staging_directory)
     assert published["state"] == "PUBLISHED"
+    assert published["analyzedRowCount"] == 3
+    assert published["writtenRowCount"] == 3
+    assert published["committedRowCount"] == 3
+    assert published["totalExpectedRowCount"] == 3
     assert published["version"] == 21
     new_publication_id = uuid.UUID(published["publicationId"]).bytes
     with engine.connect() as connection:

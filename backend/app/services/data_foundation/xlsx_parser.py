@@ -1619,21 +1619,37 @@ def parse_workbook(
     *,
     on_valid_row: Callable[[ValidImportRow], None] | None = None,
     on_progress: Callable[[int], None] | None = None,
+    trusted_file_sha256: str | None = None,
+    expected_file_sha256: str | None = None,
 ) -> PreviewSummary:
     if not content:
         raise WorkbookValidationError("workbook_empty", 400)
     if isinstance(content, Path):
         if contract.source_id != "collection_monitoring_t4_t5" or contract.version != 1:
             raise WorkbookValidationError("workbook_path_not_supported")
-        try:
-            digest = hashlib.sha256()
-            with content.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            file_hash = digest.hexdigest()
-        except OSError:
-            raise WorkbookValidationError("workbook_file_invalid") from None
+        if trusted_file_sha256 is not None and expected_file_sha256 is not None:
+            raise WorkbookValidationError("workbook_hash_configuration_invalid")
+        supplied_hash = trusted_file_sha256 or expected_file_sha256
+        if supplied_hash is not None and re.fullmatch(r"[0-9a-f]{64}", supplied_hash) is None:
+            raise WorkbookValidationError("workbook_hash_configuration_invalid")
+        if trusted_file_sha256 is not None:
+            # The upload stream was hashed while it was copied into private staging.
+            # Publication re-hashes the staged file before any facts are inserted.
+            file_hash = trusted_file_sha256
+        else:
+            try:
+                digest = hashlib.sha256()
+                with content.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                file_hash = digest.hexdigest()
+            except OSError:
+                raise WorkbookValidationError("workbook_file_invalid") from None
+            if expected_file_sha256 is not None and file_hash != expected_file_sha256:
+                raise WorkbookValidationError("import_source_hash_mismatch", 409)
     else:
+        if trusted_file_sha256 is not None or expected_file_sha256 is not None:
+            raise WorkbookValidationError("workbook_hash_configuration_invalid")
         file_hash = hashlib.sha256(content).hexdigest()
     summary = PreviewSummary(
         source_id=contract.source_id,

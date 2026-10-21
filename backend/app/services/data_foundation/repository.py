@@ -69,6 +69,7 @@ DAILY_SOURCES = frozenset({
 })
 FACT_BATCH_SIZE = 1000
 T4T5_SOURCE = "collection_monitoring_t4_t5"
+T4T5_FACT_BATCH_SIZE = 5000
 T4T5_PROGRESS_INTERVAL = 10_000
 _T4T5_LOCAL_JOB_LOCKS: dict[str, threading.Lock] = {}
 _T4T5_LOCAL_JOB_LOCKS_GUARD = threading.Lock()
@@ -829,6 +830,7 @@ def process_t4t5_preview_job(
 
             summary = parse_workbook(
                 staged_workbook_path(staging_directory, stored_key), contract, resolver,
+                trusted_file_sha256=file_sha256,
                 on_progress=record_progress,
             )
             if summary.file_sha256 != file_sha256:
@@ -1342,33 +1344,51 @@ def queue_t4t5_publication(
             manifest = read_preview_manifest(staging_directory, str(job["stored_file_key"]))
             if manifest is None or not bool(manifest.get("canPublish")):
                 raise DataFoundationError("import_job_not_validated", 409)
+            prepared = connection.execute(text("""
+                SELECT publication_id FROM source_publications
+                WHERE source_id = :source_id AND job_id = :job_id
+                  AND publication_state = 'PREPARED'
+                LIMIT 1
+            """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).mappings().first()
             if state == "VALIDATED":
-                pass
+                if prepared is not None:
+                    raise DataFoundationError("import_prepared_publication_conflict", 409)
             elif state == "FAILED":
-                prepared = connection.execute(text("""
-                    SELECT publication_id FROM source_publications
-                    WHERE source_id = :source_id AND job_id = :job_id
-                      AND publication_state = 'PREPARED'
-                    LIMIT 1
-                """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).first()
                 if prepared is None:
                     raise DataFoundationError("import_job_not_validated", 409)
             elif state != "PARSING" or manifest.get("phase") != "PUBLICATION":
                 raise DataFoundationError("import_job_not_validated", 409)
+            committed_rows = 0
+            if prepared is not None:
+                committed_rows = int(connection.execute(text(
+                    f"SELECT COUNT(*) FROM `{fact_table_for_contract(T4T5_SOURCE, 1)}` "
+                    "WHERE publication_id = :publication_id"
+                ), {"publication_id": bytes(prepared["publication_id"])}).scalar_one())
+            manifest["publicationProgress"] = {
+                "analyzedRowCount": 0,
+                "totalExpectedRowCount": int(job["valid_row_count"] or 0),
+                "writtenRowCount": committed_rows,
+                "committedRowCount": committed_rows,
+            }
             manifest["phase"] = "PUBLICATION"
             manifest.pop("errorCode", None)
             write_preview_manifest(staging_directory, str(job["stored_file_key"]), manifest)
             connection.execute(text("""
-                UPDATE import_jobs SET job_state = 'PARSING', finished_at = NULL
+                UPDATE import_jobs SET job_state = 'PARSING', input_row_count = :committed_rows,
+                    finished_at = NULL
                 WHERE job_id = :job_id
-            """), {"job_id": _uuid_bytes(job_id)})
+            """), {"job_id": _uuid_bytes(job_id), "committed_rows": committed_rows})
     return {
         "jobId": job_id,
         "sourceId": T4T5_SOURCE,
         "state": "PARSING",
         "phase": "PUBLICATION",
-        "inputRowCount": int(job["input_row_count"] or 0),
+        "inputRowCount": committed_rows,
+        "analyzedRowCount": 0,
+        "writtenRowCount": committed_rows,
+        "committedRowCount": committed_rows,
         "validRowCount": int(job["valid_row_count"] or 0),
+        "totalExpectedRowCount": int(job["valid_row_count"] or 0),
     }
 
 
@@ -1419,6 +1439,22 @@ def publish_t4t5_import_job(
     """Insert a T4/T5 publication in committed batches, then atomically expose its daily heads."""
     if not idempotency_key or len(idempotency_key) > 128:
         return
+    progress_manifest: dict[str, object] | None = None
+    analyzed_rows = 0
+    committed_rows = 0
+
+    def persist_progress() -> None:
+        if progress_manifest is None:
+            return
+        progress = progress_manifest.setdefault("publicationProgress", {})
+        if isinstance(progress, dict):
+            progress.update({
+                "analyzedRowCount": analyzed_rows,
+                "writtenRowCount": committed_rows,
+                "committedRowCount": committed_rows,
+            })
+        write_preview_manifest(staging_directory, stored_key, progress_manifest)
+
     with _locked_import_connection(engine, f"df-publish:{job_id}") as connection:
         if connection is None:
             return
@@ -1433,6 +1469,7 @@ def publish_t4t5_import_job(
                 manifest = read_preview_manifest(staging_directory, stored_key)
                 if manifest is None or manifest.get("phase") != "PUBLICATION" or not bool(manifest.get("canPublish")):
                     raise DataFoundationError("import_job_not_validated", 409)
+                progress_manifest = manifest
                 summary = _summary_from_preview_manifest(manifest)
                 contract = get_contract(T4T5_SOURCE, 1)
                 map_version_id = bytes(job["validation_map_version_id"] or b"")
@@ -1447,12 +1484,6 @@ def publish_t4t5_import_job(
             resolver = load_mapping_resolver(connection, source_id=T4T5_SOURCE, map_version_id=map_version_id)
             connection.commit()
             staged_path = staged_workbook_path(staging_directory, stored_key)
-            actual_hash = hashlib.sha256()
-            with staged_path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    actual_hash.update(chunk)
-            if actual_hash.hexdigest() != file_sha256:
-                raise DataFoundationError("import_source_hash_mismatch", 409)
             with connection.begin():
                 existing = connection.execute(text("""
                     SELECT publication_id, version_no, publication_state, map_version_id, file_sha256,
@@ -1556,10 +1587,27 @@ def publish_t4t5_import_job(
                     if prepared_dates != summary.per_date_counts:
                         raise DataFoundationError("import_prepared_publication_conflict", 409)
                 table = fact_table_for_contract(T4T5_SOURCE, 1)
-                existing_max = connection.execute(text(
-                    f"SELECT COALESCE(MAX(source_row_no), 0) FROM `{table}` WHERE publication_id = :publication_id"
-                ), {"publication_id": publication_id}).scalar_one()
-                start_after_row = int(existing_max or 0)
+                existing_rows = connection.execute(text(f"""
+                    SELECT COALESCE(MAX(source_row_no), 0) AS max_source_row_no, COUNT(*) AS committed_row_count
+                    FROM `{table}` WHERE publication_id = :publication_id
+                """), {"publication_id": publication_id}).mappings().one()
+                start_after_row = int(existing_rows["max_source_row_no"] or 0)
+                committed_rows = int(existing_rows["committed_row_count"] or 0)
+                progress = manifest.setdefault("publicationProgress", {})
+                if not isinstance(progress, dict):
+                    progress = {}
+                    manifest["publicationProgress"] = progress
+                progress.update({
+                    "analyzedRowCount": 0,
+                    "totalExpectedRowCount": summary.valid_row_count,
+                    "writtenRowCount": committed_rows,
+                    "committedRowCount": committed_rows,
+                })
+                connection.execute(text("""
+                    UPDATE import_jobs SET input_row_count = :committed_rows
+                    WHERE job_id = :job_id AND job_state = 'PARSING'
+                """), {"committed_rows": committed_rows, "job_id": _uuid_bytes(job_id)})
+                write_preview_manifest(staging_directory, stored_key, manifest)
 
             fact_columns = [
                 "source_id", "publication_id", "map_version_id", "source_row_no",
@@ -1571,35 +1619,47 @@ def publish_t4t5_import_job(
             batch: list[dict[str, object]] = []
 
             def flush_batch() -> None:
+                nonlocal committed_rows
                 if not batch:
                     return
+                next_committed_rows = committed_rows + len(batch)
                 with connection.begin():
                     connection.execute(insert_statement, list(batch))
+                    updated = connection.execute(text("""
+                        UPDATE import_jobs SET input_row_count = :committed_rows
+                        WHERE job_id = :job_id AND job_state = 'PARSING'
+                    """), {
+                        "committed_rows": next_committed_rows,
+                        "job_id": _uuid_bytes(job_id),
+                    })
+                    if updated.rowcount != 1:
+                        raise DataFoundationError("import_job_processing", 409)
+                committed_rows = next_committed_rows
                 batch.clear()
 
             def add_row(row: ValidImportRow) -> None:
                 if row.source_row_no <= start_after_row:
                     return
                 batch.append(_fact_row(T4T5_SOURCE, contract, publication_id, map_version_id, row))
-                if len(batch) >= FACT_BATCH_SIZE:
+                if len(batch) >= T4T5_FACT_BATCH_SIZE:
                     flush_batch()
 
             last_progress = 0
 
             def record_progress(rows_processed: int) -> None:
-                nonlocal last_progress
+                nonlocal last_progress, analyzed_rows
+                analyzed_rows = rows_processed
                 if rows_processed - last_progress < T4T5_PROGRESS_INTERVAL:
                     return
-                with connection.begin():
-                    connection.execute(text("""
-                        UPDATE import_jobs SET input_row_count = :rows_processed
-                        WHERE job_id = :job_id AND job_state = 'PARSING'
-                    """), {"rows_processed": rows_processed, "job_id": _uuid_bytes(job_id)})
+                persist_progress()
                 last_progress = rows_processed
 
             imported = parse_workbook(
                 staged_path, contract, resolver, on_valid_row=add_row, on_progress=record_progress,
+                expected_file_sha256=file_sha256,
             )
+            analyzed_rows = imported.input_row_count
+            persist_progress()
             flush_batch()
             if (
                 not imported.can_publish
@@ -1619,9 +1679,6 @@ def publish_t4t5_import_job(
                     raise DataFoundationError("import_job_not_found", 404)
                 if current_mapping_version(connection, lock=True) != map_version_id:
                     raise DataFoundationError("official_mapping_changed_repreview", 409)
-                actual_count = int(connection.execute(text(
-                    f"SELECT COUNT(*) FROM `{table}` WHERE publication_id = :publication_id"
-                ), {"publication_id": publication_id}).scalar_one())
                 actual_dates = {
                     str(row["data_date"]): int(row["row_count"])
                     for row in connection.execute(text(f"""
@@ -1630,6 +1687,7 @@ def publish_t4t5_import_job(
                         GROUP BY data_date
                     """), {"publication_id": publication_id}).mappings()
                 }
+                actual_count = sum(actual_dates.values())
                 if actual_count != summary.valid_row_count or actual_dates != summary.per_date_counts:
                     raise DataFoundationError("import_publication_count_mismatch", 409)
                 published_update = connection.execute(text("""
@@ -1665,8 +1723,16 @@ def publish_t4t5_import_job(
                     },
                 )
         except (DataFoundationError, WorkbookValidationError) as error:
+            try:
+                persist_progress()
+            except DataFoundationError:
+                pass
             _mark_t4t5_publication_failed(connection, job_id, actor_user_id, staging_directory, error.code)
         except Exception:
+            try:
+                persist_progress()
+            except DataFoundationError:
+                pass
             _mark_t4t5_publication_failed(
                 connection, job_id, actor_user_id, staging_directory, "import_publication_failed",
             )
@@ -1982,6 +2048,24 @@ def get_job_status(
                                 "version": int(publication["version_no"]),
                                 "reused": str(job["job_state"]) == "REUSED",
                             })
+            phase = result.get("phase")
+            if phase == "PUBLICATION":
+                progress = manifest.get("publicationProgress") if manifest is not None else None
+                if not isinstance(progress, dict):
+                    progress = {}
+                result.update({
+                    "analyzedRowCount": int(progress.get("analyzedRowCount") or 0),
+                    "writtenRowCount": int(job["input_row_count"] or 0),
+                    "committedRowCount": int(job["input_row_count"] or 0),
+                    "totalExpectedRowCount": int(job["valid_row_count"] or progress.get("totalExpectedRowCount") or 0),
+                })
+            else:
+                result.update({
+                    "analyzedRowCount": int(job["input_row_count"] or 0),
+                    "writtenRowCount": 0,
+                    "committedRowCount": 0,
+                    "totalExpectedRowCount": int(job["valid_row_count"] or 0),
+                })
         return result
 
 

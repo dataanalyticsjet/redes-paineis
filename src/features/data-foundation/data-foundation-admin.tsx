@@ -11,6 +11,7 @@ import {
 } from "../../lib/data-foundation/admin-metadata";
 import type { DashboardTranslator } from "../../lib/i18n";
 import { invalidateDashboardDataCache } from "../../lib/data-foundation/dashboard-data-cache.ts";
+import { buildT4T5ImportProgressView } from "../../lib/data-foundation/t4t5-import-progress.ts";
 import { AlertTriangle, Check, Clock3, Database, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
 
 type Source = {
@@ -77,6 +78,10 @@ type T4T5ImportStatus = {
   phase?: string;
   inputRowCount?: number;
   validRowCount?: number;
+  analyzedRowCount?: number;
+  writtenRowCount?: number;
+  committedRowCount?: number;
+  totalExpectedRowCount?: number;
   errorCode?: string;
   publicationId?: string;
   version?: number;
@@ -867,9 +872,19 @@ export function DataFoundationAdmin({
                     <div className="data-foundation-alert is-disabled" role="status" aria-live="polite">
                       <Clock3 size={17} />
                       <div>
-                        <strong>{t(largeImportProgress.phase === "PUBLICATION" ? "Publicando arquivo T4/T5 em lotes…" : "Validando arquivo T4/T5 em segundo plano…")}</strong>
-                        <p>{t("Linhas analisadas")}: {formatCount(largeImportProgress.inputRowCount ?? 0)}</p>
-                        <progress aria-label={t("Progresso da importação")}></progress>
+                        {(() => {
+                          const progress = buildT4T5ImportProgressView(largeImportProgress);
+                          return (
+                            <>
+                              <strong>{t(progress.phaseLabel === "Publicação" ? "Publicando arquivo T4/T5 em lotes…" : progress.phaseLabel === "Validação do arquivo" ? "Validando arquivo T4/T5 em segundo plano…" : "Etapa da importação indisponível")}</strong>
+                              <p>{t("Etapa atual")}: {t(progress.phaseLabel)}</p>
+                              <p>{t("Linhas analisadas")}: {formatCount(progress.analyzedRowCount)}{progress.totalExpectedRowCount === null ? "" : ` / ${formatCount(progress.totalExpectedRowCount)}`}</p>
+                              {progress.writtenRowCount === null ? null : <p>{t("Linhas gravadas")}: {formatCount(progress.writtenRowCount)}</p>}
+                              {progress.committedRowCount === null ? null : <p>{t("Linhas confirmadas no banco")}: {formatCount(progress.committedRowCount)}</p>}
+                              <progress aria-label={t("Progresso da importação")} max={100} value={progress.progressPercent ?? undefined}></progress>
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
                   ) : null}
