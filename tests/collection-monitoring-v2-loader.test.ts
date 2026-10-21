@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   COLLECTION_MONITORING_V2_COLUMNS,
   COLLECTION_MONITORING_V2_PAGE_SIZE,
+  collectionMonitoringV2ComparisonDates,
+  loadCollectionMonitoringV2ComparisonSnapshots,
   loadPublishedCollectionMonitoringV2,
   type CollectionMonitoringV2Record,
 } from "../src/lib/data-foundation/collection-monitoring-v2.ts";
@@ -40,6 +42,7 @@ test("Monitoramento V2 starts with the latest day and verifies all rows before r
     { date: "2026-10-18", rowCount: 2, publicationId, publishedAt: "2026-10-20 08:22:16", snapshotAsOf: null },
   ];
   const rows = [record(2), record(3)];
+  const comparisonRecord = record(4, "2026-10-17");
   const requested: string[] = [];
   const fetcher = async (path: string): Promise<Response> => {
     requested.push(path);
@@ -47,14 +50,18 @@ test("Monitoramento V2 starts with the latest day and verifies all rows before r
     assert.equal(url.searchParams.get("contract_version"), "2");
     if (url.pathname.endsWith("/dates")) {
       if (url.searchParams.get("latest_only") === "true") {
-        return response({ sourceId: "collection_monitoring", dates, hasPublishedPublication: true });
+        return response({ sourceId: "collection_monitoring", dates: dates.filter((item) => item.date === "2026-10-18"), hasPublishedPublication: true });
       }
-      return response({ sourceId: "collection_monitoring", dates: dates.filter((item) => item.date === "2026-10-18"), hasPublishedPublication: true });
+      const from = url.searchParams.get("date_from") ?? "";
+      const to = url.searchParams.get("date_to") ?? "";
+      return response({ sourceId: "collection_monitoring", dates: dates.filter((item) => item.date >= from && item.date <= to), hasPublishedPublication: true });
     }
     const offset = Number(url.searchParams.get("offset"));
     const limit = Number(url.searchParams.get("limit"));
     assert.ok(limit <= COLLECTION_MONITORING_V2_PAGE_SIZE);
-    return response({ sourceId: "collection_monitoring", records: rows.slice(offset, offset + limit), total: rows.length, limit, offset });
+    const isComparisonDate = url.searchParams.get("date_from") === "2026-10-17";
+    const pageRows = isComparisonDate ? [comparisonRecord] : rows;
+    return response({ sourceId: "collection_monitoring", records: pageRows.slice(offset, offset + limit), total: pageRows.length, limit, offset });
   };
   const loaded = await loadPublishedCollectionMonitoringV2(undefined, fetcher);
   assert.equal(loaded.rowCount, 2);
@@ -65,10 +72,15 @@ test("Monitoramento V2 starts with the latest day and verifies all rows before r
   assert.equal(requested.filter((path) => path.includes("/dates?")).length, 2);
   assert.equal(new URL(requested[0], "https://new-bi.test").searchParams.get("latest_only"), "true");
   assert.equal(requested.filter((path) => path.includes("/records?")).length, 1);
-  assert.ok(requested.filter((path) => path.includes("/records?")).every((path) => {
+  assert.ok(requested.filter((path) => path.includes("/records?") && new URL(path, "https://new-bi.test").searchParams.get("date_from") === "2026-10-18").every((path) => {
     const url = new URL(path, "https://new-bi.test");
     return url.searchParams.get("date_from") === "2026-10-18" && url.searchParams.get("date_to") === "2026-10-18";
   }));
+  assert.deepEqual(collectionMonitoringV2ComparisonDates(loaded.dates, loaded.period), ["2026-10-16", "2026-10-17"]);
+  const comparisonResult = await loadCollectionMonitoringV2ComparisonSnapshots(loaded.dates, loaded.period, fetcher);
+  assert.equal(comparisonResult.records.length, 1);
+  assert.deepEqual(comparisonResult.records.map((item) => item.data_date), ["2026-10-17"]);
+  assert.deepEqual(comparisonResult.failedDates, []);
 });
 
 test("Monitoramento V2 loads only the selected historical period", async () => {
@@ -82,8 +94,8 @@ test("Monitoramento V2 loads only the selected historical period", async () => {
     requested.push(path);
     const url = new URL(path, "https://new-bi.test");
     if (url.pathname.endsWith("/dates")) {
-      const from = url.searchParams.get("date_from");
-      const to = url.searchParams.get("date_to");
+      const from = url.searchParams.get("date_from") ?? "";
+      const to = url.searchParams.get("date_to") ?? "";
       return response({
         sourceId: "collection_monitoring",
         dates: dates.filter((item) => (!from || item.date >= from) && (!to || item.date <= to)),
@@ -91,8 +103,10 @@ test("Monitoramento V2 loads only the selected historical period", async () => {
       });
     }
     const offset = Number(url.searchParams.get("offset"));
-    const periodRows = [record(4, "2026-10-18"), record(5, "2026-10-19")];
-    return response({ sourceId: "collection_monitoring", records: periodRows.slice(offset, offset + 250), total: 2, limit: 250, offset });
+    const periodRows = url.searchParams.get("date_from") === "2026-10-17"
+      ? [record(3, "2026-10-17")]
+      : [record(4, "2026-10-18"), record(5, "2026-10-19")];
+    return response({ sourceId: "collection_monitoring", records: periodRows.slice(offset, offset + 250), total: periodRows.length, limit: 250, offset });
   };
   const progress: Array<[number, number]> = [];
   const loaded = await loadPublishedCollectionMonitoringV2(
@@ -104,10 +118,39 @@ test("Monitoramento V2 loads only the selected historical period", async () => {
   assert.deepEqual(loaded.records.map((item) => item.data_date), ["2026-10-18", "2026-10-19"]);
   assert.deepEqual(loaded.dates.map((item) => item.date), ["2026-10-18", "2026-10-19"]);
   assert.deepEqual(progress, [[0, 2], [2, 2]]);
-  assert.ok(requested.filter((path) => path.includes("/records?")).every((path) => {
+  const recordRequests = requested.filter((path) => path.includes("/records?")).map((path) => new URL(path, "https://new-bi.test"));
+  assert.ok(recordRequests.some((url) => url.searchParams.get("date_from") === "2026-10-18" && url.searchParams.get("date_to") === "2026-10-19"));
+  const comparison = await loadCollectionMonitoringV2ComparisonSnapshots(loaded.dates, loaded.period, fetcher);
+  assert.deepEqual(comparison.records.map((item) => item.data_date), ["2026-10-17"]);
+  assert.deepEqual(comparison.failedDates, []);
+});
+
+test("comparison snapshots are fetched after the main period and isolate comparison errors", async () => {
+  const selected = [{ date: "2026-10-19", rowCount: 1, publicationId, publishedAt: null, snapshotAsOf: null }];
+  const fetcher = async (path: string): Promise<Response> => {
     const url = new URL(path, "https://new-bi.test");
-    return url.searchParams.get("date_from") === "2026-10-18" && url.searchParams.get("date_to") === "2026-10-19";
-  }));
+    if (url.pathname.endsWith("/dates")) {
+      const date = url.searchParams.get("date_from");
+      return response({ sourceId: "collection_monitoring", dates: date === "2026-10-19" ? selected : [{ date: "2026-10-18", rowCount: 1, publicationId, publishedAt: null, snapshotAsOf: null }], hasPublishedPublication: true });
+    }
+    if (url.searchParams.get("date_from") === "2026-10-18") return new Response("timeout", { status: 504 });
+    const current = record(2, "2026-10-19");
+    return response({ sourceId: "collection_monitoring", records: [current], total: 1, limit: 250, offset: 0 });
+  };
+  const loaded = await loadPublishedCollectionMonitoringV2({ dateFrom: "2026-10-19", dateTo: "2026-10-19" }, fetcher);
+  assert.equal(loaded.records.length, 1);
+  assert.deepEqual(collectionMonitoringV2ComparisonDates(loaded.dates, loaded.period), ["2026-10-17", "2026-10-18"]);
+  const comparison = await loadCollectionMonitoringV2ComparisonSnapshots(loaded.dates, loaded.period, fetcher);
+  assert.deepEqual(comparison.records, []);
+  assert.deepEqual(comparison.failedDates, ["2026-10-18"]);
+  assert.deepEqual(collectionMonitoringV2ComparisonDates(
+    [
+      { date: "2026-10-17", rowCount: 1, publicationId, publishedAt: null, snapshotAsOf: null },
+      { date: "2026-10-18", rowCount: 1, publicationId, publishedAt: null, snapshotAsOf: null },
+      { date: "2026-10-19", rowCount: 1, publicationId, publishedAt: null, snapshotAsOf: null },
+    ],
+    { dateFrom: "2026-10-17", dateTo: "2026-10-19" },
+  ), []);
 });
 
 test("Monitoramento V2 loader keeps first-import state when the V2 contract has no publication", async () => {

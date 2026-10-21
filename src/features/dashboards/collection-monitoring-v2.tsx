@@ -1,20 +1,26 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, CalendarDays, Download, Filter, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, AlertCircle, CalendarDays, Clock3, Database, Download, Filter, Layers3, MapPin, Percent, RefreshCw, ShieldCheck } from "lucide-react";
 import { subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
 import { dashboardLocale, type DashboardLanguage, type DashboardTranslator } from "../../lib/i18n";
 import {
   COLLECTION_MONITORING_V2_COLUMNS,
   COLLECTION_MONITORING_V2_HEADERS,
   CollectionMonitoringV2LoadError,
+  collectionMonitoringV2ComparisonDates,
+  loadCollectionMonitoringV2ComparisonSnapshots,
   loadPublishedCollectionMonitoringV2,
 } from "../../lib/data-foundation/collection-monitoring-v2.ts";
 import {
   collectionMonitoringV2FilterOptions,
+  collectionMonitoringV2ComparisonSlots,
   filterCollectionMonitoringV2Rows,
   formatCollectionMonitoringV2Value,
   groupCollectionMonitoringV2Rows,
+  collectionMonitoringV2PercentageVariation,
+  collectionMonitoringV2RowsForDate,
+  latestCollectionMonitoringV2Snapshot,
   mapCollectionMonitoringV2Record,
   summarizeCollectionMonitoringV2,
   collectionMonitoringV2ExcelMatrix,
@@ -37,6 +43,10 @@ function errorText(error: unknown): string {
 }
 
 type CollectionMonitoringV2Period = { dateFrom?: string; dateTo?: string };
+
+function groupIdentity(group: ReturnType<typeof groupCollectionMonitoringV2Rows>[number], dimension: "region" | "rm"): string {
+  return dimension === "region" ? group.region : `${group.rmArea}\u0000${group.rm}\u0000${group.region}`;
+}
 
 async function downloadExcel(rows: readonly CollectionMonitoringV2Row[], period: CollectionMonitoringV2Filters): Promise<void> {
   const XLSXModule = await import("xlsx-js-style");
@@ -63,6 +73,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [reload, setReload] = useState(0);
   const [rows, setRows] = useState<CollectionMonitoringV2Row[]>([]);
+  const [comparisonRows, setComparisonRows] = useState<CollectionMonitoringV2Row[]>([]);
+  const [comparisonLoadFailures, setComparisonLoadFailures] = useState<string[]>([]);
+  const [comparisonPendingDates, setComparisonPendingDates] = useState<string[]>([]);
   const [requestedPeriod, setRequestedPeriod] = useState<CollectionMonitoringV2Period | undefined>();
   const [progress, setProgress] = useState({ loaded: 0, total: 0 });
   const [progressScope, setProgressScope] = useState<string | null>(null);
@@ -90,14 +103,33 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       if (!active) return;
       const mapped = result.records.map(mapCollectionMonitoringV2Record);
       setRows(mapped);
+      setComparisonRows([]);
+      setComparisonLoadFailures([]);
       setPublishedAt(result.publishedAt);
       setPublicationCount(result.publicationIds.length);
       setFilters((current) => ({ ...current, dateFrom: result.period.dateFrom, dateTo: result.period.dateTo }));
       setLoadedScope(scopeKey);
       setStatus(mapped.length ? "ready" : "empty");
+      const comparisonDates = collectionMonitoringV2ComparisonDates(result.dates, result.period);
+      setComparisonPendingDates(comparisonDates);
+      if (comparisonDates.length > 0) {
+        void loadCollectionMonitoringV2ComparisonSnapshots(result.dates, result.period, undefined, controller.signal).then((comparison) => {
+          if (!active || controller.signal.aborted) return;
+          setComparisonRows(comparison.records.map(mapCollectionMonitoringV2Record));
+          setComparisonLoadFailures(comparison.failedDates);
+          setComparisonPendingDates([]);
+        }).catch(() => {
+          if (!active || controller.signal.aborted) return;
+          setComparisonLoadFailures(comparisonDates);
+          setComparisonPendingDates([]);
+        });
+      }
     }).catch((cause: unknown) => {
       if (!active || controller.signal.aborted) return;
       setRows([]);
+      setComparisonRows([]);
+      setComparisonLoadFailures([]);
+      setComparisonPendingDates([]);
       setLoadedScope(scopeKey);
       if (cause instanceof CollectionMonitoringV2LoadError && cause.kind === "empty") {
         setStatus("empty");
@@ -117,25 +149,38 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   useEffect(() => subscribeToProtectedApiAuthorizationFailure(() => {
     activeRequest.current?.abort();
     setRows([]);
+    setComparisonRows([]);
+    setComparisonLoadFailures([]);
+    setComparisonPendingDates([]);
     setLoadedScope(scopeKey);
     setStatus("error");
     setError(t("O acesso aos dados mudou. Atualize a autorização para continuar."));
   }), [scopeKey, t]);
 
-  const options = useMemo(() => collectionMonitoringV2FilterOptions(rows), [rows]);
+  const periodRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, {
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+  }), [rows, filters.dateFrom, filters.dateTo]);
+  const options = useMemo(() => collectionMonitoringV2FilterOptions(periodRows), [periodRows]);
   const filteredRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, filters), [rows, filters]);
-  const metrics = useMemo(() => summarizeCollectionMonitoringV2(filteredRows), [filteredRows]);
-  const byRegion = useMemo(() => groupCollectionMonitoringV2Rows(filteredRows, "region"), [filteredRows]);
-  const byRm = useMemo(() => groupCollectionMonitoringV2Rows(filteredRows, "rm"), [filteredRows]);
-  const byBase = useMemo(() => groupCollectionMonitoringV2Rows(filteredRows, "base"), [filteredRows]);
-  const daily = useMemo(() => {
-    const grouped = new Map<string, CollectionMonitoringV2Row[]>();
-    for (const row of filteredRows) {
-      const date = String(row.data_date).slice(0, 10);
-      grouped.set(date, [...(grouped.get(date) ?? []), row]);
-    }
-    return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, dayRows]) => ({ date, ...summarizeCollectionMonitoringV2(dayRows) }));
-  }, [filteredRows]);
+  const comparisonSlots = useMemo(() => collectionMonitoringV2ComparisonSlots(periodRows, comparisonRows), [periodRows, comparisonRows]);
+  const currentSnapshot = useMemo(() => latestCollectionMonitoringV2Snapshot(periodRows), [periodRows]);
+  const currentRows = useMemo(() => collectionMonitoringV2RowsForDate(filteredRows, currentSnapshot.date ?? undefined), [filteredRows, currentSnapshot.date]);
+  const metrics = useMemo(() => summarizeCollectionMonitoringV2(currentRows), [currentRows]);
+  const byRegion = useMemo(() => groupCollectionMonitoringV2Rows(currentRows, "region"), [currentRows]);
+  const byRm = useMemo(() => groupCollectionMonitoringV2Rows(currentRows, "rm"), [currentRows]);
+  const comparisonRowsWithFilters = useMemo(() => filterCollectionMonitoringV2Rows(
+    [...rows, ...comparisonRows],
+    { region: filters.region, rm: filters.rm, rmArea: filters.rmArea, rgm: filters.rgm, base: filters.base, origin: filters.origin },
+  ), [rows, comparisonRows, filters.region, filters.rm, filters.rmArea, filters.rgm, filters.base, filters.origin]);
+  const comparisonGroups = useMemo(() => new Map(comparisonSlots.map((slot) => [
+    slot.key,
+    new Map(groupCollectionMonitoringV2Rows(collectionMonitoringV2RowsForDate(comparisonRowsWithFilters, slot.date), "region").map((group) => [groupIdentity(group, "region"), group])),
+  ])), [comparisonSlots, comparisonRowsWithFilters]);
+  const rmComparisonGroups = useMemo(() => new Map(comparisonSlots.map((slot) => [
+    slot.key,
+    new Map(groupCollectionMonitoringV2Rows(collectionMonitoringV2RowsForDate(comparisonRowsWithFilters, slot.date), "rm").map((group) => [groupIdentity(group, "rm"), group])),
+  ])), [comparisonSlots, comparisonRowsWithFilters]);
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase(dashboardLocale(language));
     const matched = needle ? filteredRows.filter((row) => COLLECTION_MONITORING_V2_COLUMNS.some((key) => String(row[key] ?? "").toLocaleLowerCase(dashboardLocale(language)).includes(needle))) : filteredRows;
@@ -151,6 +196,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     if (key === "dateFrom" || key === "dateTo") {
       activeRequest.current?.abort();
       setRows([]);
+      setComparisonRows([]);
+      setComparisonLoadFailures([]);
+      setComparisonPendingDates([]);
       setLoadedScope(null);
       setStatus("loading");
       setError(null);
@@ -166,6 +214,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     if (requestedPeriod) {
       activeRequest.current?.abort();
       setRows([]);
+      setComparisonRows([]);
+      setComparisonLoadFailures([]);
+      setComparisonPendingDates([]);
       setLoadedScope(null);
       setStatus("loading");
       setError(null);
@@ -202,68 +253,157 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     </label>
   );
 
-  const summaryTable = (title: string, groups: ReturnType<typeof groupCollectionMonitoringV2Rows>, includeRm: boolean, dimension: "region" | "rm" | "base") => (
-    <section className="collection-monitoring-v2-card" key={title}>
-      <div className="collection-monitoring-v2-section-heading"><h2>{t(title)}</h2><span>{number(groups.length)} {t("grupos")}</span></div>
-      <div className="collection-monitoring-v2-table-scroll">
-        <table className="collection-monitoring-v2-table">
-          <thead><tr>
-            <th>{t("Regional")}</th>{includeRm ? <><th>{t("Região do RM")}</th><th>RM</th></> : null}<th>RGM</th>{!includeRm ? <th>{t("Bases vinculadas")}</th> : null}<th>{t("Previsto")}</th><th>{t("Aguardando")}</th><th>{t("Taxa de coleta")}</th><th>{t("Taxa aguardando")}</th>
-          </tr></thead>
-          <tbody>{groups.map((group) => <tr key={`${group.label}:${group.region}:${group.rmArea}:${group.rm}`}>
-            <td>{dimension === "base" ? group.label : group.region}</td>{includeRm ? <><td>{group.rmArea}</td><td>{group.rm}</td></> : null}<td>{group.rgm}</td>{!includeRm ? <td>{number(group.baseCount)}</td> : null}<td className="number-cell">{number(group.planned)}</td><td className="number-cell">{number(group.awaiting)}</td><td className="number-cell">{percent(group.collectionRate)}</td><td className="number-cell">{percent(group.awaitingRate)}</td>
-          </tr>)}</tbody>
-        </table>
-        {groups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Aguardando primeira importação.")}</p> : null}
+  const formatComparisonDate = (date: string) => new Intl.DateTimeFormat(dashboardLocale(language), {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00.000Z`));
+  const slot = (key: "d2" | "d1" | "current") => comparisonSlots.find((item) => item.key === key);
+  const slotLabel = (key: "d2" | "d1" | "current") => {
+    const item = slot(key);
+    return item ? formatComparisonDate(item.date) : t("Sem dados");
+  };
+  const comparisonValue = (identity: string, key: "d2" | "d1" | "current", dimension: "region" | "rm") => {
+    const comparisonDate = slot(key)?.date;
+    if (!comparisonDate) return t("Sem dados");
+    if (comparisonLoadFailures.includes(comparisonDate)) return t("Comparação indisponível");
+    if (comparisonPendingDates.includes(comparisonDate)) return t("Carregando comparação");
+    const groups = dimension === "region" ? comparisonGroups : rmComparisonGroups;
+    const group = groups.get(key)?.get(identity);
+    return group ? number(group.retentionTotal) : t("Sem dados");
+  };
+  const variationValue = (identity: string, dimension: "region" | "rm") => {
+    const d1Date = slot("d1")?.date;
+    const currentDate = slot("current")?.date;
+    if (!d1Date || !currentDate) return t("Sem dados");
+    if (comparisonLoadFailures.includes(d1Date) || comparisonLoadFailures.includes(currentDate)) return t("Comparação indisponível");
+    if (comparisonPendingDates.includes(d1Date) || comparisonPendingDates.includes(currentDate)) return t("Carregando comparação");
+    const groups = dimension === "region" ? comparisonGroups : rmComparisonGroups;
+    const previous = groups.get("d1")?.get(identity);
+    const current = groups.get("current")?.get(identity);
+    if (!previous || !current) return t("Sem dados");
+    const variation = collectionMonitoringV2PercentageVariation(current.retentionTotal, previous.retentionTotal);
+    return variation === null ? t("Não calculável") : percent(variation);
+  };
+  const comparisonTable = (
+    title: string,
+    groups: ReturnType<typeof groupCollectionMonitoringV2Rows>,
+    dimension: "region" | "rm",
+  ) => {
+    const orderedGroups = [...groups].sort((left, right) => dimension === "region"
+      ? left.region.localeCompare(right.region, dashboardLocale(language))
+      : left.rmArea.localeCompare(right.rmArea, dashboardLocale(language)) || left.rm.localeCompare(right.rm, dashboardLocale(language)) || left.region.localeCompare(right.region, dashboardLocale(language)));
+    return <section className="collection-monitoring-v2-card collection-monitoring-v2-retention-card" key={title}>
+      <div className="collection-monitoring-v2-section-heading">
+        <div><h2>{t(title)}</h2><p>{dimension === "region"
+          ? t("D-2 e D-1 usam dias-calendário. Retenção total soma as três etapas e não representa necessariamente encomendas únicas.")
+          : t("Taxas usam volume previsto como denominador provisório. Retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
+        <span>{number(orderedGroups.length)} {t("grupos")}</span>
       </div>
-    </section>
-  );
+      <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-retention-scroll">
+        <table className="collection-monitoring-v2-table collection-monitoring-v2-retention-table">
+          <thead>{dimension === "region" ? <tr>
+            <th>{t("Regional")}</th><th>RGM</th><th>{t("Volume previsto")}</th><th>{t("Retenção total")}</th>
+            <th>{t("Retido na base")}</th><th>{t("Despachado pela base")}</th><th>{t("Chegado ao centro")}</th>
+            {(["d2", "d1", "current"] as const).map((key) => <th key={key}><span>{t(key === "d2" ? "D-2" : key === "d1" ? "D-1" : "Atual")}</span><small>{slotLabel(key)}</small></th>)}
+            <th><span>{t("Variação")}</span><small>{t("D-1 até Atual")}</small></th>
+          </tr> : <tr>
+            <th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Volume previsto")}</th>
+            <th>{t("Retenção total")}</th><th>{t("Taxa de retenção")}</th>
+            <th>{t("Retido na base")}</th><th>{t("Taxa")}</th>
+            <th>{t("Despachado pela base")}</th><th>{t("Taxa")}</th>
+            <th>{t("Chegado ao centro")}</th><th>{t("Taxa")}</th>
+          </tr>}</thead>
+          <tbody>{orderedGroups.map((group) => {
+            const identity = groupIdentity(group, dimension);
+            return <tr key={`${identity}:${group.label}`}>
+              {dimension === "region" ? <>
+                <td>{group.region}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
+                <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{number(group.retainedAtBase)}</td>
+                <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{number(group.arrivedAtCenter)}</td>
+                {(["d2", "d1", "current"] as const).map((key) => <td key={`${identity}-${key}`} className="number-cell">{comparisonValue(identity, key, "region")}</td>)}
+                <td className="number-cell">{variationValue(identity, "region")}</td>
+              </> : <>
+                <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
+                <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{percent(group.retentionRate)}</td>
+                <td className="number-cell">{number(group.retainedAtBase)}</td><td className="number-cell">{percent(group.retainedAtBaseRate)}</td>
+                <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{percent(group.dispatchedFromBaseRate)}</td>
+                <td className="number-cell">{number(group.arrivedAtCenter)}</td><td className="number-cell">{percent(group.arrivedAtCenterRate)}</td>
+              </>}
+            </tr>;
+          })}</tbody>
+        </table>
+        {orderedGroups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum grupo encontrado para os filtros selecionados.")}</p> : null}
+      </div>
+    </section>;
+  };
 
   const periodSelector = <div className="collection-monitoring-v2-filter-grid">{dateFilters}</div>;
   if (status === "loading" || loadedScope !== scopeKey) return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" /><div><p>{t("Carregando publicação do Monitoramento de Coleta…")}</p>{progressScope === scopeKey && progress.total > 0 ? <p>{t("Carregando {loaded} de {total} registros do período…", { loaded: number(progress.loaded), total: number(progress.total) })}</p> : null}{periodSelector}</div></section>;
   if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : t("Aguardando primeira importação.")}</p>{periodSelector}</section>;
-  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
+  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setComparisonRows([]); setComparisonLoadFailures([]); setComparisonPendingDates([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
+
+  const mappedRows = rows.filter((row) => row.mappingConfirmed);
+  const mappedRegionCount = new Set(mappedRows.map((row) => row.region).filter((region) => region !== "Sem regional")).size;
+  const mappedBaseCount = new Set(mappedRows.map((row) => row.baseCode).filter((code) => code !== "—")).size;
+  const latestSourceDate = rows.map((row) => String(row.data_date ?? "").slice(0, 10)).sort().at(-1);
+  const formatShortDate = (date: string | undefined) => date
+    ? new Intl.DateTimeFormat(dashboardLocale(language), { dateStyle: "short", timeZone: "UTC" }).format(new Date(`${date}T00:00:00.000Z`))
+    : t("Sem dados");
+  const kpis = [
+    { title: "Previsto a coletar", value: number(metrics.planned), Icon: Layers3 },
+    { title: "Aguardando coleta", value: number(metrics.awaiting), Icon: Activity },
+    { title: "Taxa de coleta", value: percent(metrics.collectionRate), Icon: Percent },
+    { title: "Taxa de pedidos aguardando coleta", value: percent(metrics.awaitingRate), Icon: Clock3 },
+  ];
 
   return <div className="collection-monitoring-v2" data-testid="collection-monitoring-v2-dashboard">
     <section className="dashboard-intro collection-monitoring-v2-intro">
       <div><div className="eyebrow"><Activity size={15} /> {t("Data Foundation V2")}</div><h1>{t("Monitoramento de Coleta")}</h1><p>{t("Resumo operacional por período, regional oficial, base e origem do pedido.")}</p></div>
-      <div className="collection-monitoring-v2-meta"><span>{t("Contrato V2 · 23 colunas")}</span><span>{number(rows.length)} {t("registros visíveis")}</span><span>{number(rows.filter((row) => !row.mappingConfirmed).length)} {t("linhas sem vínculo único")}</span><span>{number(publicationCount)} {t("publicações no período")}</span><span>{publishedAt ? `${t("Publicada em")} ${new Intl.DateTimeFormat(dashboardLocale(language), { dateStyle: "short", timeStyle: "short" }).format(new Date(publishedAt))}` : t("Publicação vigente")}</span></div>
+      <div className="collection-monitoring-v2-meta" aria-label={t("Resumo da publicação")}>
+        <span><Layers3 size={16} /><strong>{number(rows.length)}</strong>{t("Linhas")}</span>
+        <span><MapPin size={16} /><strong>{number(mappedRegionCount)}</strong>{t("Regionais vinculadas")}</span>
+        <span><Database size={16} /><strong>{number(mappedBaseCount)}</strong>{t("Bases vinculadas")}</span>
+        <span><CalendarDays size={16} /><strong>{formatShortDate(latestSourceDate)}</strong>{t("Última data com dados")}</span>
+        <span><Clock3 size={16} /><strong>{publishedAt ? new Intl.DateTimeFormat(dashboardLocale(language), { dateStyle: "short", timeStyle: "short" }).format(new Date(publishedAt)) : t("Publicação vigente")}</strong>{t("Publicada em")}</span>
+        <span><Layers3 size={16} /><strong>{number(publicationCount)}</strong>{t("publicações no período")}</span>
+      </div>
     </section>
     <section className="collection-monitoring-v2-filters collection-monitoring-v2-card" aria-label={t("Filtros operacionais")}>
       <div className="collection-monitoring-v2-section-heading"><h2><Filter size={17} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={clearFilters}>{t("Limpar filtros")}</button></div>
-      <div className="collection-monitoring-v2-filter-grid">
-        {dateFilters}
+      <div className="collection-monitoring-v2-filter-grid collection-monitoring-v2-main-filter-grid">
         {select("region", "Regional", options.regions)}
         {select("rm", "RM", [...new Set(rmFiltered.map((row) => row.rm))].sort())}
-        {select("rmArea", "Região do RM", [...new Set(rmFiltered.map((row) => row.rmArea))].sort())}
-        {select("rgm", "RGM", [...new Set(areaFiltered.map((row) => row.rgm))].sort())}
         {select("base", "Base / PDD", [...new Set(rgmFiltered.map((row) => row.base))].sort())}
+        {dateFilters}
+        <label className="collection-monitoring-v2-filter collection-monitoring-v2-status-filter">
+          <span>{t("Status")}</span>
+          <select aria-label={`${t("Status")} — ${t("Pendente de mapeamento")}`} disabled value="pending"><option value="pending">{t("Pendente de mapeamento")}</option></select>
+          <small>{t("Filtro indisponível até a aprovação do mapeamento categórico do JMS.")}</small>
+        </label>
         {select("origin", "Origem do pedido", options.origins)}
       </div>
+      <details className="collection-monitoring-v2-advanced-filters">
+        <summary>{t("Filtros adicionais")}</summary>
+        <div className="collection-monitoring-v2-filter-grid collection-monitoring-v2-advanced-filter-grid">
+          {select("rmArea", "Região do RM", [...new Set(rmFiltered.map((row) => row.rmArea))].sort())}
+          {select("rgm", "RGM", [...new Set(areaFiltered.map((row) => row.rgm))].sort())}
+        </div>
+      </details>
       <p className="collection-monitoring-v2-mapping-note"><ShieldCheck size={15} /> {t("Regional e responsáveis vêm somente do DoomsDay publicado; linhas sem vínculo permanecem nos totais nacionais autorizados como Sem regional.")}</p>
     </section>
-    <p className="collection-monitoring-v2-formula-note" role="note">{t("Os quatro indicadores usam fórmulas candidatas para conferência e aguardam aprovação final de negócio.")}</p>
+    <p className="collection-monitoring-v2-formula-note" role="note">{t("As regras dos indicadores são operacionais provisórias e ainda não estão homologadas pelo JMS. A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p>
     <section className="collection-monitoring-v2-kpis" aria-label={t("Indicadores principais")}>
-      {[
-        ["Previsto a coletar", number(metrics.planned), "预估揽收"],
-        ["Aguardando coleta", number(metrics.awaiting), "待揽收"],
-        ["Taxa de coleta", percent(metrics.collectionRate), "揽收率"],
-        ["Taxa de pedidos aguardando coleta", percent(metrics.awaitingRate), "待揽收率"],
-      ].map(([title, value, chinese]) => <article className="collection-monitoring-v2-kpi" key={title}><span>{t(title)}</span><strong>{value}</strong><small>{chinese}</small></article>)}
+      {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra operacional provisória")}</small></article>)}
     </section>
-    <section className="collection-monitoring-v2-charts">
-      <article className="collection-monitoring-v2-card"><h2>{t("Evolução diária das taxas")}</h2><div className="collection-monitoring-v2-bars">{daily.map((item) => <div className="collection-monitoring-v2-bar-row collection-monitoring-v2-rate-row" key={item.date}><time>{item.date}</time><div className="collection-monitoring-v2-dual-track"><span style={{ width: `${item.collectionRate === null ? 0 : Math.min(100, item.collectionRate * 100)}%` }} /><i style={{ width: `${item.awaitingRate === null ? 0 : Math.min(100, item.awaitingRate * 100)}%` }} /></div><small>{t("Taxa de coleta")}: {percent(item.collectionRate)} · {t("Aguardando")}: {percent(item.awaitingRate)}</small></div>)}</div></article>
-      <article className="collection-monitoring-v2-card"><h2>{t("Previsto versus aguardando por dia")}</h2><div className="collection-monitoring-v2-bars">{daily.map((item) => { const plannedWidth = metrics.planned ? Math.min(100, item.planned / metrics.planned * 100) : 0; const awaitingWidth = item.planned ? Math.min(100, item.awaiting / item.planned * 100) : 0; return <div className="collection-monitoring-v2-bar-row collection-monitoring-v2-volume-row" key={item.date}><time>{item.date}</time><div><span style={{ width: `${plannedWidth}%` }} /><i style={{ width: `${awaitingWidth}%` }} /></div><small>{number(item.planned)} {t("previstos")} · {number(item.awaiting)} {t("aguardando")}</small></div>; })}</div></article>
-      <article className="collection-monitoring-v2-card"><h2>{t("Comparativo por regional")}</h2><div className="collection-monitoring-v2-bars">{byRegion.map((group) => { const width = metrics.planned ? Math.min(100, (group.planned / metrics.planned) * 100) : 0; return <div className="collection-monitoring-v2-bar-row" key={group.label}><b>{group.label}</b><div><span style={{ width: `${width}%` }} /></div><small>{number(group.planned)} · {percent(group.collectionRate)}</small></div>; })}</div></article>
-      <article className="collection-monitoring-v2-card"><h2>{t("Desempenho por origem do pedido")}</h2><div className="collection-monitoring-v2-bars">{[...new Set(filteredRows.map((row) => row.origin))].sort().map((origin) => { const group = summarizeCollectionMonitoringV2(filteredRows.filter((row) => row.origin === origin)); const width = metrics.planned ? Math.min(100, (group.planned / metrics.planned) * 100) : 0; return <div className="collection-monitoring-v2-bar-row" key={origin}><b>{origin}</b><div><span style={{ width: `${width}%` }} /></div><small>{number(group.awaiting)} / {number(group.planned)} · {percent(group.collectionRate)}</small></div>; })}</div></article>
-    </section>
-    <section className="collection-monitoring-v2-summaries">
-      {summaryTable("Resumo por regional", byRegion, false, "region")}
-      {summaryTable("Resumo por RM e RGM", byRm, true, "rm")}
-      {summaryTable("Resumo por base / PDD", byBase, true, "base")}
+    <p className="collection-monitoring-v2-snapshot-note" role="status">{t("Snapshot de referência dos indicadores: {date}.", { date: formatShortDate(currentSnapshot.date ?? undefined) })}</p>
+    {comparisonLoadFailures.length > 0 ? <p className="collection-monitoring-v2-comparison-error" role="status">{t("Não foi possível carregar as comparações de {dates}.", { dates: comparisonLoadFailures.map(formatShortDate).join(", ") })}</p> : null}
+    <section className="collection-monitoring-v2-retention-grid" aria-label={t("Comparação de retenção")} data-comparison-dates={comparisonSlots.map((item) => item.date).join(",")}>
+      {comparisonTable("Retenção por regional", byRegion, "region")}
+      {comparisonTable("Retenção por RM", byRm, "rm")}
     </section>
     <section className="collection-monitoring-v2-card collection-monitoring-v2-detail">
-      <div className="collection-monitoring-v2-section-heading"><div><h2>{t("Detalhamento da fonte")}</h2><p>{t("Os status adicionais são informativos e não alimentam os quatro indicadores principais.")}</p></div><button type="button" className="collection-monitoring-v2-export" onClick={() => void downloadExcel(filteredRows, filters)} disabled={filteredRows.length === 0}><Download size={16} /> {t("Baixar Excel")}</button></div>
+      <div className="collection-monitoring-v2-section-heading"><div><h2>{t("Detalhamento da fonte")}</h2><p>{t("Detalhamento e Excel respeitam o intervalo selecionado; cards e valores atuais usam o último snapshot do intervalo.")}</p></div><button type="button" className="collection-monitoring-v2-export" onClick={() => void downloadExcel(filteredRows, filters)} disabled={filteredRows.length === 0}><Download size={16} /> {t("Baixar Excel")}</button></div>
       <div className="collection-monitoring-v2-toolbar"><label><span>{t("Pesquisar")}</span><input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder={t("Pesquisar registros")} /></label><span>{number(filteredRows.length)} {t("registros filtrados")}</span></div>
       <div className="collection-monitoring-v2-table-scroll"><table className="collection-monitoring-v2-table collection-monitoring-v2-source-table"><thead><tr>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <th key={key}>{t(COLLECTION_MONITORING_V2_HEADERS[key])}</th>)}</tr></thead><tbody>{visibleRows.rows.map((row) => <tr key={`${row.publication_id}:${row.source_row_no}`}>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <td key={key} className={key === "data_date" ? "date-cell" : typeof row[key] === "number" || /^[\d.]+$/.test(String(row[key] ?? "")) ? "number-cell" : ""}>{formatCollectionMonitoringV2Value(row[key], key, dashboardLocale(language))}</td>)}</tr>)}</tbody></table>{visibleRows.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum registro encontrado para os filtros selecionados.")}</p> : null}</div>
       <div className="collection-monitoring-v2-pagination"><span>{t("Página {page} de {pages}", { page: visibleRows.activePage, pages: visibleRows.pageCount })} · {number(visibleRows.matched.length)} {t("registros")}</span><div><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={visibleRows.activePage <= 1}>{t("Anterior")}</button><button type="button" onClick={() => setPage((current) => Math.min(visibleRows.pageCount, current + 1))} disabled={visibleRows.activePage >= visibleRows.pageCount}>{t("Próxima")}</button></div></div>

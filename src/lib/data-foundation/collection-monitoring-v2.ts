@@ -122,6 +122,67 @@ function signature(dates: readonly CollectionMonitoringV2Date[]): string {
   ).sort().join("|");
 }
 
+type ComparisonSnapshotResult =
+  | { date: string; records: CollectionMonitoringV2Record[]; failed: false }
+  | { date: string; records: []; failed: true };
+
+async function loadComparisonSnapshot(
+  date: string,
+  base: string,
+  fetcher: Fetcher,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<ComparisonSnapshotResult> {
+  const period = { dateFrom: date, dateTo: date };
+  const initial = await json<DatesResponse>(`${base}/dates?${query(period)}`, fetcher, signal, timeoutMs);
+  if (initial.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
+  }
+  const expectedDate = initial.dates.map((item) => ({ ...item, date: validDate(item.date) })).find((item) => item.date === date);
+  if (!expectedDate) return { date, records: [], failed: false };
+  if (!Number.isSafeInteger(expectedDate.rowCount) || expectedDate.rowCount < 0) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "A contagem da data de comparação é inválida.");
+  }
+
+  const records: CollectionMonitoringV2Record[] = [];
+  const identities = new Set<string>();
+  let offset = 0;
+  let total: number | null = null;
+  do {
+    const page = await json<RecordsPage>(`${base}/records?${query(period)}&limit=${COLLECTION_MONITORING_V2_PAGE_SIZE}&offset=${offset}`, fetcher, signal, timeoutMs);
+    if (page.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || page.offset !== offset || page.limit !== COLLECTION_MONITORING_V2_PAGE_SIZE) {
+      throw new CollectionMonitoringV2LoadError("inconsistent", "A paginação da comparação diária mudou durante a consulta.");
+    }
+    if (!Number.isSafeInteger(page.total) || page.total < 0 || (total !== null && page.total !== total)) {
+      throw new CollectionMonitoringV2LoadError("inconsistent", "A quantidade da comparação diária mudou durante a consulta.");
+    }
+    total = page.total;
+    for (const row of page.records) {
+      validateRow(row);
+      if (validDate(row.data_date) !== date) {
+        throw new CollectionMonitoringV2LoadError("inconsistent", "A comparação diária retornou uma data diferente da solicitada.");
+      }
+      const identity = rowId(row);
+      if (identities.has(identity)) throw new CollectionMonitoringV2LoadError("inconsistent", "A comparação diária retornou uma linha repetida.");
+      identities.add(identity);
+      records.push(row);
+    }
+    offset += page.records.length;
+    if (offset < page.total && page.records.length === 0) {
+      throw new CollectionMonitoringV2LoadError("inconsistent", "A comparação diária terminou antes de carregar todas as linhas.");
+    }
+  } while ((total ?? 0) > offset);
+  if (total !== expectedDate.rowCount || records.length !== expectedDate.rowCount) {
+    throw new CollectionMonitoringV2LoadError("inconsistent", "A comparação diária não corresponde à partição publicada.");
+  }
+  const confirmed = await json<DatesResponse>(`${base}/dates?${query(period)}`, fetcher, signal, timeoutMs);
+  const confirmedDate = confirmed.dates.map((item) => ({ ...item, date: validDate(item.date) })).filter((item) => item.date === date);
+  if (confirmed.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || signature(confirmedDate) !== signature([expectedDate])) {
+    throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação da comparação mudou durante o carregamento.");
+  }
+  return { date, records, failed: false };
+}
+
 async function json<T>(path: string, fetcher: Fetcher, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
   if (signal?.aborted) throw new Error("Request aborted");
   const controller = new AbortController();
@@ -279,5 +340,42 @@ export async function loadPublishedCollectionMonitoringV2(
     columnCount: COLLECTION_MONITORING_V2_COLUMNS.length,
     publicationIds: [...new Set(expectedDates.map((item) => item.publicationId))],
     publishedAt: expectedDates.map((item) => item.publishedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null,
+  };
+}
+
+export function collectionMonitoringV2ComparisonDates(
+  dates: readonly CollectionMonitoringV2Date[],
+  period: { dateFrom: string; dateTo: string },
+): string[] {
+  if (dates.length === 0) return [];
+  const referenceDate = dates.reduce((latest, item) => item.date > latest ? item.date : latest, validDate(dates[0]!.date));
+  return [-2, -1].map((offset) => {
+    const value = new Date(`${referenceDate}T00:00:00.000Z`);
+    value.setUTCDate(value.getUTCDate() + offset);
+    return value.toISOString().slice(0, 10);
+  }).filter((date) => date < period.dateFrom || date > period.dateTo);
+}
+
+export async function loadCollectionMonitoringV2ComparisonSnapshots(
+  dates: readonly CollectionMonitoringV2Date[],
+  period: { dateFrom: string; dateTo: string },
+  fetcher: Fetcher = apiFetch,
+  signal?: AbortSignal,
+  options: CollectionMonitoringV2LoadOptions = {},
+): Promise<{ records: CollectionMonitoringV2Record[]; failedDates: string[] }> {
+  const base = `/api/v2/data-sources/${COLLECTION_MONITORING_V2_SOURCE_ID}`;
+  const timeoutMs = options.requestTimeoutMs ?? COLLECTION_MONITORING_V2_REQUEST_TIMEOUT_MS;
+  const comparisonDates = collectionMonitoringV2ComparisonDates(dates, period);
+  const results = await Promise.all(comparisonDates.map(async (date): Promise<ComparisonSnapshotResult> => {
+    try {
+      return await loadComparisonSnapshot(date, base, fetcher, signal, timeoutMs);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { date, records: [], failed: true };
+    }
+  }));
+  return {
+    records: results.flatMap((item) => item.records),
+    failedDates: results.filter((item) => item.failed).map((item) => item.date),
   };
 }

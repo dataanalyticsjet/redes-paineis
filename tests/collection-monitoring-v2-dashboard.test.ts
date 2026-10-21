@@ -7,8 +7,13 @@ import {
   type CollectionMonitoringV2Record,
 } from "../src/lib/data-foundation/collection-monitoring-v2.ts";
 import {
+  collectionMonitoringV2ExcelMatrix,
+  collectionMonitoringV2ComparisonSlots,
+  collectionMonitoringV2ComparisonValue,
+  collectionMonitoringV2PercentageVariation,
   filterCollectionMonitoringV2Rows,
   groupCollectionMonitoringV2Rows,
+  latestCollectionMonitoringV2Snapshot,
   mapCollectionMonitoringV2Record,
   summarizeCollectionMonitoringV2,
 } from "../src/lib/data-foundation/collection-monitoring-v2-dashboard.ts";
@@ -116,4 +121,100 @@ test("zero planned volume returns unavailable rates and summaries keep the sourc
   assert.equal(rows.length, 2);
   assert.equal(summary.collectionRate, null);
   assert.equal(summary.awaitingRate, null);
+});
+
+test("D-2 and D-1 compare calendar days and mark missing source dates separately", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 2, data_date: "2026-10-16" })),
+    mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 3, data_date: "2026-10-18" })),
+  ];
+  assert.deepEqual(collectionMonitoringV2ComparisonSlots(rows), [
+    { key: "d2", date: "2026-10-16", hasRecords: true },
+    { key: "d1", date: "2026-10-17", hasRecords: false },
+    { key: "current", date: "2026-10-18", hasRecords: true },
+  ]);
+});
+
+test("comparison values keep numeric zero distinct from missing data and pending definitions", () => {
+  assert.deepEqual(collectionMonitoringV2ComparisonValue(0), { kind: "value", value: 0 });
+  assert.deepEqual(collectionMonitoringV2ComparisonValue(undefined), { kind: "missing" });
+  assert.deepEqual(collectionMonitoringV2ComparisonValue(null), { kind: "missing" });
+});
+
+test("approved provisional card and retention formulas match the 19 October workbook totals", () => {
+  const row = mapCollectionMonitoringV2Record(rawRecord({
+    data_date: "2026-10-19",
+    source_row_no: 2,
+    expected_dropoff: 479_523,
+    expected_pickup: 2_037_439,
+    pending_dropoff: 25_069,
+    pending_pickup: 14_176,
+    status_collected: 999_999,
+    status_received_at_base: 64_212,
+    status_dispatched_from_base: 24_286,
+    arrived_sorting_center: 54_330,
+  }));
+  const metrics = summarizeCollectionMonitoringV2([row]);
+  assert.equal(metrics.planned, 2_516_962);
+  assert.equal(metrics.awaiting, 39_245);
+  assert.equal(metrics.collected, 2_477_717);
+  assert.ok(Math.abs((metrics.collectionRate ?? 0) - 0.98440779) < 0.00000001);
+  assert.equal(metrics.retainedAtBase, 64_212);
+  assert.equal(metrics.dispatchedFromBase, 24_286);
+  assert.equal(metrics.arrivedAtCenter, 54_330);
+  assert.equal(metrics.retentionTotal, 142_828);
+});
+
+test("current indicators use the latest snapshot in the selected period, not sums across dates", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 2, data_date: "2026-10-18", expected_dropoff: 900, pending_dropoff: 90 })),
+    mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 3, data_date: "2026-10-19", expected_dropoff: 100, pending_dropoff: 10 })),
+  ];
+  const snapshot = latestCollectionMonitoringV2Snapshot(rows);
+  assert.equal(snapshot.date, "2026-10-19");
+  assert.equal(snapshot.rows.length, 1);
+  assert.equal(summarizeCollectionMonitoringV2(snapshot.rows).planned, 100);
+  assert.equal(summarizeCollectionMonitoringV2(snapshot.rows).awaiting, 10);
+});
+
+test("regional and RM grouping reconciles all rows and keeps same-name RMs separate", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 2, expected_dropoff: 20, pending_dropoff: 2, status_received_at_base: 3,
+      source_base_name: "CE base", resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED",
+      mapped_region: "CE", mapped_rm_area: "RM Norte", mapped_rm: "Alex",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 3, expected_pickup: 30, pending_pickup: 3, status_dispatched_from_base: 4,
+      source_base_name: "MG base", resolved_base_code: "MG-1", effective_base_code: "MG-1",
+      mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED",
+      mapped_region: "MG", mapped_rm_area: "RM Sul", mapped_rm: "Alex",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 4, expected_pickup: 5, pending_pickup: 1, arrived_sorting_center: 6 })),
+  ];
+  const total = summarizeCollectionMonitoringV2(rows);
+  const regions = groupCollectionMonitoringV2Rows(rows, "region");
+  const rms = groupCollectionMonitoringV2Rows(rows, "rm");
+  assert.equal(regions.length, 3);
+  assert.equal(regions.reduce((sum, group) => sum + group.planned, 0), total.planned);
+  assert.equal(regions.reduce((sum, group) => sum + group.retentionTotal, 0), total.retentionTotal);
+  assert.equal(regions.find((group) => group.region === "Sem regional")?.planned, 5);
+  assert.equal(rms.filter((group) => group.rm === "Alex").length, 2);
+  assert.equal(rms.reduce((sum, group) => sum + group.awaiting, 0), total.awaiting);
+});
+
+test("percentage variation requires a nonzero prior snapshot and treats zero as a value", () => {
+  assert.equal(collectionMonitoringV2PercentageVariation(0, 20), -1);
+  assert.equal(collectionMonitoringV2PercentageVariation(30, 20), 0.5);
+  assert.equal(collectionMonitoringV2PercentageVariation(30, 0), null);
+  assert.equal(collectionMonitoringV2PercentageVariation(undefined, 20), null);
+});
+
+test("Excel export retains numeric quantities and all official columns", () => {
+  const row = mapCollectionMonitoringV2Record(rawRecord({ source_row_no: 2, expected_pickup: 40_185 }));
+  const matrix = collectionMonitoringV2ExcelMatrix([row]);
+  assert.equal(matrix[0]?.length, 23);
+  assert.equal(matrix[1]?.length, 23);
+  assert.equal(matrix[1]?.[7], 40_185);
 });

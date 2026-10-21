@@ -29,6 +29,14 @@ export interface CollectionMonitoringV2Metrics {
   collected: number;
   collectionRate: number | null;
   awaitingRate: number | null;
+  retainedAtBase: number;
+  dispatchedFromBase: number;
+  arrivedAtCenter: number;
+  retentionTotal: number;
+  retentionRate: number | null;
+  retainedAtBaseRate: number | null;
+  dispatchedFromBaseRate: number | null;
+  arrivedAtCenterRate: number | null;
 }
 
 export interface CollectionMonitoringV2Group extends CollectionMonitoringV2Metrics {
@@ -39,6 +47,16 @@ export interface CollectionMonitoringV2Group extends CollectionMonitoringV2Metri
   rgm: string;
   baseCount: number;
 }
+
+export interface CollectionMonitoringV2ComparisonSlot {
+  key: "d2" | "d1" | "current";
+  date: string;
+  hasRecords: boolean;
+}
+
+export type CollectionMonitoringV2ComparisonValue =
+  | { kind: "value"; value: number }
+  | { kind: "missing" };
 
 const toText = (value: unknown): string => String(value ?? "").replace(/\s+/g, " ").trim();
 const toQuantity = (value: unknown): number => {
@@ -87,13 +105,84 @@ export function summarizeCollectionMonitoringV2(rows: readonly CollectionMonitor
   const planned = rows.reduce((sum, row) => sum + toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup), 0);
   const awaiting = rows.reduce((sum, row) => sum + toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup), 0);
   const collected = planned - awaiting;
+  const retainedAtBase = rows.reduce((sum, row) => sum + toQuantity(row.status_received_at_base), 0);
+  const dispatchedFromBase = rows.reduce((sum, row) => sum + toQuantity(row.status_dispatched_from_base), 0);
+  const arrivedAtCenter = rows.reduce((sum, row) => sum + toQuantity(row.arrived_sorting_center), 0);
+  const retentionTotal = retainedAtBase + dispatchedFromBase + arrivedAtCenter;
+  const rate = (value: number) => planned > 0 ? value / planned : null;
   return {
     planned,
     awaiting,
     collected,
-    collectionRate: planned > 0 ? collected / planned : null,
-    awaitingRate: planned > 0 ? awaiting / planned : null,
+    collectionRate: rate(collected),
+    awaitingRate: rate(awaiting),
+    retainedAtBase,
+    dispatchedFromBase,
+    arrivedAtCenter,
+    retentionTotal,
+    retentionRate: rate(retentionTotal),
+    retainedAtBaseRate: rate(retainedAtBase),
+    dispatchedFromBaseRate: rate(dispatchedFromBase),
+    arrivedAtCenterRate: rate(arrivedAtCenter),
   };
+}
+
+export function collectionMonitoringV2RowsForDate(
+  rows: readonly CollectionMonitoringV2Row[],
+  date: string | undefined,
+): CollectionMonitoringV2Row[] {
+  if (!date) return [];
+  return rows.filter((row) => String(row.data_date ?? "").slice(0, 10) === date);
+}
+
+export function latestCollectionMonitoringV2Snapshot(
+  rows: readonly CollectionMonitoringV2Row[],
+): { date: string | null; rows: CollectionMonitoringV2Row[] } {
+  const latestDate = rows
+    .map((row) => String(row.data_date ?? "").slice(0, 10))
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+    .sort()
+    .at(-1) ?? null;
+  return { date: latestDate, rows: collectionMonitoringV2RowsForDate(rows, latestDate ?? undefined) };
+}
+
+export function collectionMonitoringV2ComparisonSlots(
+  rows: readonly CollectionMonitoringV2Row[],
+  comparisonRows: readonly CollectionMonitoringV2Row[] = [],
+): CollectionMonitoringV2ComparisonSlot[] {
+  const dates = [...new Set(rows.map((row) => String(row.data_date ?? "").slice(0, 10)).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort();
+  const latest = dates.at(-1);
+  if (!latest) return [];
+  const available = new Set([
+    ...dates,
+    ...comparisonRows.map((row) => String(row.data_date ?? "").slice(0, 10)).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)),
+  ]);
+  const addDays = (date: string, offset: number) => {
+    const value = new Date(`${date}T00:00:00.000Z`);
+    value.setUTCDate(value.getUTCDate() + offset);
+    return value.toISOString().slice(0, 10);
+  };
+  return [
+    { key: "d2", date: addDays(latest, -2), hasRecords: available.has(addDays(latest, -2)) },
+    { key: "d1", date: addDays(latest, -1), hasRecords: available.has(addDays(latest, -1)) },
+    { key: "current", date: latest, hasRecords: available.has(latest) },
+  ];
+}
+
+export function collectionMonitoringV2ComparisonValue(
+  value: number | null | undefined,
+): CollectionMonitoringV2ComparisonValue {
+  if (typeof value === "number" && Number.isFinite(value)) return { kind: "value", value };
+  return { kind: "missing" };
+}
+
+export function collectionMonitoringV2PercentageVariation(
+  current: number | null | undefined,
+  previous: number | null | undefined,
+): number | null {
+  if (typeof current !== "number" || !Number.isFinite(current) ||
+      typeof previous !== "number" || !Number.isFinite(previous) || previous === 0) return null;
+  return (current - previous) / previous;
 }
 
 export function groupCollectionMonitoringV2Rows(
@@ -111,12 +200,18 @@ export function groupCollectionMonitoringV2Rows(
       group = {
         label: dimension === "region" ? row.region : dimension === "rm" ? row.rm : row.base,
         region: row.region, rmArea: row.rmArea, rm: row.rm, rgm: row.rgm,
-        planned: 0, awaiting: 0, collected: 0, collectionRate: null, awaitingRate: null, baseCount: 0,
+        planned: 0, awaiting: 0, collected: 0, collectionRate: null, awaitingRate: null,
+        retainedAtBase: 0, dispatchedFromBase: 0, arrivedAtCenter: 0, retentionTotal: 0,
+        retentionRate: null, retainedAtBaseRate: null, dispatchedFromBaseRate: null, arrivedAtCenterRate: null,
+        baseCount: 0,
       };
       groups.set(key, group);
     }
     group.planned += toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup);
     group.awaiting += toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup);
+    group.retainedAtBase += toQuantity(row.status_received_at_base);
+    group.dispatchedFromBase += toQuantity(row.status_dispatched_from_base);
+    group.arrivedAtCenter += toQuantity(row.arrived_sorting_center);
     if (row.mappingConfirmed && row.baseCode !== "—") {
       const groupBases = bases.get(key) ?? new Set<string>();
       groupBases.add(row.baseCode);
@@ -125,8 +220,13 @@ export function groupCollectionMonitoringV2Rows(
   }
   for (const [key, group] of groups) {
     group.collected = group.planned - group.awaiting;
+    group.retentionTotal = group.retainedAtBase + group.dispatchedFromBase + group.arrivedAtCenter;
     group.collectionRate = group.planned > 0 ? group.collected / group.planned : null;
     group.awaitingRate = group.planned > 0 ? group.awaiting / group.planned : null;
+    group.retentionRate = group.planned > 0 ? group.retentionTotal / group.planned : null;
+    group.retainedAtBaseRate = group.planned > 0 ? group.retainedAtBase / group.planned : null;
+    group.dispatchedFromBaseRate = group.planned > 0 ? group.dispatchedFromBase / group.planned : null;
+    group.arrivedAtCenterRate = group.planned > 0 ? group.arrivedAtCenter / group.planned : null;
     group.baseCount = bases.get(key)?.size ?? 0;
   }
   return [...groups.values()].sort((left, right) => right.planned - left.planned || left.label.localeCompare(right.label, "pt-BR"));
