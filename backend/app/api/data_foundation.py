@@ -9,11 +9,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
+from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import AuthenticatedViewer, get_current_viewer, require_admin, require_matrix_admin
 from app.core.config import get_settings
@@ -29,6 +32,7 @@ from app.services.data_foundation.queries import (
 from app.services.data_foundation.repository import (
     DataFoundationError,
     create_preview_job,
+    create_received_import_job,
     get_name_mapping_candidates,
     get_job_status,
     load_mapping_resolver,
@@ -36,9 +40,25 @@ from app.services.data_foundation.repository import (
     publish_initial_mapping_migration,
     record_name_mapping_decision,
     save_uploaded_workbook,
+    save_uploaded_workbook_stream,
+    write_preview_manifest,
+    process_t4t5_preview_job,
+    queue_t4t5_preview_validation,
+    queue_t4t5_publication,
+    publish_t4t5_import_job,
     validate_job_again,
 )
 from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
+from app.services.collection_monitoring_t4_t5 import (
+    MAX_GROUP_PAGE_SIZE,
+    MAX_PAGE_SIZE as T4T5_MAX_PAGE_SIZE,
+    T4T5Filters,
+    create_xlsx_export,
+    get_dashboard_summary,
+    get_detail_page,
+    get_filter_options,
+    get_group_page,
+)
 
 
 router = APIRouter(prefix="/v2", tags=["data foundation v2"])
@@ -126,6 +146,209 @@ def _as_csv_value(value: object) -> str:
     return str(value)
 
 
+def _t4t5_filters(
+    *,
+    region: str | None = None,
+    rm_regional: str | None = None,
+    base_code: str | None = None,
+    source_base_name: str | None = None,
+    rm_region: str | None = None,
+    rm_responsible: str | None = None,
+    customer_name: str | None = None,
+    store_name: str | None = None,
+    seller_id: str | None = None,
+    assigned_driver: str | None = None,
+    order_origin: str | None = None,
+    search: str | None = None,
+) -> T4T5Filters:
+    return T4T5Filters(
+        region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+        rm_region=rm_region, rm_responsible=rm_responsible,
+        customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+        assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+    )
+
+
+def _unlink_export(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+@router.get("/collection-monitoring-t4-t5/summary")
+def collection_monitoring_t4_t5_summary(
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
+    rm_regional: str | None = Query(default=None, max_length=64),
+    base_code: str | None = Query(default=None, max_length=64),
+    source_base_name: str | None = Query(default=None, max_length=191),
+    rm_region: str | None = Query(default=None, max_length=96),
+    rm_responsible: str | None = Query(default=None, max_length=160),
+    customer_name: str | None = Query(default=None, max_length=191),
+    store_name: str | None = Query(default=None, max_length=191),
+    seller_id: str | None = Query(default=None, max_length=64),
+    assigned_driver: str | None = Query(default=None, max_length=191),
+    order_origin: str | None = Query(default=None, max_length=96),
+    search: str | None = Query(default=None, max_length=191),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_dashboard_summary(
+            _engine(), identity=viewer.identity,
+            filters=_t4t5_filters(
+                region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+                rm_region=rm_region, rm_responsible=rm_responsible,
+                customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+                assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+            ),
+            date_from=date_from, date_to=date_to,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-monitoring-t4-t5/filters")
+def collection_monitoring_t4_t5_filters(
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_filter_options(
+            _engine(), identity=viewer.identity, filters=T4T5Filters(),
+            date_from=date_from, date_to=date_to,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-monitoring-t4-t5/groups")
+def collection_monitoring_t4_t5_groups(
+    dimension: Literal["region", "rm", "pdd", "customer", "store", "driver"] = Query(...),
+    snapshot_date: date = Query(...),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
+    rm_regional: str | None = Query(default=None, max_length=64),
+    base_code: str | None = Query(default=None, max_length=64),
+    source_base_name: str | None = Query(default=None, max_length=191),
+    rm_region: str | None = Query(default=None, max_length=96),
+    rm_responsible: str | None = Query(default=None, max_length=160),
+    customer_name: str | None = Query(default=None, max_length=191),
+    store_name: str | None = Query(default=None, max_length=191),
+    seller_id: str | None = Query(default=None, max_length=64),
+    assigned_driver: str | None = Query(default=None, max_length=191),
+    order_origin: str | None = Query(default=None, max_length=96),
+    search: str | None = Query(default=None, max_length=191),
+    limit: int = Query(default=100, ge=1, le=MAX_GROUP_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0, le=10_000_000),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_group_page(
+            _engine(), identity=viewer.identity, dimension=dimension,
+            snapshot_date=snapshot_date,
+            filters=_t4t5_filters(
+                region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+                rm_region=rm_region, rm_responsible=rm_responsible,
+                customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+                assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+            ),
+            limit=limit, offset=offset,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-monitoring-t4-t5/records")
+def collection_monitoring_t4_t5_records(
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
+    rm_regional: str | None = Query(default=None, max_length=64),
+    base_code: str | None = Query(default=None, max_length=64),
+    source_base_name: str | None = Query(default=None, max_length=191),
+    rm_region: str | None = Query(default=None, max_length=96),
+    rm_responsible: str | None = Query(default=None, max_length=160),
+    customer_name: str | None = Query(default=None, max_length=191),
+    store_name: str | None = Query(default=None, max_length=191),
+    seller_id: str | None = Query(default=None, max_length=64),
+    assigned_driver: str | None = Query(default=None, max_length=191),
+    order_origin: str | None = Query(default=None, max_length=96),
+    search: str | None = Query(default=None, max_length=191),
+    limit: int = Query(default=100, ge=1, le=T4T5_MAX_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0, le=10_000_000),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_detail_page(
+            _engine(), identity=viewer.identity,
+            filters=_t4t5_filters(
+                region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+                rm_region=rm_region, rm_responsible=rm_responsible,
+                customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+                assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+            ),
+            date_from=date_from, date_to=date_to, limit=limit, offset=offset,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-monitoring-t4-t5/export.xlsx")
+def collection_monitoring_t4_t5_export(
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
+    rm_regional: str | None = Query(default=None, max_length=64),
+    base_code: str | None = Query(default=None, max_length=64),
+    source_base_name: str | None = Query(default=None, max_length=191),
+    rm_region: str | None = Query(default=None, max_length=96),
+    rm_responsible: str | None = Query(default=None, max_length=160),
+    customer_name: str | None = Query(default=None, max_length=191),
+    store_name: str | None = Query(default=None, max_length=191),
+    seller_id: str | None = Query(default=None, max_length=64),
+    assigned_driver: str | None = Query(default=None, max_length=191),
+    order_origin: str | None = Query(default=None, max_length=96),
+    search: str | None = Query(default=None, max_length=191),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> FileResponse:
+    _require_feature()
+    try:
+        path = create_xlsx_export(
+            _engine(), identity=viewer.identity,
+            filters=_t4t5_filters(
+                region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+                rm_region=rm_region, rm_responsible=rm_responsible,
+                customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+                assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+            ),
+            date_from=date_from, date_to=date_to,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="monitoramento-coleta-t4-t5.xlsx",
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(_unlink_export, path),
+    )
+
+
 @router.get("/data-sources")
 def list_data_sources(
     _admin: AuthenticatedViewer = Depends(require_admin),
@@ -202,6 +425,7 @@ def get_source_contract(
 @router.post("/imports/preview")
 async def preview_import(
     request: Request,
+    background_tasks: BackgroundTasks,
     source_id: str = Form(..., min_length=1, max_length=64),
     contract_version: int | None = Form(default=None, ge=1, le=65535),
     file: UploadFile = File(...),
@@ -213,16 +437,76 @@ async def preview_import(
     if source_id == "base_mapping_official":
         raise HTTPException(status_code=422, detail="use_base_mapping_migration_endpoint")
     file_name = _safe_upload_name(file.filename)
+    settings = get_settings()
+    if settings.data_import_staging_directory is None:
+        raise HTTPException(status_code=503, detail="import_storage_unavailable")
+    engine = _engine()
+
+    if source_id == "collection_monitoring_t4_t5":
+        stored_key: str | None = None
+        try:
+            stored_key, file_size, file_sha256 = await run_in_threadpool(
+                save_uploaded_workbook_stream,
+                settings.data_import_staging_directory,
+                file.file,
+                max_bytes=MAX_IMPORT_FILE_BYTES,
+            )
+            write_preview_manifest(settings.data_import_staging_directory, stored_key, {
+                "phase": "VALIDATION", "fileSha256": file_sha256,
+            })
+            with engine.connect() as connection:
+                resolver = load_mapping_resolver(connection, source_id=source_id)
+                if resolver.map_version_id is None:
+                    raise DataFoundationError("official_mapping_unavailable", 409)
+                connection.commit()
+                job_id = create_received_import_job(
+                    connection,
+                    source_id=source_id,
+                    actor_user_id=admin.user.id,
+                    file_name=file_name,
+                    file_size=file_size,
+                    stored_file_key=stored_key,
+                    file_sha256=file_sha256,
+                    map_version_id=resolver.map_version_id,
+                    request_id=_request_id(request),
+                )
+            background_tasks.add_task(
+                process_t4t5_preview_job,
+                engine,
+                job_id=job_id,
+                actor_user_id=admin.user.id,
+                staging_directory=settings.data_import_staging_directory,
+            )
+        except (DataFoundationError, WorkbookValidationError) as error:
+            if stored_key:
+                (settings.data_import_staging_directory.expanduser().resolve() / stored_key).unlink(missing_ok=True)
+                (settings.data_import_staging_directory.expanduser().resolve() / f"{stored_key}.preview.json").unlink(missing_ok=True)
+            raise _error(error) from None
+        except SQLAlchemyError:
+            if stored_key:
+                (settings.data_import_staging_directory.expanduser().resolve() / stored_key).unlink(missing_ok=True)
+                (settings.data_import_staging_directory.expanduser().resolve() / f"{stored_key}.preview.json").unlink(missing_ok=True)
+            raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+        except OSError:
+            if stored_key:
+                (settings.data_import_staging_directory.expanduser().resolve() / stored_key).unlink(missing_ok=True)
+                (settings.data_import_staging_directory.expanduser().resolve() / f"{stored_key}.preview.json").unlink(missing_ok=True)
+            raise HTTPException(status_code=503, detail="import_storage_unavailable") from None
+        return {
+            "jobId": job_id,
+            "sourceId": source_id,
+            "contractVersion": contract.version,
+            "state": "RECEIVED",
+            "phase": "VALIDATION",
+            "inputRowCount": 0,
+            "validRowCount": 0,
+        }
+
     content = await file.read(MAX_IMPORT_FILE_BYTES + 1)
     if not content:
         raise HTTPException(status_code=400, detail="workbook_empty")
     if len(content) > MAX_IMPORT_FILE_BYTES:
         raise HTTPException(status_code=413, detail="workbook_file_too_large")
-    settings = get_settings()
-    if settings.data_import_staging_directory is None:
-        raise HTTPException(status_code=503, detail="import_storage_unavailable")
-
-    engine = _engine()
     try:
         with engine.connect() as connection:
             resolver = load_mapping_resolver(connection, source_id=source_id)
@@ -390,6 +674,7 @@ def create_name_mapping_decision(
 def validate_import(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
@@ -398,6 +683,22 @@ def validate_import(
     if settings.data_import_staging_directory is None:
         raise HTTPException(status_code=503, detail="import_storage_unavailable")
     try:
+        status = get_job_status(
+            _engine(), job_id, admin.user.id,
+            staging_directory=settings.data_import_staging_directory,
+        )
+        if status["sourceId"] == "collection_monitoring_t4_t5":
+            queued = queue_t4t5_preview_validation(
+                _engine(), job_id=job_id, actor_user_id=admin.user.id,
+            )
+            background_tasks.add_task(
+                process_t4t5_preview_job,
+                _engine(),
+                job_id=job_id,
+                actor_user_id=admin.user.id,
+                staging_directory=settings.data_import_staging_directory,
+            )
+            return queued
         return validate_job_again(
             _engine(),
             job_id=job_id,
@@ -414,6 +715,7 @@ def validate_import(
 def publish_import(
     job_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=8, max_length=128),
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
@@ -425,6 +727,27 @@ def publish_import(
     if settings.data_import_staging_directory is None:
         raise HTTPException(status_code=503, detail="import_storage_unavailable")
     try:
+        status = get_job_status(
+            _engine(), job_id, admin.user.id,
+            staging_directory=settings.data_import_staging_directory,
+        )
+        if status["sourceId"] == "collection_monitoring_t4_t5":
+            queued = queue_t4t5_publication(
+                _engine(),
+                job_id=job_id,
+                actor_user_id=admin.user.id,
+                staging_directory=settings.data_import_staging_directory,
+            )
+            background_tasks.add_task(
+                publish_t4t5_import_job,
+                _engine(),
+                job_id=job_id,
+                actor_user_id=admin.user.id,
+                staging_directory=settings.data_import_staging_directory,
+                idempotency_key=idempotency_key,
+                request_id=_request_id(request),
+            )
+            return queued
         publication = publish_import_job(
             _engine(),
             job_id=job_id,
@@ -446,8 +769,12 @@ def import_status(
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
     _require_feature(imports=True)
+    settings = get_settings()
     try:
-        return get_job_status(_engine(), job_id, admin.user.id)
+        return get_job_status(
+            _engine(), job_id, admin.user.id,
+            staging_directory=settings.data_import_staging_directory,
+        )
     except DataFoundationError as error:
         raise _error(error) from None
     except SQLAlchemyError:

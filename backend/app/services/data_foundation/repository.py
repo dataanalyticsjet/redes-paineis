@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import uuid
+import threading
+from contextlib import contextmanager
 from collections import Counter
 from datetime import date
 from pathlib import Path
+from typing import BinaryIO, Callable, Iterator
 
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection, RowMapping
@@ -37,6 +41,7 @@ from app.services.data_foundation.xlsx_parser import (
 
 FACT_TABLES = {
     "collection_monitoring": "fact_collection_monitoring",
+    "collection_monitoring_t4_t5": "fact_collection_monitoring_t4_t5",
     "collection_rate": "fact_collection_rate",
     "jt_monitoring": "fact_jt_monitoring",
     "no_movement": "fact_no_movement_snapshot",
@@ -60,9 +65,13 @@ def fact_table_for_contract(source_id: str, contract_version: int | None = None)
     except KeyError:
         raise DataFoundationError("data_source_contract_version_not_supported", 404) from None
 DAILY_SOURCES = frozenset({
-    "collection_monitoring", "collection_rate", "jt_monitoring", "pdd_collection_failure",
+    "collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring", "pdd_collection_failure",
 })
 FACT_BATCH_SIZE = 1000
+T4T5_SOURCE = "collection_monitoring_t4_t5"
+T4T5_PROGRESS_INTERVAL = 10_000
+_T4T5_LOCAL_JOB_LOCKS: dict[str, threading.Lock] = {}
+_T4T5_LOCAL_JOB_LOCKS_GUARD = threading.Lock()
 _NAME_MAPPING_RESOLUTIONS = frozenset({"NAME_APPROVED", "UNMAPPED", "MISSING_IDENTIFIER", "AMBIGUOUS"})
 _CODE_MAPPING_RESOLUTIONS = frozenset({"CODE_MATCH", "UNMAPPED"})
 _UNAPPROVED_MAPPING_RESOLUTIONS = frozenset({
@@ -88,6 +97,10 @@ def _row_value(row: RowMapping | None, key: str) -> object | None:
     return None if row is None else row.get(key)
 
 
+def _for_update_clause(connection: Connection) -> str:
+    return " FOR UPDATE" if connection.dialect.name == "mysql" else ""
+
+
 def current_mapping_version(connection: Connection, *, lock: bool = False) -> bytes | None:
     statement = """
         SELECT map_pointer.map_version_id
@@ -96,7 +109,7 @@ def current_mapping_version(connection: Connection, *, lock: bool = False) -> by
           ON version.map_version_id = map_pointer.map_version_id
         WHERE version.version_state = 'PUBLISHED'
         LIMIT 1
-    """ + (" FOR UPDATE" if lock else "")
+    """ + (_for_update_clause(connection) if lock else "")
     result = connection.execute(text(statement)).first()
     if result is None:
         return None
@@ -427,6 +440,134 @@ def read_staged_workbook(directory: Path, key: str) -> bytes:
         raise DataFoundationError("import_file_unavailable", 503) from None
 
 
+def staged_workbook_path(directory: Path, key: str) -> Path:
+    if not key.endswith(".xlsx") or Path(key).name != key:
+        raise DataFoundationError("import_file_unavailable", 503)
+    path = directory.expanduser().resolve() / key
+    if not path.is_file():
+        raise DataFoundationError("import_file_unavailable", 503)
+    return path
+
+
+def save_uploaded_workbook_stream(
+    directory: Path,
+    stream: BinaryIO,
+    *,
+    max_bytes: int,
+) -> tuple[str, int, str]:
+    """Copy an uploaded XLSX to private staging without buffering the file in RAM."""
+    root = directory.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        root.chmod(0o700)
+    except OSError:
+        raise DataFoundationError("import_storage_unavailable", 503) from None
+    key = f"{uuid.uuid4().hex}.xlsx"
+    destination = root / key
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        stream.seek(0)
+        with destination.open("xb") as output:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise DataFoundationError("workbook_file_too_large", 413)
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        destination.chmod(0o600)
+    except DataFoundationError:
+        destination.unlink(missing_ok=True)
+        raise
+    except OSError:
+        destination.unlink(missing_ok=True)
+        raise DataFoundationError("import_storage_unavailable", 503) from None
+    if size == 0:
+        destination.unlink(missing_ok=True)
+        raise DataFoundationError("workbook_empty", 400)
+    return key, size, digest.hexdigest()
+
+
+def _preview_manifest_path(directory: Path, key: str) -> Path:
+    if not key.endswith(".xlsx") or Path(key).name != key:
+        raise DataFoundationError("import_file_unavailable", 503)
+    return directory.expanduser().resolve() / f"{key}.preview.json"
+
+
+def write_preview_manifest(directory: Path, key: str, payload: dict[str, object]) -> None:
+    path = _preview_manifest_path(directory, key)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        with temporary.open("xb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise DataFoundationError("import_storage_unavailable", 503) from None
+
+
+def read_preview_manifest(directory: Path, key: str) -> dict[str, object] | None:
+    path = _preview_manifest_path(directory, key)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        raise DataFoundationError("import_preview_unavailable", 503) from None
+    if not isinstance(payload, dict):
+        raise DataFoundationError("import_preview_unavailable", 503)
+    return payload
+
+
+@contextmanager
+def _locked_import_connection(engine: Engine, lock_key: str) -> Iterator[Connection | None]:
+    """Serialize work for one import across MySQL workers; use a local lock in SQLite tests."""
+    local_lock: threading.Lock | None = None
+    if engine.dialect.name != "mysql":
+        with _T4T5_LOCAL_JOB_LOCKS_GUARD:
+            local_lock = _T4T5_LOCAL_JOB_LOCKS.setdefault(lock_key, threading.Lock())
+        acquired = local_lock.acquire(blocking=False)
+        if not acquired:
+            yield None
+            return
+    try:
+        connection = engine.connect()
+    except Exception:
+        if local_lock is not None:
+            local_lock.release()
+        raise
+    mysql_lock_acquired = False
+    try:
+        if engine.dialect.name == "mysql":
+            mysql_lock_acquired = connection.execute(
+                text("SELECT GET_LOCK(:lock_name, 0)"), {"lock_name": lock_key[:64]},
+            ).scalar_one_or_none() == 1
+            connection.commit()
+            if not mysql_lock_acquired:
+                yield None
+                return
+        yield connection
+    finally:
+        if mysql_lock_acquired:
+            try:
+                connection.execute(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": lock_key[:64]})
+                connection.commit()
+            except Exception:
+                connection.rollback()
+        connection.close()
+        if local_lock is not None and local_lock.locked():
+            local_lock.release()
+
+
 def _insert_errors(connection: Connection, job_id: bytes, summary: PreviewSummary) -> None:
     if not summary.errors:
         return
@@ -506,19 +647,262 @@ def create_preview_job(
     return str(job_id)
 
 
+def create_received_import_job(
+    connection: Connection,
+    *,
+    source_id: str,
+    actor_user_id: int,
+    file_name: str,
+    file_size: int,
+    stored_file_key: str,
+    file_sha256: str,
+    map_version_id: bytes | None,
+    request_id: str | None,
+) -> str:
+    """Persist a large T4/T5 upload before its asynchronous validation begins."""
+    contract = get_contract(source_id, 1)
+    if source_id != T4T5_SOURCE or map_version_id is None:
+        raise DataFoundationError("official_mapping_unavailable", 409)
+    job_id = uuid.uuid4()
+    with connection.begin():
+        registered = connection.execute(text("""
+            SELECT registry.source_state, contract.contract_state, contract.contract_sha256
+            FROM data_source_registry AS registry
+            JOIN source_contract_versions AS contract
+              ON contract.source_id = registry.source_id
+            WHERE registry.source_id = :source_id
+              AND contract.contract_version = :contract_version
+        """ + _for_update_clause(connection)), {"source_id": source_id, "contract_version": contract.version}).mappings().first()
+        if registered is None:
+            raise DataFoundationError("source_contract_not_registered", 409)
+        if registered["contract_sha256"] is None or bytes(registered["contract_sha256"]) != contract_sha256(contract):
+            raise DataFoundationError("source_contract_definition_mismatch", 409)
+        if registered["source_state"] in {"RETIRED", "PAUSED"}:
+            raise DataFoundationError("data_source_unavailable", 409)
+        _ensure_no_other_active_t4t5_job(connection)
+        connection.execute(text("""
+            INSERT INTO import_jobs
+              (job_id, source_id, contract_version, validation_map_version_id,
+               submitted_by_user_id, job_state, original_file_name, stored_file_key,
+               file_size_bytes, file_sha256, request_id)
+            VALUES
+              (:job_id, :source_id, :contract_version, :map_version_id,
+               :actor_user_id, 'RECEIVED', :file_name, :stored_file_key,
+               :file_size, :file_sha256, :request_id)
+        """), {
+            "job_id": job_id.bytes,
+            "source_id": source_id,
+            "contract_version": contract.version,
+            "map_version_id": map_version_id,
+            "actor_user_id": actor_user_id,
+            "file_name": file_name[:255],
+            "stored_file_key": stored_file_key,
+            "file_size": file_size,
+            "file_sha256": bytes.fromhex(file_sha256),
+            "request_id": request_id,
+        })
+    return str(job_id)
+
+
+def _ensure_no_other_active_t4t5_job(connection: Connection, *, except_job_id: str | None = None) -> None:
+    """Admit one T4/T5 validation or publication at a time per source."""
+    parameters: dict[str, object] = {"source_id": T4T5_SOURCE}
+    exclusion = ""
+    if except_job_id is not None:
+        exclusion = " AND job_id <> :except_job_id"
+        parameters["except_job_id"] = _uuid_bytes(except_job_id)
+    active_job = connection.execute(text("""
+        SELECT job_id FROM import_jobs
+        WHERE source_id = :source_id AND job_state IN ('RECEIVED', 'PARSING')
+    """ + exclusion + " LIMIT 1"), parameters).first()
+    if active_job is not None:
+        raise DataFoundationError("import_job_processing", 409)
+
+
+def _lock_t4t5_source(connection: Connection) -> None:
+    """Serialize import admission decisions on the registered source row."""
+    source = connection.execute(text("""
+        SELECT source_id FROM data_source_registry
+        WHERE source_id = :source_id
+    """ + _for_update_clause(connection)), {"source_id": T4T5_SOURCE}).first()
+    if source is None:
+        raise DataFoundationError("source_contract_not_registered", 409)
+
+
+def queue_t4t5_preview_validation(
+    engine: Engine,
+    *,
+    job_id: str,
+    actor_user_id: int,
+) -> dict[str, object]:
+    with _locked_import_connection(engine, f"df-preview:{job_id}") as connection:
+        if connection is None:
+            raise DataFoundationError("import_job_processing", 409)
+        with connection.begin():
+            job = load_import_job(connection, job_id, lock=True)
+            if job["submitted_by_user_id"] != actor_user_id:
+                raise DataFoundationError("import_job_not_found", 404)
+            if str(job["source_id"]) != T4T5_SOURCE or int(job["contract_version"]) != 1:
+                raise DataFoundationError("source_contract_version_unsupported", 409)
+            _lock_t4t5_source(connection)
+            _ensure_no_other_active_t4t5_job(connection, except_job_id=job_id)
+            if str(job["job_state"]) not in {"RECEIVED", "PARSING", "FAILED", "INVALID", "VALIDATED"}:
+                raise DataFoundationError("import_job_not_validatable", 409)
+            prepared = connection.execute(text("""
+                SELECT publication_id FROM source_publications
+                WHERE source_id = :source_id AND job_id = :job_id
+                LIMIT 1
+            """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).first()
+            if prepared is not None:
+                raise DataFoundationError("import_prepared_publication_requires_retry", 409)
+            resolver = load_mapping_resolver(connection, source_id=T4T5_SOURCE)
+            if resolver.map_version_id is None:
+                raise DataFoundationError("official_mapping_unavailable", 409)
+            connection.execute(text("""
+                UPDATE import_jobs
+                SET validation_map_version_id = :map_version_id,
+                    job_state = 'RECEIVED', input_row_count = 0, valid_row_count = NULL,
+                    error_count = 0, finished_at = NULL
+                WHERE job_id = :job_id
+            """), {"map_version_id": resolver.map_version_id, "job_id": _uuid_bytes(job_id)})
+    return {"jobId": job_id, "sourceId": T4T5_SOURCE, "state": "RECEIVED", "phase": "VALIDATION"}
+
+
 def summary_map_version(summary: PreviewSummary) -> bytes | None:
     return summary.map_version_id
 
 
+def process_t4t5_preview_job(
+    engine: Engine,
+    *,
+    job_id: str,
+    actor_user_id: int,
+    staging_directory: Path,
+) -> None:
+    """Validate a staged T4/T5 workbook in a worker, with durable row progress."""
+    with _locked_import_connection(engine, f"df-preview:{job_id}") as connection:
+        if connection is None:
+            return
+        try:
+            with connection.begin():
+                job = load_import_job(connection, job_id, lock=True)
+                if job["submitted_by_user_id"] != actor_user_id:
+                    raise DataFoundationError("import_job_not_found", 404)
+                if str(job["source_id"]) != T4T5_SOURCE or int(job["contract_version"]) != 1:
+                    raise DataFoundationError("source_contract_version_unsupported", 409)
+                if job["job_state"] in {"VALIDATED", "INVALID", "PUBLISHED", "REUSED", "ABORTED"}:
+                    return
+                prepared = connection.execute(text("""
+                    SELECT publication_id FROM source_publications
+                    WHERE source_id = :source_id AND job_id = :job_id
+                    LIMIT 1
+                """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).first()
+                if prepared is not None:
+                    raise DataFoundationError("import_prepared_publication_requires_retry", 409)
+                map_version_id = bytes(job["validation_map_version_id"] or b"")
+                if len(map_version_id) != 16:
+                    raise DataFoundationError("official_mapping_unavailable", 409)
+                connection.execute(text("""
+                    UPDATE import_jobs
+                    SET job_state = 'PARSING', input_row_count = 0,
+                        valid_row_count = NULL, error_count = 0, finished_at = NULL
+                    WHERE job_id = :job_id
+                """), {"job_id": _uuid_bytes(job_id)})
+                stored_key = str(job["stored_file_key"])
+                file_sha256 = bytes(job["file_sha256"]).hex()
+                source_name = str(job["original_file_name"])
+            contract = get_contract(T4T5_SOURCE, 1)
+            resolver = load_mapping_resolver(connection, source_id=T4T5_SOURCE, map_version_id=map_version_id)
+            connection.commit()
+            last_progress = 0
+
+            def record_progress(rows_processed: int) -> None:
+                nonlocal last_progress
+                if rows_processed - last_progress < T4T5_PROGRESS_INTERVAL:
+                    return
+                with connection.begin():
+                    connection.execute(text("""
+                        UPDATE import_jobs SET input_row_count = :rows_processed
+                        WHERE job_id = :job_id AND job_state = 'PARSING'
+                    """), {"rows_processed": rows_processed, "job_id": _uuid_bytes(job_id)})
+                last_progress = rows_processed
+
+            summary = parse_workbook(
+                staged_workbook_path(staging_directory, stored_key), contract, resolver,
+                on_progress=record_progress,
+            )
+            if summary.file_sha256 != file_sha256:
+                raise DataFoundationError("import_source_hash_mismatch", 409)
+            summary.map_version_id = map_version_id
+            manifest = summary.as_api_dict()
+            manifest.update({"phase": "VALIDATION", "fileName": source_name})
+            write_preview_manifest(staging_directory, stored_key, manifest)
+            with connection.begin():
+                connection.execute(text("""
+                    DELETE FROM import_job_errors WHERE job_id = :job_id
+                """), {"job_id": _uuid_bytes(job_id)})
+                connection.execute(text("""
+                    UPDATE import_jobs
+                    SET validation_map_version_id = :map_version_id,
+                        job_state = :job_state, input_row_count = :input_rows,
+                        valid_row_count = :valid_rows, error_count = :error_count,
+                        validated_at = CURRENT_TIMESTAMP(6), finished_at = NULL
+                    WHERE job_id = :job_id AND submitted_by_user_id = :actor_user_id
+                """), {
+                    "map_version_id": map_version_id,
+                    "job_state": "VALIDATED" if summary.can_publish else "INVALID",
+                    "input_rows": summary.input_row_count,
+                    "valid_rows": summary.valid_row_count,
+                    "error_count": sum(summary.error_counts.values()),
+                    "job_id": _uuid_bytes(job_id),
+                    "actor_user_id": actor_user_id,
+                })
+                _insert_errors(connection, _uuid_bytes(job_id), summary)
+        except (DataFoundationError, WorkbookValidationError) as error:
+            error_code = error.code
+            try:
+                with connection.begin():
+                    job = load_import_job(connection, job_id, lock=True)
+                    if job["submitted_by_user_id"] == actor_user_id and job["job_state"] not in {"PUBLISHED", "REUSED"}:
+                        connection.execute(text("""
+                            UPDATE import_jobs SET job_state = 'FAILED', error_count = 1,
+                                finished_at = CURRENT_TIMESTAMP(6)
+                            WHERE job_id = :job_id
+                        """), {"job_id": _uuid_bytes(job_id)})
+                        stored_key = str(job["stored_file_key"])
+                write_preview_manifest(staging_directory, stored_key, {
+                    "phase": "VALIDATION", "errorCode": error_code,
+                })
+            except Exception:
+                # A missing progress record is recoverable by submitting validation again.
+                return
+        except Exception:
+            try:
+                with connection.begin():
+                    job = load_import_job(connection, job_id, lock=True)
+                    if job["submitted_by_user_id"] == actor_user_id and job["job_state"] not in {"PUBLISHED", "REUSED"}:
+                        connection.execute(text("""
+                            UPDATE import_jobs SET job_state = 'FAILED', error_count = 1,
+                                finished_at = CURRENT_TIMESTAMP(6)
+                            WHERE job_id = :job_id
+                        """), {"job_id": _uuid_bytes(job_id)})
+                        stored_key = str(job["stored_file_key"])
+                write_preview_manifest(staging_directory, stored_key, {
+                    "phase": "VALIDATION", "errorCode": "import_processing_failed",
+                })
+            except Exception:
+                return
+
+
 def load_import_job(connection: Connection, job_id: str, *, lock: bool = False) -> RowMapping:
     statement = """
-        SELECT job_id, source_id, contract_version, validation_map_version_id,
+        SELECT job_id, source_id, contract_version, validation_map_version_id, reused_publication_id,
                job_state, original_file_name, stored_file_key, file_size_bytes,
                file_sha256, input_row_count, valid_row_count, error_count,
                submitted_by_user_id
         FROM import_jobs
         WHERE job_id = :job_id
-    """ + (" FOR UPDATE" if lock else "")
+    """ + (_for_update_clause(connection) if lock else "")
     row = connection.execute(text(statement), {"job_id": _uuid_bytes(job_id)}).mappings().first()
     if row is None:
         raise DataFoundationError("import_job_not_found", 404)
@@ -535,8 +919,7 @@ def _validate_contract_for_publication(connection: Connection, job: RowMapping) 
           ON contract.source_id = registry.source_id
         WHERE registry.source_id = :source_id
           AND contract.contract_version = :contract_version
-        FOR UPDATE
-    """), {
+    """ + _for_update_clause(connection)), {
         "source_id": job["source_id"],
         "contract_version": job["contract_version"],
     }).mappings().first()
@@ -901,6 +1284,425 @@ def publish_import_job(
         return {"publicationId": str(publication_uuid), "version": next_version, "reused": False}
 
 
+def _summary_from_preview_manifest(payload: dict[str, object]) -> PreviewSummary:
+    try:
+        map_id_value = payload.get("mappingVersionId")
+        map_version_id = uuid.UUID(str(map_id_value)).bytes if map_id_value else None
+        per_date_counts = payload.get("perDateCounts")
+        error_counts = payload.get("errorCounts")
+        errors = payload.get("errors")
+        summary = PreviewSummary(
+            source_id=str(payload["sourceId"]),
+            contract_version=int(payload["contractVersion"]),
+            file_sha256=str(payload["fileSha256"]),
+            input_row_count=int(payload["inputRowCount"]),
+            valid_row_count=int(payload["validRowCount"]),
+            invalid_row_count=int(payload["invalidRowCount"]),
+            exact_duplicate_count=int(payload["duplicateCount"]),
+            mapped_row_count=int(payload["mappedRowCount"]),
+            unmapped_row_count=int(payload["unmappedRowCount"]),
+            exact_name_candidate_row_count=int(payload["exactNameCandidateRowCount"]),
+            normalized_name_candidate_row_count=int(payload["normalizedNameCandidateRowCount"]),
+            no_mapping_match_row_count=int(payload["noMappingMatchRowCount"]),
+            missing_identifier_row_count=int(payload["missingIdentifierRowCount"]),
+            ambiguous_row_count=int(payload["ambiguousRowCount"]),
+            mapping_version_available=bool(payload["mappingVersionAvailable"]),
+            map_version_id=map_version_id,
+            per_date_counts={str(key): int(value) for key, value in dict(per_date_counts or {}).items()},
+            error_counts=Counter({str(key): int(value) for key, value in dict(error_counts or {}).items()}),
+            errors=list(errors or []),
+        )
+        if summary.source_id != T4T5_SOURCE or summary.contract_version != 1:
+            raise ValueError("unexpected source")
+        return summary
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise DataFoundationError("import_preview_unavailable", 503) from None
+
+
+def queue_t4t5_publication(
+    engine: Engine,
+    *,
+    job_id: str,
+    actor_user_id: int,
+    staging_directory: Path,
+) -> dict[str, object]:
+    """Move a validated large job to background publication; it remains invisible until finalization."""
+    with _locked_import_connection(engine, f"df-publish:{job_id}") as connection:
+        if connection is None:
+            raise DataFoundationError("import_job_processing", 409)
+        with connection.begin():
+            job = load_import_job(connection, job_id, lock=True)
+            if job["submitted_by_user_id"] != actor_user_id:
+                raise DataFoundationError("import_job_not_found", 404)
+            if str(job["source_id"]) != T4T5_SOURCE or int(job["contract_version"]) != 1:
+                raise DataFoundationError("source_contract_version_unsupported", 409)
+            _lock_t4t5_source(connection)
+            _ensure_no_other_active_t4t5_job(connection, except_job_id=job_id)
+            state = str(job["job_state"])
+            manifest = read_preview_manifest(staging_directory, str(job["stored_file_key"]))
+            if manifest is None or not bool(manifest.get("canPublish")):
+                raise DataFoundationError("import_job_not_validated", 409)
+            if state == "VALIDATED":
+                pass
+            elif state == "FAILED":
+                prepared = connection.execute(text("""
+                    SELECT publication_id FROM source_publications
+                    WHERE source_id = :source_id AND job_id = :job_id
+                      AND publication_state = 'PREPARED'
+                    LIMIT 1
+                """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).first()
+                if prepared is None:
+                    raise DataFoundationError("import_job_not_validated", 409)
+            elif state != "PARSING" or manifest.get("phase") != "PUBLICATION":
+                raise DataFoundationError("import_job_not_validated", 409)
+            manifest["phase"] = "PUBLICATION"
+            manifest.pop("errorCode", None)
+            write_preview_manifest(staging_directory, str(job["stored_file_key"]), manifest)
+            connection.execute(text("""
+                UPDATE import_jobs SET job_state = 'PARSING', finished_at = NULL
+                WHERE job_id = :job_id
+            """), {"job_id": _uuid_bytes(job_id)})
+    return {
+        "jobId": job_id,
+        "sourceId": T4T5_SOURCE,
+        "state": "PARSING",
+        "phase": "PUBLICATION",
+        "inputRowCount": int(job["input_row_count"] or 0),
+        "validRowCount": int(job["valid_row_count"] or 0),
+    }
+
+
+def _switch_t4t5_heads_if_newer(
+    connection: Connection,
+    *,
+    publication_id: bytes,
+    version_no: int,
+    summary: PreviewSummary,
+) -> None:
+    # Serialize this source's head updates, and never let an older job finishing
+    # later move a date's current pointer backwards.
+    connection.execute(text("""
+        SELECT source_id FROM data_source_registry
+        WHERE source_id = :source_id
+    """ + _for_update_clause(connection)), {"source_id": T4T5_SOURCE}).first()
+    for day_text in sorted(summary.per_date_counts):
+        day = date.fromisoformat(day_text)
+        current_version = connection.execute(text("""
+            SELECT publication.version_no
+            FROM source_daily_head AS head
+            JOIN source_publications AS publication
+              ON publication.source_id = head.source_id
+             AND publication.publication_id = head.publication_id
+            WHERE head.source_id = :source_id AND head.data_date = :data_date
+        """), {"source_id": T4T5_SOURCE, "data_date": day}).scalar_one_or_none()
+        if current_version is None or int(current_version) <= version_no:
+            head_upsert = """
+                INSERT INTO source_daily_head (source_id, data_date, publication_id)
+                VALUES (:source_id, :data_date, :publication_id)
+            """
+            if connection.dialect.name == "sqlite":
+                head_upsert += " ON CONFLICT(source_id, data_date) DO UPDATE SET publication_id = excluded.publication_id, changed_at = CURRENT_TIMESTAMP"
+            else:
+                head_upsert += " ON DUPLICATE KEY UPDATE publication_id = VALUES(publication_id), changed_at = CURRENT_TIMESTAMP(6)"
+            connection.execute(text(head_upsert), {"source_id": T4T5_SOURCE, "data_date": day, "publication_id": publication_id})
+
+
+def publish_t4t5_import_job(
+    engine: Engine,
+    *,
+    job_id: str,
+    actor_user_id: int,
+    staging_directory: Path,
+    idempotency_key: str,
+    request_id: str | None,
+) -> None:
+    """Insert a T4/T5 publication in committed batches, then atomically expose its daily heads."""
+    if not idempotency_key or len(idempotency_key) > 128:
+        return
+    with _locked_import_connection(engine, f"df-publish:{job_id}") as connection:
+        if connection is None:
+            return
+        try:
+            with connection.begin():
+                job = load_import_job(connection, job_id, lock=True)
+                if job["submitted_by_user_id"] != actor_user_id or str(job["source_id"]) != T4T5_SOURCE:
+                    raise DataFoundationError("import_job_not_found", 404)
+                if str(job["job_state"]) != "PARSING":
+                    return
+                stored_key = str(job["stored_file_key"])
+                manifest = read_preview_manifest(staging_directory, stored_key)
+                if manifest is None or manifest.get("phase") != "PUBLICATION" or not bool(manifest.get("canPublish")):
+                    raise DataFoundationError("import_job_not_validated", 409)
+                summary = _summary_from_preview_manifest(manifest)
+                contract = get_contract(T4T5_SOURCE, 1)
+                map_version_id = bytes(job["validation_map_version_id"] or b"")
+                if len(map_version_id) != 16 or map_version_id != bytes(summary.map_version_id or b""):
+                    raise DataFoundationError("official_mapping_changed_repreview", 409)
+                file_sha256 = bytes(job["file_sha256"]).hex()
+                if summary.file_sha256 != file_sha256:
+                    raise DataFoundationError("import_source_hash_mismatch", 409)
+                registry = _validate_contract_for_publication(connection, job)
+                if current_mapping_version(connection, lock=True) != map_version_id:
+                    raise DataFoundationError("official_mapping_changed_repreview", 409)
+            resolver = load_mapping_resolver(connection, source_id=T4T5_SOURCE, map_version_id=map_version_id)
+            connection.commit()
+            staged_path = staged_workbook_path(staging_directory, stored_key)
+            actual_hash = hashlib.sha256()
+            with staged_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    actual_hash.update(chunk)
+            if actual_hash.hexdigest() != file_sha256:
+                raise DataFoundationError("import_source_hash_mismatch", 409)
+            with connection.begin():
+                existing = connection.execute(text("""
+                    SELECT publication_id, version_no, publication_state, map_version_id, file_sha256,
+                           row_count, period_start, period_end
+                    FROM source_publications
+                    WHERE source_id = :source_id AND job_id = :job_id
+                    LIMIT 1
+                """ + _for_update_clause(connection)), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).mappings().first()
+                if existing is None:
+                    fingerprint = connection.execute(text("""
+                        SELECT publication_id, version_no
+                        FROM source_publications
+                        WHERE source_id = :source_id
+                          AND contract_version = 1
+                          AND map_version_id = :map_version_id
+                          AND file_sha256 = :file_sha256
+                          AND publication_state = 'PUBLISHED'
+                        LIMIT 1
+                    """ + _for_update_clause(connection)), {
+                        "source_id": T4T5_SOURCE,
+                        "map_version_id": map_version_id,
+                        "file_sha256": bytes.fromhex(file_sha256),
+                    }).mappings().first()
+                    if fingerprint is not None:
+                        publication_id = bytes(fingerprint["publication_id"])
+                        version_no = int(fingerprint["version_no"])
+                        _switch_t4t5_heads_if_newer(
+                            connection, publication_id=publication_id, version_no=version_no, summary=summary,
+                        )
+                        connection.execute(text("""
+                            UPDATE import_jobs SET job_state = 'REUSED', reused_publication_id = :publication_id,
+                                finished_at = CURRENT_TIMESTAMP(6)
+                            WHERE job_id = :job_id
+                        """), {"publication_id": publication_id, "job_id": _uuid_bytes(job_id)})
+                        _write_audit(
+                            connection, actor_user_id=actor_user_id, action_code="PUBLICATION_REUSED",
+                            object_type="source_publication", object_id=publication_id,
+                            request_id=request_id,
+                            safe_context={
+                                "sourceId": T4T5_SOURCE,
+                                "rowCount": summary.valid_row_count,
+                                "idempotencyKeySha256": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+                            },
+                        )
+                        return
+                    last_version = connection.execute(text("""
+                        SELECT version_no FROM source_publications
+                        WHERE source_id = :source_id
+                        ORDER BY version_no DESC LIMIT 1
+                    """ + _for_update_clause(connection)), {"source_id": T4T5_SOURCE}).scalar_one_or_none()
+                    version_no = int(last_version or 0) + 1
+                    publication_id = uuid.uuid4().bytes
+                    dates = sorted(summary.per_date_counts)
+                    connection.execute(text("""
+                        INSERT INTO source_publications
+                          (publication_id, source_id, version_no, job_id, contract_version,
+                           map_version_id, file_sha256, publication_state, history_policy,
+                           period_start, period_end, snapshot_as_of, row_count, mapped_row_count,
+                           unmapped_row_count, missing_identifier_row_count, ambiguous_row_count)
+                        VALUES
+                          (:publication_id, :source_id, :version_no, :job_id, 1,
+                           :map_version_id, :file_sha256, 'PREPARED', :history_policy,
+                           :period_start, :period_end, NULL, :row_count, :mapped_row_count,
+                           :unmapped_row_count, :missing_identifier_row_count, :ambiguous_row_count)
+                    """), {
+                        "publication_id": publication_id,
+                        "source_id": T4T5_SOURCE,
+                        "version_no": version_no,
+                        "job_id": _uuid_bytes(job_id),
+                        "map_version_id": map_version_id,
+                        "file_sha256": bytes.fromhex(file_sha256),
+                        "history_policy": registry["history_policy"],
+                        "period_start": date.fromisoformat(dates[0]) if dates else None,
+                        "period_end": date.fromisoformat(dates[-1]) if dates else None,
+                        "row_count": summary.valid_row_count,
+                        "mapped_row_count": summary.mapped_row_count,
+                        "unmapped_row_count": summary.unmapped_row_count,
+                        "missing_identifier_row_count": summary.missing_identifier_row_count,
+                        "ambiguous_row_count": summary.ambiguous_row_count,
+                    })
+                    _write_publication_dates(connection, T4T5_SOURCE, publication_id, summary)
+                else:
+                    if (
+                        str(existing["publication_state"]) != "PREPARED"
+                        or bytes(existing["map_version_id"]) != map_version_id
+                        or bytes(existing["file_sha256"]).hex() != file_sha256
+                        or int(existing["row_count"]) != summary.valid_row_count
+                        or str(existing["period_start"]) != (min(summary.per_date_counts) if summary.per_date_counts else "None")
+                        or str(existing["period_end"]) != (max(summary.per_date_counts) if summary.per_date_counts else "None")
+                    ):
+                        raise DataFoundationError("import_prepared_publication_conflict", 409)
+                    publication_id = bytes(existing["publication_id"])
+                    version_no = int(existing["version_no"])
+                    prepared_dates = {
+                        str(row["data_date"]): int(row["row_count"])
+                        for row in connection.execute(text("""
+                            SELECT data_date, row_count FROM source_publication_dates
+                            WHERE source_id = :source_id AND publication_id = :publication_id
+                        """), {"source_id": T4T5_SOURCE, "publication_id": publication_id}).mappings()
+                    }
+                    if prepared_dates != summary.per_date_counts:
+                        raise DataFoundationError("import_prepared_publication_conflict", 409)
+                table = fact_table_for_contract(T4T5_SOURCE, 1)
+                existing_max = connection.execute(text(
+                    f"SELECT COALESCE(MAX(source_row_no), 0) FROM `{table}` WHERE publication_id = :publication_id"
+                ), {"publication_id": publication_id}).scalar_one()
+                start_after_row = int(existing_max or 0)
+
+            fact_columns = [
+                "source_id", "publication_id", "map_version_id", "source_row_no",
+                *(column.key for column in contract.columns), "resolved_base_code", "mapping_resolution",
+            ]
+            column_sql = ", ".join(f"`{column}`" for column in fact_columns)
+            value_sql = ", ".join(f":{column}" for column in fact_columns)
+            insert_statement = text(f"INSERT INTO `{table}` ({column_sql}) VALUES ({value_sql})")
+            batch: list[dict[str, object]] = []
+
+            def flush_batch() -> None:
+                if not batch:
+                    return
+                with connection.begin():
+                    connection.execute(insert_statement, list(batch))
+                batch.clear()
+
+            def add_row(row: ValidImportRow) -> None:
+                if row.source_row_no <= start_after_row:
+                    return
+                batch.append(_fact_row(T4T5_SOURCE, contract, publication_id, map_version_id, row))
+                if len(batch) >= FACT_BATCH_SIZE:
+                    flush_batch()
+
+            last_progress = 0
+
+            def record_progress(rows_processed: int) -> None:
+                nonlocal last_progress
+                if rows_processed - last_progress < T4T5_PROGRESS_INTERVAL:
+                    return
+                with connection.begin():
+                    connection.execute(text("""
+                        UPDATE import_jobs SET input_row_count = :rows_processed
+                        WHERE job_id = :job_id AND job_state = 'PARSING'
+                    """), {"rows_processed": rows_processed, "job_id": _uuid_bytes(job_id)})
+                last_progress = rows_processed
+
+            imported = parse_workbook(
+                staged_path, contract, resolver, on_valid_row=add_row, on_progress=record_progress,
+            )
+            flush_batch()
+            if (
+                not imported.can_publish
+                or imported.file_sha256 != file_sha256
+                or imported.input_row_count != summary.input_row_count
+                or imported.valid_row_count != summary.valid_row_count
+                or imported.invalid_row_count != summary.invalid_row_count
+                or imported.exact_duplicate_count != summary.exact_duplicate_count
+                or imported.per_date_counts != summary.per_date_counts
+                or imported.map_version_id != map_version_id
+            ):
+                raise DataFoundationError("import_validation_changed", 409)
+
+            with connection.begin():
+                job = load_import_job(connection, job_id, lock=True)
+                if job["submitted_by_user_id"] != actor_user_id:
+                    raise DataFoundationError("import_job_not_found", 404)
+                if current_mapping_version(connection, lock=True) != map_version_id:
+                    raise DataFoundationError("official_mapping_changed_repreview", 409)
+                actual_count = int(connection.execute(text(
+                    f"SELECT COUNT(*) FROM `{table}` WHERE publication_id = :publication_id"
+                ), {"publication_id": publication_id}).scalar_one())
+                actual_dates = {
+                    str(row["data_date"]): int(row["row_count"])
+                    for row in connection.execute(text(f"""
+                        SELECT data_date, COUNT(*) AS row_count
+                        FROM `{table}` WHERE publication_id = :publication_id
+                        GROUP BY data_date
+                    """), {"publication_id": publication_id}).mappings()
+                }
+                if actual_count != summary.valid_row_count or actual_dates != summary.per_date_counts:
+                    raise DataFoundationError("import_publication_count_mismatch", 409)
+                published_update = connection.execute(text("""
+                    UPDATE source_publications SET publication_state = 'PUBLISHED', published_at = CURRENT_TIMESTAMP(6)
+                    WHERE publication_id = :publication_id AND publication_state = 'PREPARED'
+                """), {"publication_id": publication_id})
+                if published_update.rowcount != 1:
+                    raise DataFoundationError("import_prepared_publication_conflict", 409)
+                _switch_t4t5_heads_if_newer(
+                    connection, publication_id=publication_id, version_no=version_no, summary=summary,
+                )
+                connection.execute(text("""
+                    UPDATE import_jobs SET job_state = 'PUBLISHED', input_row_count = :input_rows,
+                        valid_row_count = :valid_rows, error_count = 0,
+                        finished_at = CURRENT_TIMESTAMP(6)
+                    WHERE job_id = :job_id
+                """), {
+                    "input_rows": summary.input_row_count,
+                    "valid_rows": summary.valid_row_count,
+                    "job_id": _uuid_bytes(job_id),
+                })
+                _write_audit(
+                    connection, actor_user_id=actor_user_id, action_code="PUBLICATION_PUBLISHED",
+                    object_type="source_publication", object_id=publication_id,
+                    request_id=request_id,
+                    safe_context={
+                        "sourceId": T4T5_SOURCE,
+                        "version": version_no,
+                        "rowCount": summary.valid_row_count,
+                        "mappedRowCount": summary.mapped_row_count,
+                        "unmappedRowCount": summary.unmapped_row_count,
+                        "idempotencyKeySha256": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+                    },
+                )
+        except (DataFoundationError, WorkbookValidationError) as error:
+            _mark_t4t5_publication_failed(connection, job_id, actor_user_id, staging_directory, error.code)
+        except Exception:
+            _mark_t4t5_publication_failed(
+                connection, job_id, actor_user_id, staging_directory, "import_publication_failed",
+            )
+
+
+def _mark_t4t5_publication_failed(
+    connection: Connection,
+    job_id: str,
+    actor_user_id: int,
+    staging_directory: Path,
+    error_code: str,
+) -> None:
+    if connection.in_transaction():
+        connection.rollback()
+    stored_key: str | None = None
+    try:
+        with connection.begin():
+            job = load_import_job(connection, job_id, lock=True)
+            if job["submitted_by_user_id"] != actor_user_id:
+                return
+            if job["job_state"] in {"PUBLISHED", "REUSED"}:
+                return
+            stored_key = str(job["stored_file_key"])
+            connection.execute(text("""
+                UPDATE import_jobs SET job_state = 'FAILED', error_count = 1,
+                    finished_at = CURRENT_TIMESTAMP(6)
+                WHERE job_id = :job_id
+            """), {"job_id": _uuid_bytes(job_id)})
+        if stored_key:
+            manifest = read_preview_manifest(staging_directory, stored_key) or {}
+            manifest.update({"phase": "PUBLICATION", "errorCode": error_code})
+            write_preview_manifest(staging_directory, stored_key, manifest)
+    except Exception:
+        return
+
+
 def publish_initial_mapping_migration(
     engine: Engine,
     *,
@@ -1118,7 +1920,13 @@ def publish_initial_mapping_migration(
         }
 
 
-def get_job_status(engine: Engine, job_id: str, actor_user_id: int) -> dict[str, object]:
+def get_job_status(
+    engine: Engine,
+    job_id: str,
+    actor_user_id: int,
+    *,
+    staging_directory: Path | None = None,
+) -> dict[str, object]:
     with engine.connect() as connection:
         job = load_import_job(connection, job_id)
         if job["submitted_by_user_id"] != actor_user_id:
@@ -1130,7 +1938,7 @@ def get_job_status(engine: Engine, job_id: str, actor_user_id: int) -> dict[str,
             ORDER BY source_row_no, error_id
             LIMIT 1000
         """), {"job_id": _uuid_bytes(job_id)}).mappings())
-        return {
+        result: dict[str, object] = {
             "jobId": job_id,
             "sourceId": str(job["source_id"]),
             "contractVersion": int(job["contract_version"]),
@@ -1143,6 +1951,38 @@ def get_job_status(engine: Engine, job_id: str, actor_user_id: int) -> dict[str,
                 for error in errors
             ],
         }
+        if str(job["source_id"]) == T4T5_SOURCE and staging_directory is not None:
+            manifest = read_preview_manifest(staging_directory, str(job["stored_file_key"]))
+            if manifest is not None:
+                result["phase"] = manifest.get("phase")
+                if manifest.get("errorCode"):
+                    result["errorCode"] = manifest["errorCode"]
+                if str(job["job_state"]) in {"VALIDATED", "INVALID", "FAILED"}:
+                    result.update(manifest)
+                    result["jobId"] = job_id
+                    result["state"] = str(job["job_state"])
+                elif str(job["job_state"]) in {"PUBLISHED", "REUSED"}:
+                    result["canPublish"] = False
+                if str(job["job_state"]) in {"PUBLISHED", "REUSED"}:
+                    publication_id = bytes(job["reused_publication_id"] or b"")
+                    if not publication_id:
+                        publication_id = bytes(connection.execute(text("""
+                            SELECT publication_id FROM source_publications
+                            WHERE source_id = :source_id AND job_id = :job_id
+                            LIMIT 1
+                        """), {"source_id": T4T5_SOURCE, "job_id": _uuid_bytes(job_id)}).scalar_one_or_none() or b"")
+                    if publication_id:
+                        publication = connection.execute(text("""
+                            SELECT publication_id, version_no, publication_state
+                            FROM source_publications WHERE publication_id = :publication_id
+                        """), {"publication_id": publication_id}).mappings().first()
+                        if publication is not None:
+                            result.update({
+                                "publicationId": str(uuid.UUID(bytes=bytes(publication["publication_id"]))),
+                                "version": int(publication["version_no"]),
+                                "reused": str(job["job_state"]) == "REUSED",
+                            })
+        return result
 
 
 def validate_job_again(

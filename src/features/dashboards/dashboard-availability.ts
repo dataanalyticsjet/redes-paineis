@@ -3,6 +3,7 @@ import type { DashboardDataSourceAvailability } from "../../lib/data-foundation/
 
 export const DASHBOARD_V2_SOURCE_BY_PANEL: Partial<Record<DashboardPanel, string>> = {
   monitoramento: "collection_monitoring",
+  "monitoramento-t4-t5": "collection_monitoring_t4_t5",
   taxa: "collection_rate",
   sellers: "jt_monitoring",
   movimentacao: "no_movement",

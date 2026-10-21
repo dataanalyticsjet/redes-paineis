@@ -182,6 +182,24 @@ _JT_MONITORING = (
     _c("arrived_at_sc", "Status atual – Chegou ao SC", "INTEGER"),
 )
 
+_COLLECTION_MONITORING_T4_T5 = (
+    _c("data_date", "Data", "DATE"),
+    _c("reported_origin_region", "Regional Origem", "TEXT", nullable=True, max_length=64),
+    _c("source_base_name", "PDD de saida", "TEXT", nullable=True, max_length=191),
+    _c("customer_name", "Cliente", "TEXT", max_length=191),
+    _c("store_name", "Loja", "TEXT", max_length=191),
+    _c("seller_id", "Id Seller/remetente", "TEXT", max_length=64),
+    _c("assigned_driver", "Motorista Designado", "TEXT", max_length=191),
+    _c("order_origin", "Origem do Pedido", "TEXT", max_length=96),
+    _c("awaiting_collection", "Status atual – Aguardando coleta", "INTEGER"),
+    _c("received_at_dropoff", "Status atual – Recebido no Drop-off", "INTEGER"),
+    _c("collected", "Status atual – Coletado", "INTEGER"),
+    _c("received", "Status atual – Recebido", "INTEGER"),
+    _c("received_at_base", "Status atual – Recebido na base", "INTEGER"),
+    _c("in_base_dispatch_flow", "当前状态-网点发件流程中", "INTEGER"),
+    _c("arrived_at_sc", "Status atual – Chegou ao SC", "INTEGER"),
+)
+
 _NO_MOVEMENT = (
     _c("reported_region", "Regional responsável", "TEXT", max_length=64),
     _c("source_base_code", "Código da unidade responsável", "BASE_CODE", max_length=64, numeric_code_allowed=True),
@@ -282,6 +300,22 @@ CONTRACTS: dict[str, SourceContract] = {
         grain_description="Uma linha por linha física; duplicatas da origem são preservadas.",
         columns=_JT_MONITORING,
         expected_sample_rows=159666,
+    ),
+    "collection_monitoring_t4_t5": SourceContract(
+        source_id="collection_monitoring_t4_t5",
+        display_name="Monitoramento de Coleta T4 e T5",
+        workbook_name="monitoramento_coleta_t4_t5.xlsx",
+        sheet_name="Dados",
+        header_row=1,
+        version=1,
+        history_policy="DAILY_REPLACE_DATES",
+        grain_description=(
+            "Uma linha por linha física da aba Dados; cada data importada substitui "
+            "somente sua partição diária. PDD é associado apenas por correspondência "
+            "única com o DoomsDay publicado; Regional Origem não é fallback."
+        ),
+        columns=_COLLECTION_MONITORING_T4_T5,
+        expected_sample_rows=None,
     ),
     "no_movement": SourceContract(
         source_id="no_movement",

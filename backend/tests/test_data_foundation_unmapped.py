@@ -31,6 +31,7 @@ from app.services.data_foundation.xlsx_parser import MappingResolver, ValidImpor
 
 EXPECTED_ROWS = {
     "collection_monitoring": 3_877,
+    "collection_monitoring_t4_t5": 2_505,
     "collection_rate": 3_269,
     "jt_monitoring": 159_666,
     "no_movement": 151,
@@ -98,9 +99,9 @@ def _create_query_schema(engine) -> None:
                     declared_keys.add(column.key)
             if source_id == "collection_rate":
                 column_definitions.append("data_date DATE GENERATED ALWAYS AS (date(deadline_at)) STORED")
-            elif source_id in {"collection_monitoring", "jt_monitoring", "pdd_collection_failure"}:
+            elif source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "jt_monitoring", "pdd_collection_failure"}:
                 assert "data_date" in declared_keys
-            if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
+            if source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"}:
                 resolution_check = """CHECK (
                     (mapping_resolution = 'NAME_APPROVED' AND source_base_name IS NOT NULL
                         AND length(trim(source_base_name)) > 0 AND resolved_base_code IS NOT NULL)
@@ -175,7 +176,7 @@ def _row_values(source_id: str, row_no: int, *, duplicate_group: bool = False) -
             value = f"{column.key}-{value_no}"
         values[column.key] = value
 
-    if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
+    if source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"}:
         if duplicate_group:
             values["source_base_name"] = "Unmapped duplicate from source"
         elif row_no == 1:
@@ -204,7 +205,7 @@ def _row_values(source_id: str, row_no: int, *, duplicate_group: bool = False) -
 
 
 def _resolution(source_id: str, row_no: int, *, duplicate_group: bool = False) -> tuple[str | None, str]:
-    if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
+    if source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"}:
         if duplicate_group:
             return None, "UNMAPPED"
         states = {
@@ -320,7 +321,7 @@ def _fake_streaming_parser(row_totals: dict[str, int]):
     return parse_workbook
 
 
-def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_data(monkeypatch):
+def test_all_daily_and_snapshot_sources_insert_full_row_counts_in_batches_and_keep_unmapped_data(monkeypatch):
     sqlite3.register_adapter(Decimal, str)
     sqlite3.register_adapter(date, lambda value: value.isoformat())
     sqlite3.register_adapter(datetime, lambda value: value.isoformat(sep=" "))
@@ -503,7 +504,7 @@ def test_all_five_sources_insert_full_row_counts_in_batches_and_keep_unmapped_da
 
 
 def test_mapping_resolution_normalization_is_explicit_and_source_specific():
-    for source_id in ("collection_monitoring", "collection_rate", "jt_monitoring"):
+    for source_id in ("collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"):
         assert _persisted_mapping_resolution(source_id, "UNAPPROVED_EXACT_NAME") == "UNMAPPED"
         assert _persisted_mapping_resolution(source_id, "UNAPPROVED_NORMALIZED_NAME") == "UNMAPPED"
         assert _persisted_mapping_resolution(source_id, "REJECTED") == "UNMAPPED"
@@ -605,7 +606,7 @@ def test_actual_parser_states_fit_the_source_enums(source_id):
         },
     )
 
-    if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
+    if source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"}:
         rows = []
         names = ["Approved name", "Exact candidate", "Rejected name", "Ambiguous name", None]
         for row_no, name in enumerate(names, start=1):
@@ -1014,6 +1015,7 @@ def test_central_mapping_resolution_uses_unique_official_names_and_keeps_every_f
     ("source_id", "source_code", "source_name", "expected_code", "expected_resolution", "expected_region"),
     [
         ("collection_monitoring", None, "Base Rio RS", "RS-001", "NAME_APPROVED", "SR"),
+        ("collection_monitoring_t4_t5", None, "Base Rio RS", "RS-001", "NAME_APPROVED", "SR"),
         ("collection_rate", None, "  BASE\tSANTA   CATARINA  ", "SC-001", "NAME_APPROVED", "SR"),
         ("jt_monitoring", None, "Base Duplicada", None, "AMBIGUOUS", None),
         ("no_movement", "PR-CWB", "Base Rio RS", "PR-CWB", "CODE_MATCH", "PR"),
@@ -1021,7 +1023,7 @@ def test_central_mapping_resolution_uses_unique_official_names_and_keeps_every_f
         ("pdd_collection_failure", None, "Base Santa Catarina", "SC-001", "NAME_APPROVED", "SR"),
     ],
 )
-def test_shared_published_map_query_for_all_five_sources(
+def test_shared_published_map_query_for_all_name_and_code_mapped_sources(
     source_id, source_code, source_name, expected_code, expected_resolution, expected_region
 ):
     engine = create_engine("sqlite://")

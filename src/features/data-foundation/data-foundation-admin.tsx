@@ -69,6 +69,22 @@ type Preview = {
   canPublish: boolean;
 };
 
+type T4T5ImportStatus = {
+  jobId: string;
+  sourceId: string;
+  contractVersion?: number;
+  state: string;
+  phase?: string;
+  inputRowCount?: number;
+  validRowCount?: number;
+  errorCode?: string;
+  publicationId?: string;
+  version?: number;
+  reused?: boolean;
+  canPublish?: boolean;
+  [key: string]: unknown;
+};
+
 type CandidateTarget = { baseCode: string; baseName: string; region: string | null; uf: string | null };
 type NameCandidate = {
   sourceBaseName: string;
@@ -96,6 +112,7 @@ type MappingStatus = {
 
 const NAME_MAPPED_SOURCES = new Set(["collection_monitoring", "collection_rate", "jt_monitoring"]);
 const INITIAL_MAPPING_SOURCE = "base_mapping_official";
+const T4T5_SESSION_JOB_KEY = "new-bi:t4t5:import-job";
 const API_ERROR_LABELS: Record<string, string> = {
   admin_required: "Somente administradores podem executar esta ação.",
   matrix_scope_required: "Esta ação exige perfil ADMIN autorizado.",
@@ -105,6 +122,16 @@ const API_ERROR_LABELS: Record<string, string> = {
   source_contract_not_registered: "O contrato oficial desta fonte não está registrado.",
   official_mapping_changed_repreview: "O arquivo precisa de nova prévia após uma alteração no de-para.",
   import_job_not_found: "Esta importação não pertence ao usuário atual.",
+  import_job_not_validatable: "Esta importação não pode ser validada no estado atual.",
+  import_job_not_validated: "A importação ainda não foi validada ou não pode ser publicada.",
+  import_job_processing: "Esta importação já está em andamento. Aguarde a atualização do estado.",
+  import_processing_failed: "Não foi possível processar a planilha. Verifique o estado da importação e tente novamente.",
+  import_processing_timeout: "O acompanhamento excedeu 30 minutos. A tarefa pode continuar; consulte o estado antes de reenviar o arquivo.",
+  import_publication_failed: "A publicação não foi concluída. A versão anterior continua ativa; é possível retomar a importação.",
+  import_publication_count_mismatch: "A conferência final dos registros não corresponde à prévia; nada foi publicado.",
+  import_prepared_publication_requires_retry: "Há uma publicação preparada sem ativação. Retome a publicação deste arquivo para concluir com segurança.",
+  import_source_hash_mismatch: "O arquivo em processamento não corresponde ao arquivo validado.",
+  import_validation_changed: "O arquivo mudou durante o processamento. A publicação foi interrompida.",
   name_mapping_not_supported_for_source: "Nome exato não suportado nesta fonte.",
   mapping_review_note_required: "A decisão de revisão exige uma justificativa.",
   mapping_target_must_be_candidate: "O destino escolhido precisa corresponder a uma base candidata no de-para vigente.",
@@ -181,6 +208,7 @@ export function DataFoundationAdmin({
   const [mappingFile, setMappingFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewSource, setPreviewSource] = useState("");
+  const [largeImportProgress, setLargeImportProgress] = useState<T4T5ImportStatus | null>(null);
   const [candidates, setCandidates] = useState<NameCandidate[]>([]);
   const [candidateQuery, setCandidateQuery] = useState("");
   const [reviewNote, setReviewNote] = useState("");
@@ -199,6 +227,7 @@ export function DataFoundationAdmin({
   const selectedHistoryAbortController = useRef<AbortController | null>(null);
   const selectedHistoryRequestGeneration = useRef(0);
   const initialSummaryLoad = useRef<Promise<void>>(Promise.resolve());
+  const t4t5RecoveryStarted = useRef(false);
 
   const fetchFullHistory = useCallback(async (sourceId: string, loadGeneration: number) => {
     selectedHistoryAbortController.current?.abort();
@@ -421,6 +450,85 @@ export function DataFoundationAdmin({
     };
   }, [loadMetadata]);
 
+  useEffect(() => {
+    if (t4t5RecoveryStarted.current) return;
+    t4t5RecoveryStarted.current = true;
+    let saved: { jobId?: unknown; idempotencyKey?: unknown };
+    try {
+      const raw = window.sessionStorage.getItem(T4T5_SESSION_JOB_KEY);
+      if (!raw) return;
+      saved = JSON.parse(raw) as { jobId?: unknown; idempotencyKey?: unknown };
+    } catch {
+      window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
+      return;
+    }
+    if (typeof saved.jobId !== "string" || !/^[0-9a-f-]{36}$/i.test(saved.jobId)) {
+      window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
+      return;
+    }
+    const jobId = saved.jobId;
+    let cancelled = false;
+    const recover = async () => {
+      try {
+        let status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
+        if (cancelled) return;
+        selectedSourceRef.current = status.sourceId;
+        setSelectedSource(status.sourceId);
+        setLargeImportProgress(status);
+        if (["RECEIVED", "PARSING"].includes(status.state)) {
+          try {
+            if (status.phase === "PUBLICATION") {
+              const key = typeof saved.idempotencyKey === "string" ? saved.idempotencyKey : crypto.randomUUID();
+              window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({ jobId, idempotencyKey: key }));
+              await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}/publish`, {
+                method: "POST", headers: { "Idempotency-Key": key },
+              });
+            } else {
+              await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}/validate`, { method: "POST" });
+            }
+          } catch (caught) {
+            if (!(caught instanceof Error) || caught.message !== "import_job_processing") throw caught;
+          }
+          const deadline = Date.now() + 30 * 60 * 1000;
+          while (!cancelled && Date.now() < deadline) {
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+            status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
+            if (cancelled) return;
+            setLargeImportProgress(status);
+            if (!["RECEIVED", "PARSING"].includes(status.state)) break;
+          }
+          if (!cancelled && ["RECEIVED", "PARSING"].includes(status.state)) {
+            setError("import_processing_timeout");
+            return;
+          }
+        }
+        if (cancelled) return;
+        selectedSourceRef.current = status.sourceId;
+        setSelectedSource(status.sourceId);
+        if (["VALIDATED", "INVALID"].includes(status.state) || (status.state === "FAILED" && status.canPublish)) {
+          setPreview(status as unknown as Preview);
+          setPreviewSource(status.sourceId);
+          setAcknowledgeUnmapped(false);
+        }
+        if (["PUBLISHED", "REUSED"].includes(status.state)) {
+          window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
+          setLargeImportProgress(null);
+          await loadMetadata();
+          if (!cancelled) setNotice(t("Publicação {state} na versão {version}.", {
+            state: status.reused ? t("reutilizada") : t("concluída"),
+            version: status.version ?? "—",
+          }));
+        } else if (status.state === "FAILED") {
+          setError(status.errorCode || "import_processing_failed");
+        }
+      } catch (caught) {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "data_foundation_request_failed");
+      }
+    };
+    void recover();
+    return () => { cancelled = true; };
+  }, [loadMetadata, t]);
+
   const selectSource = useCallback((sourceId: string) => {
     if (sourceId === selectedSourceRef.current || loading) return;
     const previousSourceId = selectedSourceRef.current;
@@ -434,6 +542,7 @@ export function DataFoundationAdmin({
     }));
     setSelectedSource(sourceId);
     setPreview(null);
+    setLargeImportProgress(null);
     setCandidates([]);
     setMappingReviewDirty(false);
     setFile(null);
@@ -452,12 +561,25 @@ export function DataFoundationAdmin({
       .slice(0, 50);
   }, [candidateQuery, candidates]);
 
+  async function waitForT4T5Job(jobId: string): Promise<T4T5ImportStatus> {
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
+      setLargeImportProgress(status);
+      if (["VALIDATED", "INVALID", "PUBLISHED", "REUSED"].includes(status.state)) return status;
+      if (status.state === "FAILED") throw new Error(status.errorCode || "import_processing_failed");
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+    }
+    throw new Error("import_processing_timeout");
+  }
+
   async function makePreview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file || !selectedSource) return;
     setBusy(true);
     setError(null);
     setNotice(null);
+    setLargeImportProgress(null);
     setCandidates([]);
     setMappingReviewDirty(false);
     setAcknowledgeUnmapped(false);
@@ -465,7 +587,15 @@ export function DataFoundationAdmin({
       const body = new FormData();
       body.append("source_id", selectedSource);
       body.append("file", file, file.name);
-      const result = await requestJson<Preview>("/api/v2/imports/preview", { method: "POST", body });
+      let result: Preview;
+      if (selectedSource === "collection_monitoring_t4_t5") {
+        const accepted = await requestJson<T4T5ImportStatus>("/api/v2/imports/preview", { method: "POST", body });
+        window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({ jobId: accepted.jobId }));
+        setLargeImportProgress(accepted);
+        result = await waitForT4T5Job(accepted.jobId) as unknown as Preview;
+      } else {
+        result = await requestJson<Preview>("/api/v2/imports/preview", { method: "POST", body });
+      }
       setPreview(result);
       setPreviewSource(selectedSource);
       if (NAME_MAPPED_SOURCES.has(selectedSource)) {
@@ -545,7 +675,15 @@ export function DataFoundationAdmin({
     setError(null);
     setNotice(null);
     try {
-      const result = await requestJson<Preview>(`/api/v2/imports/${encodeURIComponent(preview.jobId)}/validate`, { method: "POST" });
+      let result: Preview;
+      if (preview.sourceId === "collection_monitoring_t4_t5") {
+        const queued = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(preview.jobId)}/validate`, { method: "POST" });
+        window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({ jobId: preview.jobId }));
+        setLargeImportProgress(queued);
+        result = await waitForT4T5Job(preview.jobId) as unknown as Preview;
+      } else {
+        result = await requestJson<Preview>(`/api/v2/imports/${encodeURIComponent(preview.jobId)}/validate`, { method: "POST" });
+      }
       setPreview(result);
       setMappingReviewDirty(false);
       if (NAME_MAPPED_SOURCES.has(result.sourceId)) {
@@ -575,15 +713,33 @@ export function DataFoundationAdmin({
     setError(null);
     setNotice(null);
     try {
+      const t4t5IdempotencyKey = preview.sourceId === "collection_monitoring_t4_t5" ? crypto.randomUUID() : null;
+      if (t4t5IdempotencyKey) {
+        window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({
+          jobId: preview.jobId,
+          idempotencyKey: t4t5IdempotencyKey,
+        }));
+      }
       const headers = {
         "Idempotency-Key": mappingPublish
           ? `base-mapping-initial:${preview.jobId}`
-          : crypto.randomUUID(),
+          : t4t5IdempotencyKey ?? crypto.randomUUID(),
       };
       const path = mappingPublish
         ? `/api/v2/base-mapping/initial-migration/${encodeURIComponent(preview.jobId)}/publish`
         : `/api/v2/imports/${encodeURIComponent(preview.jobId)}/publish`;
-      const result = await requestJson<{ version: number; mappingRowCount?: number; reused?: boolean }>(path, { method: "POST", headers });
+      let result: { version: number; mappingRowCount?: number; reused?: boolean };
+      if (preview.sourceId === "collection_monitoring_t4_t5") {
+        const queued = await requestJson<T4T5ImportStatus>(path, { method: "POST", headers });
+        setLargeImportProgress(queued);
+        const completed = await waitForT4T5Job(preview.jobId);
+        if (!["PUBLISHED", "REUSED"].includes(completed.state) || typeof completed.version !== "number") {
+          throw new Error("import_publication_failed");
+        }
+        result = { version: completed.version, reused: completed.reused };
+      } else {
+        result = await requestJson<{ version: number; mappingRowCount?: number; reused?: boolean }>(path, { method: "POST", headers });
+      }
       invalidateDashboardDataCache(mappingPublish ? undefined : preview.sourceId);
       const successNotice = mappingPublish
         ? t("De-para publicado como versão {version} com {count} bases.", {
@@ -595,6 +751,8 @@ export function DataFoundationAdmin({
             version: result.version,
           });
       setPreview(null);
+      setLargeImportProgress(null);
+      if (preview.sourceId === "collection_monitoring_t4_t5") window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
       setFile(null);
       setMappingFile(null);
       setMappingReviewDirty(false);
@@ -702,9 +860,19 @@ export function DataFoundationAdmin({
                 <section className="data-foundation-card">
                   <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("NOVA CARGA")}</span><h2>{t("Validar arquivo Excel")}</h2></div></div>
                   <form className="data-foundation-upload-form" onSubmit={(event) => void makePreview(event)}>
-                    <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || !contract || busy} /></label>
+                    <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setLargeImportProgress(null); window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || !contract || busy} /></label>
                     <button type="submit" disabled={!importActionsEnabled || !contract || !file || busy}><Upload size={16} />{t("Gerar prévia")}</button>
                   </form>
+                  {largeImportProgress?.sourceId === selectedSource && ["RECEIVED", "PARSING"].includes(largeImportProgress.state) ? (
+                    <div className="data-foundation-alert is-disabled" role="status" aria-live="polite">
+                      <Clock3 size={17} />
+                      <div>
+                        <strong>{t(largeImportProgress.phase === "PUBLICATION" ? "Publicando arquivo T4/T5 em lotes…" : "Validando arquivo T4/T5 em segundo plano…")}</strong>
+                        <p>{t("Linhas analisadas")}: {formatCount(largeImportProgress.inputRowCount ?? 0)}</p>
+                        <progress aria-label={t("Progresso da importação")}></progress>
+                      </div>
+                    </div>
+                  ) : null}
                 </section>
 
                 {preview && !isMappingPreview ? <PreviewPanel preview={preview} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state, targetCode) => void saveDecision(candidate, state, targetCode)} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}

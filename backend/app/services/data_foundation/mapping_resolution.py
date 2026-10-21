@@ -6,6 +6,7 @@ import re
 
 NAME_MAPPED_SOURCES = frozenset({
     "collection_monitoring",
+    "collection_monitoring_t4_t5",
     "collection_rate",
     "jt_monitoring",
     "no_movement",

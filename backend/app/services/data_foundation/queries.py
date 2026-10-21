@@ -182,6 +182,8 @@ def _query_plan(
         source_id == "collection_rate" and contract.version in {1, 2, 3}
     ) or (
         source_id == "collection_monitoring" and contract.version in {1, 2}
+    ) or (
+        source_id == "collection_monitoring_t4_t5" and contract.version == 1
     ):
         # source_daily_head is source-wide rather than contract-versioned.
         # Select the current partition independently for each contract version
@@ -346,7 +348,8 @@ def _matrix_daily_metadata_eligible(
 ) -> bool:
     """Use daily publication metadata only for unfiltered, resolved MATRIX data.
 
-    Metadata is valid for collection_rate V3 and collection_monitoring V2.
+    Metadata is valid for collection_rate V3, collection_monitoring V2, and
+    the daily-replacement T4/T5 source.
     Date bounds select daily partitions; base, region, and historical-publication
     filters change row visibility and must use the scoped fact query.
     """
@@ -354,6 +357,8 @@ def _matrix_daily_metadata_eligible(
         source_id == "collection_rate" and contract_version == 3
     ) or (
         source_id == "collection_monitoring" and contract_version == 2
+    ) or (
+        source_id == "collection_monitoring_t4_t5" and contract_version == 1
     )
     return (
         supported_daily_contract
@@ -374,8 +379,10 @@ def _matrix_collection_monitoring_v2_page_eligible(
 ) -> bool:
     """Page facts before mapping only when MATRIX visibility is row-independent."""
     return (
-        source_id == "collection_monitoring"
-        and contract_version == 2
+        (
+            source_id == "collection_monitoring" and contract_version == 2
+            or source_id == "collection_monitoring_t4_t5" and contract_version == 1
+        )
         and _is_resolved_matrix_scope(identity)
         and not _is_active_text_filter(base_code)
         and not _is_active_text_filter(region)

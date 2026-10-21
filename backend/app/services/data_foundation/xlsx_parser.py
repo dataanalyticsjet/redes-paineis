@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator
 from xml.etree import ElementTree as ET
 
@@ -25,6 +25,7 @@ from app.services.data_foundation.mapping_resolution import (
 
 
 MAX_UNCOMPRESSED_WORKBOOK_BYTES = 512 * 1024 * 1024
+MAX_UNCOMPRESSED_COLLECTION_MONITORING_T4_T5_BYTES = 1024 * 1024 * 1024
 MAX_PREVIEW_ERRORS = 1000
 MAX_UNSIGNED_BIGINT = 18_446_744_073_709_551_615
 _NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -357,10 +358,18 @@ def _normalized_header(value: str) -> str:
     return unicodedata.normalize("NFC", value)
 
 
+def _max_uncompressed_workbook_bytes(contract: SourceContract) -> int:
+    if contract.source_id == "collection_monitoring_t4_t5" and contract.version == 1:
+        return MAX_UNCOMPRESSED_COLLECTION_MONITORING_T4_T5_BYTES
+    return MAX_UNCOMPRESSED_WORKBOOK_BYTES
+
+
 def _cell_as_value(
     raw_cell: _RawCell | None,
     column: ContractColumn,
     uses_1904_epoch: bool,
+    *,
+    allow_numeric_text: bool = False,
 ) -> tuple[object | None, str | None]:
     cell = raw_cell or _RawCell(None)
     if cell.formula:
@@ -374,6 +383,13 @@ def _cell_as_value(
         return None, "value_required"
 
     if column.kind == "TEXT":
+        if isinstance(value, Decimal) and cell.numeric and allow_numeric_text:
+            if not value.is_finite() or value < 0 or value != value.to_integral_value():
+                return None, "text_numeric_invalid"
+            significant_digits = max(1, value.adjusted() + 1) if value else 1
+            if significant_digits > 15:
+                return None, "text_numeric_precision_exceeded"
+            value = format(value.quantize(Decimal(1)), "f")
         if not isinstance(value, str):
             return None, "text_type_invalid"
         if not value.strip():
@@ -1597,15 +1613,28 @@ def _parse_pdd_v2_workbook(
 
 
 def parse_workbook(
-    content: bytes,
+    content: bytes | Path,
     contract: SourceContract,
     resolver: MappingResolver | None = None,
     *,
     on_valid_row: Callable[[ValidImportRow], None] | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> PreviewSummary:
     if not content:
         raise WorkbookValidationError("workbook_empty", 400)
-    file_hash = hashlib.sha256(content).hexdigest()
+    if isinstance(content, Path):
+        if contract.source_id != "collection_monitoring_t4_t5" or contract.version != 1:
+            raise WorkbookValidationError("workbook_path_not_supported")
+        try:
+            digest = hashlib.sha256()
+            with content.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            file_hash = digest.hexdigest()
+        except OSError:
+            raise WorkbookValidationError("workbook_file_invalid") from None
+    else:
+        file_hash = hashlib.sha256(content).hexdigest()
     summary = PreviewSummary(
         source_id=contract.source_id,
         file_sha256=file_hash,
@@ -1623,11 +1652,12 @@ def parse_workbook(
         return _parse_collection_rate_v3_workbook(content, contract, mapping, summary, on_valid_row)
 
     try:
-        archive = zipfile.ZipFile(io.BytesIO(content))
+        archive_source = content if isinstance(content, Path) else io.BytesIO(content)
+        archive = zipfile.ZipFile(archive_source)
     except (zipfile.BadZipFile, OSError):
         raise WorkbookValidationError("workbook_file_invalid") from None
     with archive:
-        if sum(info.file_size for info in archive.infolist()) > MAX_UNCOMPRESSED_WORKBOOK_BYTES:
+        if sum(info.file_size for info in archive.infolist()) > _max_uncompressed_workbook_bytes(contract):
             raise WorkbookValidationError("workbook_uncompressed_size_exceeded", 413)
         if any(info.filename.startswith("/") or ".." in PurePosixPath(info.filename).parts for info in archive.infolist()):
             raise WorkbookValidationError("workbook_archive_path_invalid")
@@ -1683,6 +1713,8 @@ def parse_workbook(
         def process_row(row_no: int, cells: dict[int, _RawCell]) -> None:
             nonlocal expected_row_no
             summary.input_row_count += 1
+            if on_progress is not None:
+                on_progress(summary.input_row_count)
             row_errors: list[tuple[str | None, str]] = []
             raw_identity = [
                 None if cells.get(index) is None else cells[index].value
@@ -1712,7 +1744,13 @@ def parse_workbook(
 
             values: dict[str, object] = {}
             for index, column in enumerate(contract.columns):
-                value, error = _cell_as_value(cells.get(index), column, uses_1904_epoch)
+                value, error = _cell_as_value(
+                    cells.get(index), column, uses_1904_epoch,
+                    allow_numeric_text=(
+                        contract.source_id == "collection_monitoring_t4_t5"
+                        and column.key in {"store_name", "seller_id"}
+                    ),
+                )
                 if error:
                     row_errors.append((column.key, error))
                 else:

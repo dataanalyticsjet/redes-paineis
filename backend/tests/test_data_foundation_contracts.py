@@ -153,10 +153,10 @@ def doomsday_resolver():
 
 
 @pytest.mark.parametrize("source_id", (
-    "collection_monitoring", "collection_rate", "jt_monitoring",
+    "collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring",
     "no_movement", "pdd_collection_failure",
 ))
-def test_five_source_previews_use_exact_shared_mapping_only(
+def test_source_previews_use_exact_shared_mapping_only(
     source_id, doomsday_resolver
 ):
     contract = CONTRACTS[source_id]
@@ -172,7 +172,7 @@ def test_five_source_previews_use_exact_shared_mapping_only(
     assert summary.invalid_row_count == 0
     assert summary.mapped_row_count + summary.unmapped_row_count == expected_rows
     assert summary.can_publish is True
-    if source_id in {"collection_monitoring", "collection_rate", "jt_monitoring"}:
+    if source_id in {"collection_monitoring", "collection_monitoring_t4_t5", "collection_rate", "jt_monitoring"}:
         # Unique names resolve immediately; ambiguous and absent names remain
         # visible as unresolved rows in the totals.
         assert summary.exact_name_candidate_row_count > 0
@@ -250,6 +250,10 @@ def test_review_registry_hashes_match_versioned_python_contracts():
         INITIAL_MAPPING_WORKBOOK_SHA256
     )
     for source_id, contract in CONTRACTS.items():
+        if source_id == "collection_monitoring_t4_t5":
+            # Keep the checked-in phase-two registry as a historical snapshot;
+            # this source has its own separately reviewed registration SQL.
+            continue
         entry = entries[source_id]
         assert entry["source"]["sourceState"] == "PENDING"
         assert entry["contract"]["state"] == "DISCOVERED"

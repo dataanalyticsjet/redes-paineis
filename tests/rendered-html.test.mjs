@@ -3,12 +3,15 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import test, { after, before } from "node:test";
 
 let appBaseUrl;
 let serverProcess;
+const appRoot = process.env.NEW_BI_SSR_TEST_APP_ROOT ?? fileURLToPath(new URL("..", import.meta.url));
+const outputRoot = process.env.NEW_BI_SSR_TEST_OUTPUT_DIR ?? fileURLToPath(new URL("../.output", import.meta.url));
 
 async function startNodeServer() {
   const portProbe = createServer();
@@ -23,9 +26,9 @@ async function startNodeServer() {
 
   serverProcess = spawn(
     process.execPath,
-    [fileURLToPath(new URL("../.output/server/index.mjs", import.meta.url))],
+    [resolve(outputRoot, "server", "index.mjs")],
     {
-      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      cwd: appRoot,
       env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), NODE_ENV: "production" },
       stdio: "ignore",
     },

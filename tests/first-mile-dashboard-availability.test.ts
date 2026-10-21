@@ -9,15 +9,16 @@ import {
   loadDashboardSourceAvailability,
 } from "../src/features/dashboards/dashboard-availability.ts";
 
-test("First Mile lists only the five dashboards connected to official V2 sources", () => {
+test("First Mile lists only dashboards connected to official Data Foundation sources", () => {
   const cards = dashboardCardsForCategory("first-mile");
 
   assert.deepEqual(
     cards.map(({ id }) => id),
-    ["monitoramento", "taxa", "sellers", "movimentacao", "bipagem"],
+    ["monitoramento", "monitoramento-t4-t5", "taxa", "sellers", "movimentacao", "bipagem"],
   );
   assert.deepEqual(Object.values(DASHBOARD_V2_SOURCE_BY_PANEL), [
     "collection_monitoring",
+    "collection_monitoring_t4_t5",
     "collection_rate",
     "jt_monitoring",
     "no_movement",

@@ -1,0 +1,298 @@
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+import re
+import uuid
+import zipfile
+from xml.etree import ElementTree
+
+import pytest
+from sqlalchemy import create_engine, event, text
+
+from app.services.collection_monitoring_t4_t5 import (
+    STATUS_COLUMNS,
+    T4T5Filters,
+    create_xlsx_export,
+    get_dashboard_summary,
+    get_detail_page,
+    get_group_page,
+)
+from app.services.data_foundation.contracts import contract_sha256, get_contract
+from app.services.data_foundation.repository import DataFoundationError, fact_table_for_contract
+from app.services.data_foundation.xlsx_parser import (
+    MAX_UNCOMPRESSED_WORKBOOK_BYTES,
+    _RawCell,
+    _cell_as_value,
+    _max_uncompressed_workbook_bytes,
+)
+
+
+MAPPING_ID = b"t4t5-map-version"
+MATRIX_USER = {"platform_role": "USER", "organizational_scope": "matrix", "role": "matrix"}
+MATRIX_ADMIN = {"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "matrix"}
+REGIONAL_ADMIN = {
+    "platform_role": "ADMIN",
+    "organizational_scope": "regional",
+    "role": "regional",
+    "effective_regions": ["SPE"],
+}
+
+
+def _sqlite_type(kind: str) -> str:
+    return {
+        "DATE": "DATE",
+        "DATETIME": "DATETIME",
+        "BASE_CODE": "TEXT",
+        "TEXT": "TEXT",
+        "INTEGER": "INTEGER",
+        "DECIMAL": "NUMERIC",
+    }[kind]
+
+
+def _create_database():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def register_sql_functions(dbapi_connection, _connection_record):
+        dbapi_connection.create_function(
+            "REGEXP_REPLACE",
+            3,
+            lambda value, pattern, replacement: re.sub(pattern, replacement, value) if value is not None else None,
+        )
+
+    contract = get_contract("collection_monitoring_t4_t5", 1)
+    table = fact_table_for_contract(contract.source_id, contract.version)
+    fact_columns = [
+        "source_id TEXT NOT NULL",
+        "publication_id BLOB NOT NULL",
+        "map_version_id BLOB NOT NULL",
+        "source_row_no INTEGER NOT NULL",
+        *[
+            f"`{column.key}` {_sqlite_type(column.kind)}"
+            for column in contract.columns
+        ],
+        "resolved_base_code TEXT",
+        "mapping_resolution TEXT NOT NULL",
+        "PRIMARY KEY(publication_id, source_row_no)",
+    ]
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE base_mapping_versions (map_version_id BLOB PRIMARY KEY, version_state TEXT)")
+        connection.exec_driver_sql("CREATE TABLE base_mapping_current (current_key TEXT PRIMARY KEY, map_version_id BLOB)")
+        connection.exec_driver_sql("CREATE TABLE base_mapping_entries (map_version_id BLOB, base_code TEXT, regional_name TEXT, base_name TEXT, uf_code TEXT, rm_region TEXT, rm_responsible TEXT, PRIMARY KEY(map_version_id, base_code))")
+        connection.exec_driver_sql("CREATE TABLE base_mapping_name_decisions (map_version_id BLOB, source_id TEXT, source_base_name TEXT, resolution_state TEXT, target_base_code TEXT)")
+        connection.exec_driver_sql("CREATE TABLE source_publications (publication_id BLOB PRIMARY KEY, source_id TEXT, contract_version INTEGER, version_no INTEGER, map_version_id BLOB, period_start DATE, period_end DATE, snapshot_as_of TEXT, published_at TEXT, row_count INTEGER, publication_state TEXT)")
+        connection.exec_driver_sql("CREATE TABLE source_publication_dates (source_id TEXT, publication_id BLOB, data_date DATE, row_count INTEGER, PRIMARY KEY(source_id, publication_id, data_date))")
+        connection.exec_driver_sql("CREATE TABLE source_daily_head (source_id TEXT, data_date DATE, publication_id BLOB, PRIMARY KEY(source_id, data_date))")
+        connection.exec_driver_sql(f"CREATE TABLE `{table}` ({', '.join(fact_columns)})")
+        connection.execute(text("INSERT INTO base_mapping_versions VALUES (:map_id, 'PUBLISHED')"), {"map_id": MAPPING_ID})
+        connection.execute(text("INSERT INTO base_mapping_current VALUES ('OFFICIAL', :map_id)"), {"map_id": MAPPING_ID})
+        connection.execute(text("""
+            INSERT INTO base_mapping_entries
+              (map_version_id, base_code, regional_name, base_name, uf_code, rm_region, rm_responsible)
+            VALUES
+              (:map_id, 'BASE-SPE', 'SPE', 'PDD SPE', 'SP', 'SPE-BRAS', 'RM Sul'),
+              (:map_id, 'BASE-CE', 'CE', 'PDD CE', 'CE', 'CE-FORT', 'RM Ceará')
+        """), {"map_id": MAPPING_ID})
+    return engine, contract, table
+
+
+def _insert_publication(engine, contract, table: str, *, day: int, rows: list[dict[str, object]]) -> None:
+    snapshot_date = date(2026, 10, day)
+    publication_id = uuid.UUID(int=day).bytes
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO source_publications
+              (publication_id, source_id, contract_version, version_no, map_version_id,
+               period_start, period_end, snapshot_as_of, published_at, row_count, publication_state)
+            VALUES (:publication_id, :source_id, 1, :version_no, :map_id,
+                    :snapshot_date, :snapshot_date, :snapshot_as_of, :published_at, :row_count, 'PUBLISHED')
+        """), {
+            "publication_id": publication_id,
+            "source_id": contract.source_id,
+            "version_no": day,
+            "map_id": MAPPING_ID,
+            "snapshot_date": snapshot_date,
+            "snapshot_as_of": f"2026-10-{day:02} 10:00:00",
+            "published_at": f"2026-10-{day:02} 10:05:00",
+            "row_count": len(rows),
+        })
+        connection.execute(text("""
+            INSERT INTO source_publication_dates (source_id, publication_id, data_date, row_count)
+            VALUES (:source_id, :publication_id, :snapshot_date, :row_count)
+        """), {
+            "source_id": contract.source_id,
+            "publication_id": publication_id,
+            "snapshot_date": snapshot_date,
+            "row_count": len(rows),
+        })
+        connection.execute(text("""
+            INSERT INTO source_daily_head (source_id, data_date, publication_id)
+            VALUES (:source_id, :snapshot_date, :publication_id)
+        """), {
+            "source_id": contract.source_id,
+            "snapshot_date": snapshot_date,
+            "publication_id": publication_id,
+        })
+        insert_columns = [
+            "source_id", "publication_id", "map_version_id", "source_row_no",
+            *[column.key for column in contract.columns], "resolved_base_code", "mapping_resolution",
+        ]
+        bind_names = [f"v_{index}" for index in range(len(insert_columns))]
+        statement = text(
+            f"INSERT INTO `{table}` ({', '.join(f'`{column}`' for column in insert_columns)}) "
+            f"VALUES ({', '.join(f':{name}' for name in bind_names)})"
+        )
+        for row_no, row in enumerate(rows, 1):
+            values: dict[str, object] = {
+                column.key: 0 if column.kind == "INTEGER" else None
+                for column in contract.columns
+            }
+            values.update(row)
+            values["data_date"] = snapshot_date
+            source_name = values.get("source_base_name")
+            mapping_code = {"PDD SPE": "BASE-SPE", "PDD CE": "BASE-CE"}.get(source_name)
+            values.update({
+                "source_id": contract.source_id,
+                "publication_id": publication_id,
+                "map_version_id": MAPPING_ID,
+                "source_row_no": row_no,
+                "resolved_base_code": mapping_code,
+                "mapping_resolution": "NAME_APPROVED" if mapping_code else "UNMAPPED",
+            })
+            connection.execute(statement, {name: values[column] for name, column in zip(bind_names, insert_columns)})
+
+
+def _fixture_data():
+    engine, contract, table = _create_database()
+    _insert_publication(engine, contract, table, day=19, rows=[{
+        "source_base_name": "PDD SPE", "customer_name": "Cliente A", "store_name": "Loja 1",
+        "seller_id": "000123", "assigned_driver": "Motorista 1", "order_origin": "App",
+        **dict(zip(STATUS_COLUMNS, [1, 2, 3, 4, 5, 6, 7])),
+    }])
+    _insert_publication(engine, contract, table, day=20, rows=[
+        {
+            "source_base_name": "PDD SPE", "customer_name": "Cliente A", "store_name": "Loja 1",
+            "seller_id": "000123", "assigned_driver": "Motorista 1", "order_origin": "App",
+            **dict(zip(STATUS_COLUMNS, [10, 20, 30, 40, 50, 60, 70])),
+        },
+        {
+            "source_base_name": "PDD CE", "customer_name": "Cliente B", "store_name": "Loja 2",
+            "seller_id": "000456", "assigned_driver": "Motorista 2", "order_origin": "Web",
+            **dict(zip(STATUS_COLUMNS, [2, 4, 6, 8, 10, 12, 14])),
+        },
+        {
+            # The JMS-reported region cannot grant scope when DoomsDay has no match.
+            "reported_origin_region": "SPE", "source_base_name": "Unknown PDD",
+            "customer_name": "Cliente C", "store_name": "Loja 3", "seller_id": "000789",
+            "assigned_driver": "Motorista 3", "order_origin": "App",
+            **dict(zip(STATUS_COLUMNS, [3, 6, 9, 12, 15, 18, 21])),
+        },
+    ])
+    return engine
+
+
+def test_contract_is_versioned_and_keeps_the_fifteen_source_columns():
+    contract = get_contract("collection_monitoring_t4_t5", 1)
+    assert len(contract.columns) == 15
+    assert contract.headers == (
+        "Data", "Regional Origem", "PDD de saida", "Cliente", "Loja",
+        "Id Seller/remetente", "Motorista Designado", "Origem do Pedido",
+        "Status atual – Aguardando coleta", "Status atual – Recebido no Drop-off",
+        "Status atual – Coletado", "Status atual – Recebido",
+        "Status atual – Recebido na base", "当前状态-网点发件流程中", "Status atual – Chegou ao SC",
+    )
+    assert contract_sha256(contract).hex() == "3d6f804ccad783b2d4cc33870a26f9d11f891430ff30505861251fd17d1d4a62"
+    assert contract.history_policy == "DAILY_REPLACE_DATES"
+    assert contract.expected_sample_rows is None
+    assert _max_uncompressed_workbook_bytes(contract) > MAX_UNCOMPRESSED_WORKBOOK_BYTES
+    assert _max_uncompressed_workbook_bytes(get_contract("collection_monitoring", 1)) == MAX_UNCOMPRESSED_WORKBOOK_BYTES
+
+
+def test_numeric_excel_store_and_seller_cells_preserve_text_precision():
+    contract = get_contract("collection_monitoring_t4_t5", 1)
+    store = next(column for column in contract.columns if column.key == "store_name")
+    seller = next(column for column in contract.columns if column.key == "seller_id")
+    customer = next(column for column in contract.columns if column.key == "customer_name")
+
+    assert _cell_as_value(_RawCell(Decimal("123456"), numeric=True), store, False, allow_numeric_text=True) == ("123456", None)
+    assert _cell_as_value(_RawCell(Decimal("123456"), numeric=True), seller, False, allow_numeric_text=True) == ("123456", None)
+    assert _cell_as_value(_RawCell("000123"), seller, False) == ("000123", None)
+    assert _cell_as_value(_RawCell(Decimal("123456"), numeric=True), customer, False) == (None, "text_type_invalid")
+    assert _cell_as_value(_RawCell(Decimal("1234567890123456"), numeric=True), seller, False, allow_numeric_text=True) == (
+        None, "text_numeric_precision_exceeded",
+    )
+
+
+def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_status_sums():
+    engine = _fixture_data()
+    matrix = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert str(matrix["snapshotDate"]) == "2026-10-20"
+    assert matrix["metadata"]["publishedRowCount"] == 3
+    assert matrix["totals"]["records"] == 3
+    assert matrix["totals"]["unmappedRecords"] == 1
+    assert matrix["totals"]["statuses"] == dict(zip(STATUS_COLUMNS, [15, 30, 45, 60, 75, 90, 105]))
+
+    filtered = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(region="SPE", customer_name="Cliente A"),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert filtered["totals"]["records"] == 1
+    assert filtered["totals"]["statuses"] == dict(zip(STATUS_COLUMNS, [10, 20, 30, 40, 50, 60, 70]))
+
+    regional = get_dashboard_summary(
+        engine, identity=REGIONAL_ADMIN, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert regional["totals"]["records"] == 1
+    assert regional["totals"]["unmappedRecords"] == 0
+
+    regional_groups = get_group_page(
+        engine, identity=MATRIX_ADMIN, dimension="region", filters=T4T5Filters(),
+        snapshot_date=date(2026, 10, 20), limit=20, offset=0,
+    )
+    by_region = {row["regional_name"]: row for row in regional_groups["rows"]}
+    assert set(by_region) == {"SPE", "CE", "Sem regional"}
+    assert by_region["SPE"]["record_count"] == 1
+    assert by_region["Sem regional"]["record_count"] == 1
+
+    with pytest.raises(DataFoundationError, match="user_scope_unavailable"):
+        get_dashboard_summary(
+            engine,
+            identity={"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "regional", "effective_regions": ["SPE"]},
+            filters=T4T5Filters(), date_from=None, date_to=None,
+        )
+
+
+def test_details_and_excel_keep_all_fifteen_original_columns_and_scope():
+    engine = _fixture_data()
+    detail = get_detail_page(
+        engine, identity=REGIONAL_ADMIN, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20), limit=50, offset=0,
+    )
+    assert detail["total"] == 2
+    assert len(detail["records"][0]) == 15 + 8
+    assert all(row["mapped_region"] == "SPE" for row in detail["records"])
+
+    export_path = create_xlsx_export(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+    )
+    try:
+        with zipfile.ZipFile(export_path) as archive:
+            sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        rows = sheet.findall(".//x:sheetData/x:row", namespace)
+        assert len(rows) == 4  # header + three source records
+        header = rows[0].findall("x:c", namespace)
+        assert len(header) == 15
+        cells = {cell.attrib["r"]: cell for cell in rows[1].findall("x:c", namespace)}
+        assert cells["A2"].attrib.get("s") == "1"  # typed Excel date
+        assert cells["F2"].attrib.get("t") == "inlineStr"  # seller IDs remain text
+        assert cells["I2"].attrib.get("t") == "n"  # status counts remain numeric
+        assert cells["I2"].find("x:v", namespace).text == "10"
+    finally:
+        export_path.unlink(missing_ok=True)

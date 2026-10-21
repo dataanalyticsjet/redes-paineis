@@ -148,6 +148,7 @@ import { aggregateTaxaRmPoc } from "../../lib/taxa-rm-poc";
 import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loader";
 import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
 import { CollectionMonitoringV2Dashboard } from "./collection-monitoring-v2";
+import { CollectionMonitoringT4T5Dashboard } from "./collection-monitoring-t4-t5";
 import {
   canReadDashboardV2Data,
   canReadMonitoringV2,
@@ -7391,9 +7392,9 @@ export function DashboardApp() {
       /> : null}
 
       <main
-        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : view === "taxa" && isAuthorizedDashboardViewer ? "dashboard-main dashboard-main-taxa-v2" : "dashboard-main"}
-        data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : view === "bipagem" ? "pdd-collection-failure-v2-dashboard-shell" : undefined}
-        data-v2-source={view === "movimentacao" && isAuthorizedDashboardViewer ? "no_movement" : view === "taxa" && isAuthorizedDashboardViewer ? "collection_rate" : view === "bipagem" && isAuthorizedDashboardViewer ? "pdd_collection_failure" : undefined}
+        className={view === "home" ? "dashboard-main dashboard-main-presentation-home" : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? "dashboard-main dashboard-main-under-development" : view === "sellers" ? "dashboard-main dashboard-main-sellers" : view === "movimentacao" ? "dashboard-main dashboard-main-movement" : view === "taxa" && isAuthorizedDashboardViewer ? "dashboard-main dashboard-main-taxa-v2" : view === "monitoramento-t4-t5" && isAuthorizedDashboardViewer ? "dashboard-main dashboard-main-t4-t5" : "dashboard-main"}
+        data-testid={view === "movimentacao" ? "no-movement-v2-dashboard" : view === "bipagem" ? "pdd-collection-failure-v2-dashboard-shell" : view === "monitoramento-t4-t5" ? "collection-monitoring-t4-t5-dashboard" : undefined}
+        data-v2-source={view === "movimentacao" && isAuthorizedDashboardViewer ? "no_movement" : view === "taxa" && isAuthorizedDashboardViewer ? "collection_rate" : view === "bipagem" && isAuthorizedDashboardViewer ? "pdd_collection_failure" : view === "monitoramento-t4-t5" && isAuthorizedDashboardViewer ? "collection_monitoring_t4_t5" : undefined}
         data-v2-status={view === "movimentacao" && isAuthorizedDashboardViewer ? noMovementV2State.status : view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.status : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.status : undefined}
         data-v2-period-start={view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.period.dateFrom : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.period.dateFrom : undefined}
         data-v2-period-end={view === "taxa" && isAuthorizedDashboardViewer ? collectionRateV2State.period.dateTo : view === "bipagem" && isAuthorizedDashboardViewer ? pddCollectionFailureV2State.period.dateTo : undefined}
@@ -7422,6 +7423,8 @@ export function DashboardApp() {
           /> : <section className="dashboard-source-availability unavailable" role="alert" data-testid="matrix-administration-restricted">
             <p>{t("A administração das fontes compartilhadas exige autorização administrativa de matriz.")}</p>
           </section>
+        ) : view === "monitoramento-t4-t5" ? (
+          <CollectionMonitoringT4T5Dashboard key={dashboardCacheIdentity} t={t} language={language} scopeKey={dashboardCacheIdentity} />
         ) : isFirstMileUnderReview && view !== "monitoramento" && view !== "movimentacao" && view !== "bipagem" && view !== "taxa" ? (
           <DashboardUnderDevelopment
             title={dashboardCards.find((card) => card.id === view)?.title ?? t("Painel em desenvolvimento")}
