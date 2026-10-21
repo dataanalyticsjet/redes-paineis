@@ -7,11 +7,16 @@ import {
   type CollectionMonitoringV2Record,
 } from "../src/lib/data-foundation/collection-monitoring-v2.ts";
 import {
+  collectionMonitoringV2BaseDetailMatrix,
   collectionMonitoringV2ExcelMatrix,
   collectionMonitoringV2ComparisonSlots,
   collectionMonitoringV2ComparisonValue,
   collectionMonitoringV2PercentageVariation,
+  collectionMonitoringV2RegionalStatusGroups,
+  collectionMonitoringV2RegionalSummaryMatrix,
+  collectionMonitoringV2RmSummaryMatrix,
   filterCollectionMonitoringV2Rows,
+  groupCollectionMonitoringV2BaseDetails,
   groupCollectionMonitoringV2Rows,
   latestCollectionMonitoringV2Snapshot,
   mapCollectionMonitoringV2Record,
@@ -202,6 +207,163 @@ test("regional and RM grouping reconciles all rows and keeps same-name RMs separ
   assert.equal(regions.find((group) => group.region === "Sem regional")?.planned, 5);
   assert.equal(rms.filter((group) => group.rm === "Alex").length, 2);
   assert.equal(rms.reduce((sum, group) => sum + group.awaiting, 0), total.awaiting);
+});
+
+test("approved collection formula reconciles cards, regional/RM tables, base detail and summary exports", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 2, data_date: "2026-10-19", order_origin: "Marketplace", source_base_name: "CE Base",
+      expected_dropoff: 1_000_000, pending_dropoff: 10_000, status_collected: 1_200_000,
+      resolved_base_code: "CE-1", effective_base_code: "CE-1", mapping_resolution: "NAME_APPROVED",
+      effective_mapping_resolution: "NAME_APPROVED", mapped_base_name: "CE Base oficial", mapped_region: "CE",
+      mapped_rm_area: "RM Nordeste", mapped_rm: "Ana",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 3, data_date: "2026-10-19", order_origin: "Marketplace", source_base_name: "MG Base",
+      expected_dropoff: 2_000_000, pending_dropoff: 20_000, status_collected: 2_094_897,
+      resolved_base_code: "MG-1", effective_base_code: "MG-1", mapping_resolution: "NAME_APPROVED",
+      effective_mapping_resolution: "NAME_APPROVED", mapped_base_name: "MG Base oficial", mapped_region: "MG",
+      mapped_rm_area: "RM Sudeste", mapped_rm: "Bruno",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 4, data_date: "2026-10-19", order_origin: "Marketplace", source_base_name: "Base sem vínculo",
+      reported_origin_region: "SPE", expected_pickup: 328_879, pending_pickup: 18_904, status_collected: 300_000,
+      mapping_resolution: "UNMAPPED", effective_mapping_resolution: "UNMAPPED",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 5, data_date: "2026-10-18", order_origin: "Retail", expected_dropoff: 900_000,
+      pending_dropoff: 100_000, status_collected: 950_000,
+    })),
+  ];
+  const selected = filterCollectionMonitoringV2Rows(rows, {
+    dateFrom: "2026-10-19", dateTo: "2026-10-19", origin: "Marketplace",
+  });
+  const metrics = summarizeCollectionMonitoringV2(selected);
+  const regions = groupCollectionMonitoringV2Rows(selected, "region");
+  const rms = groupCollectionMonitoringV2Rows(selected, "rm");
+  const details = groupCollectionMonitoringV2BaseDetails(selected);
+  const regionalExport = collectionMonitoringV2RegionalSummaryMatrix(regions, metrics, 2, (label) => label);
+  const rmExport = collectionMonitoringV2RmSummaryMatrix(rms, metrics, 2, (label) => label);
+  const detailExport = collectionMonitoringV2BaseDetailMatrix(details, (label) => label);
+
+  assert.equal(selected.length, 3);
+  assert.equal(metrics.planned, 3_328_879);
+  assert.equal(metrics.awaiting, 48_904);
+  assert.equal(metrics.collected, 3_279_975);
+  assert.equal(selected.reduce((sum, row) => sum + Number(row.status_collected), 0), 3_594_897);
+
+  for (const groups of [regions, rms]) {
+    assert.equal(groups.reduce((sum, group) => sum + group.planned, 0), metrics.planned);
+    assert.equal(groups.reduce((sum, group) => sum + group.awaiting, 0), metrics.awaiting);
+    assert.equal(groups.reduce((sum, group) => sum + group.collected, 0), metrics.collected);
+    assert.ok(groups.every((group) => group.collected === group.planned - group.awaiting));
+  }
+  assert.equal(regions.find((group) => group.region === "Sem regional")?.planned, 328_879);
+
+  assert.deepEqual(regionalExport.at(-1)?.slice(3, 6), [metrics.planned, metrics.awaiting, metrics.collected]);
+  assert.deepEqual(rmExport.at(-1)?.slice(4, 7), [metrics.planned, metrics.awaiting, metrics.collected]);
+  assert.deepEqual(regionalExport.slice(1, -1).map((row) => row.slice(3, 6)), regions.map((group) => [group.planned, group.awaiting, group.collected]));
+  assert.deepEqual(rmExport.slice(1, -1).map((row) => row.slice(4, 7)), rms.map((group) => [group.planned, group.awaiting, group.collected]));
+  assert.deepEqual(detailExport.slice(1).reduce<number[]>((totals, row) => [
+    totals[0] + Number(row[6]), totals[1] + Number(row[7]), totals[2] + Number(row[8]),
+  ], [0, 0, 0]), [metrics.planned, metrics.awaiting, metrics.collected]);
+  assert.ok(details.every((row) => row.collected === row.planned - row.awaiting));
+
+  const narrowed = filterCollectionMonitoringV2Rows(selected, {
+    region: "CE", rm: "Ana", base: "CE Base oficial", origin: "Marketplace",
+  });
+  const narrowedMetrics = summarizeCollectionMonitoringV2(narrowed);
+  const narrowedRegion = groupCollectionMonitoringV2Rows(narrowed, "region");
+  const narrowedRm = groupCollectionMonitoringV2Rows(narrowed, "rm");
+  const narrowedDetail = groupCollectionMonitoringV2BaseDetails(narrowed);
+  assert.deepEqual(
+    [narrowedRegion[0]?.planned, narrowedRegion[0]?.awaiting, narrowedRegion[0]?.collected],
+    [narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected],
+  );
+  assert.deepEqual(
+    [narrowedRm[0]?.planned, narrowedRm[0]?.awaiting, narrowedRm[0]?.collected],
+    [narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected],
+  );
+  assert.deepEqual(
+    [narrowedDetail[0]?.planned, narrowedDetail[0]?.awaiting, narrowedDetail[0]?.collected],
+    [narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected],
+  );
+  assert.deepEqual([narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected], [1_000_000, 10_000, 990_000]);
+});
+
+test("base detail summary keeps daily snapshots separate and exports ten numeric columns", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 2, source_base_name: "CE base", order_origin: "Marketplace", expected_dropoff: 20,
+      pending_dropoff: 2, status_received_at_base: 3, resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
+      mapped_rm_area: "RM Norte", mapped_rm: "Alex",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 3, source_base_name: "CE base", order_origin: "Marketplace", expected_dropoff: 5,
+      pending_dropoff: 1, status_dispatched_from_base: 4, resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
+      mapped_rm_area: "RM Norte", mapped_rm: "Alex",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 4, data_date: "2026-10-19", source_base_name: "CE base", order_origin: "Marketplace",
+      expected_dropoff: 10, status_received_at_base: 2, resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
+      mapped_rm_area: "RM Norte", mapped_rm: "Alex",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 5, source_base_name: "Unmapped base", order_origin: "Marketplace", expected_pickup: 7,
+      status_received_at_base: 1,
+    })),
+  ];
+
+  const summary = groupCollectionMonitoringV2BaseDetails(rows);
+  assert.equal(summary.length, 3);
+  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.planned, 25);
+  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.awaiting, 3);
+  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.collected, 22);
+  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.total, 7);
+  assert.equal(summary.find((item) => item.region === "Sem regional")?.base, "Unmapped base");
+
+  const matrix = collectionMonitoringV2BaseDetailMatrix(summary, (label) => label);
+  assert.equal(matrix[0]?.length, 10);
+  assert.equal(matrix[1]?.length, 10);
+  assert.equal(matrix.find((line) => line[0] === "2026-10-18" && line[1] === "CE")?.[6], 25);
+  assert.equal(matrix.find((line) => line[0] === "2026-10-18" && line[1] === "CE")?.[9], 7);
+});
+
+test("regional movement summary uses only the three approved provisional retention fields", () => {
+  const rows = [
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 2, source_base_name: "CE base", expected_dropoff: 100,
+      status_received_at_base: 10, status_dispatched_from_base: 5, arrived_sorting_center: 5,
+      status_in_transit_from_base: 1_000, arrived_sc: 2_000,
+      resolved_base_code: "CE-1", effective_base_code: "CE-1", mapping_resolution: "NAME_APPROVED",
+      effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 3, source_base_name: "Unmapped base", reported_origin_region: "JMS says SPE",
+      status_received_at_base: 4,
+    })),
+    mapCollectionMonitoringV2Record(rawRecord({
+      source_row_no: 4, source_base_name: "No retention movement", expected_dropoff: 500,
+      status_in_transit_from_base: 400, arrived_sc: 300,
+      resolved_base_code: "MG-1", effective_base_code: "MG-1", mapping_resolution: "NAME_APPROVED",
+      effective_mapping_resolution: "NAME_APPROVED", mapped_region: "MG",
+    })),
+  ];
+
+  const groups = collectionMonitoringV2RegionalStatusGroups(rows);
+  assert.deepEqual(groups.map((group) => group.region), ["CE", "Sem regional"]);
+  assert.deepEqual(groups[0]?.components.map((item) => item.field), [
+    "status_received_at_base", "status_dispatched_from_base", "arrived_sorting_center",
+  ]);
+  assert.equal(groups[0]?.componentTotal, 20);
+  assert.equal(groups[0]?.basesWithMovement, 1);
+  assert.equal(groups[1]?.region, "Sem regional");
+  assert.equal(groups[1]?.componentTotal, 4);
+  assert.equal(groups[1]?.basesWithMovement, 1);
+  assert.equal(groups.some((group) => group.region === "MG"), false);
 });
 
 test("percentage variation requires a nonzero prior snapshot and treats zero as a value", () => {

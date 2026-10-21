@@ -29,6 +29,26 @@ test("retention tables show the approved provisional formulas and distinguish un
   assert.doesNotMatch(component, /Pendente de homologação/);
 });
 
+test("new monitoring sections follow retention in PDF order without removing the raw 23-column source", () => {
+  const retentionRm = component.indexOf('comparisonTable("Retenção por RM"');
+  const regional = component.indexOf('monitoringTable("Monitoramento por regional"');
+  const rm = component.indexOf('monitoringTable("Monitoramento por RM"');
+  const status = component.indexOf('aria-label={t("Total por regional e status")}');
+  const detail = component.indexOf('aria-label={t("Dados por base")}');
+  assert.ok(retentionRm >= 0 && retentionRm < regional);
+  assert.ok(regional < rm && rm < status && status < detail);
+  assert.match(component, /groupCollectionMonitoringV2BaseDetails\(filteredRows\)/);
+  assert.match(component, /Dados originais da fonte \(23 colunas\)/);
+  assert.match(component, /COLLECTION_MONITORING_V2_COLUMNS\.map\(\(key\) => <th key=\{key\}/);
+  assert.match(component, /book_append_sheet\(workbook, summaryWorksheet, "Resumo por base"\)/);
+  assert.match(component, /book_append_sheet\(workbook, worksheet, "Dados"\)/);
+  assert.match(component, /collectionMonitoringV2ExcelMatrix\(rows\)/);
+  assert.equal((component.match(/monitoringTable\("Monitoramento por regional"/g) ?? []).length, 1);
+  assert.equal((component.match(/monitoringTable\("Monitoramento por RM"/g) ?? []).length, 1);
+  assert.match(styles, /\.collection-monitoring-v2-status-row\s*\{/);
+  assert.match(styles, /@media \(max-width: 700px\)[\s\S]*?\.collection-monitoring-v2-status-row/);
+});
+
 test("new layout rules are scoped to the Monitoramento V2 component and adapt to smaller screens", () => {
   assert.match(styles, /\.collection-monitoring-v2-intro\s*\{/);
   assert.match(styles, /\.collection-monitoring-v2-main-filter-grid\s*\{[^}]*repeat\(7, minmax\(0, 1fr\)\)/s);

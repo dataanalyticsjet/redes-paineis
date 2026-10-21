@@ -9776,3 +9776,58 @@ html[data-theme="dark"] .collection-monitoring-v2-kpi small { color: #ffd68a; }
   .collection-monitoring-v2-retention-card { padding: 11px; }
   .collection-monitoring-v2-retention-table { min-width: 1450px; }
 }
+
+/* Monitoramento V2: added regional and base summaries remain scoped to this dashboard. */
+.collection-monitoring-v2-summary-card { min-width: 0; }
+.collection-monitoring-v2-summary-actions { display: flex; align-items: center; gap: 10px; color: var(--muted, #64748b); font-size: 11px; }
+.collection-monitoring-v2-summary-scroll { max-height: 520px; border: 1px solid var(--border, #e5e7eb); border-radius: 11px; }
+.collection-monitoring-v2-summary-table { min-width: 1120px; }
+.collection-monitoring-v2-summary-table th { color: #fff; border-right: 1px solid rgb(255 255 255 / 24%); background: #d71920; text-align: center; white-space: normal; }
+.collection-monitoring-v2-summary-table td { height: 38px; }
+.collection-monitoring-v2-summary-table tfoot th, .collection-monitoring-v2-summary-table tfoot td { position: sticky; bottom: 0; z-index: 2; border-top: 2px solid #d71920; color: var(--ink-strong, #172033); background: var(--table-head-soft, #f6f7f9); font-weight: 700; }
+.collection-monitoring-v2-status-summary .collection-monitoring-v2-section-heading { align-items: center; }
+.collection-monitoring-v2-status-summary .collection-monitoring-v2-section-heading h2 { color: var(--ink-strong, #172033); }
+.collection-monitoring-v2-status-total { display: grid; min-width: 150px; gap: 3px; padding: 9px 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 11px; background: var(--table-head-soft, #f6f7f9); text-align: right; }
+.collection-monitoring-v2-status-total span, .collection-monitoring-v2-status-total small { color: var(--muted, #64748b); font-size: 11px; }
+.collection-monitoring-v2-status-total strong { color: var(--ink-strong, #172033); font-size: 21px; font-variant-numeric: tabular-nums; }
+.collection-monitoring-v2-status-legend { display: flex; flex-wrap: wrap; gap: 9px 16px; margin-bottom: 12px; color: var(--muted, #64748b); font-size: 11px; }
+.collection-monitoring-v2-status-legend span, .collection-monitoring-v2-status-values span { display: inline-flex; align-items: center; gap: 6px; }
+.collection-monitoring-v2-status-legend i, .collection-monitoring-v2-status-values i { width: 8px; height: 8px; flex: none; border-radius: 50%; }
+.collection-monitoring-v2-status-list { display: grid; gap: 8px; max-height: 430px; overflow: auto; }
+.collection-monitoring-v2-status-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(120px, .55fr) minmax(180px, 1.8fr) minmax(270px, 1.7fr); align-items: center; gap: 14px; padding: 11px 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; background: var(--card, #fff); }
+.collection-monitoring-v2-status-region, .collection-monitoring-v2-status-value { display: grid; gap: 3px; min-width: 0; }
+.collection-monitoring-v2-status-region strong, .collection-monitoring-v2-status-value strong { overflow: hidden; color: var(--ink-strong, #172033); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.collection-monitoring-v2-status-region span, .collection-monitoring-v2-status-value small { color: var(--muted, #64748b); font-size: 10px; }
+.collection-monitoring-v2-status-value strong { font-variant-numeric: tabular-nums; }
+.collection-monitoring-v2-status-track { height: 12px; overflow: hidden; border-radius: 99px; background: var(--table-grid, #eef1f5); }
+.collection-monitoring-v2-status-track > div { display: flex; height: 100%; min-width: 2px; overflow: hidden; border-radius: inherit; }
+.collection-monitoring-v2-status-track > div > span { display: block; min-width: 1px; height: 100%; }
+.collection-monitoring-v2-status-values { display: flex; flex-wrap: wrap; gap: 4px 11px; color: var(--muted, #64748b); font-size: 10px; }
+.collection-monitoring-v2-status-values i { width: 7px; height: 7px; }
+.collection-monitoring-v2-detail .collection-monitoring-v2-base-summary-table { min-width: 1320px; }
+.collection-monitoring-v2-base-summary-table th { min-width: 90px; }
+.collection-monitoring-v2-base-summary-table th:nth-child(3) { min-width: 165px; }
+.collection-monitoring-v2-base-summary-table td { height: 39px; }
+.collection-monitoring-v2-rm-area { display: block; margin-top: 2px; color: var(--muted, #64748b); font-size: 10px; }
+.collection-monitoring-v2-raw-source { margin-top: 16px; border-top: 1px solid var(--border, #e5e7eb); }
+.collection-monitoring-v2-raw-source > summary { width: fit-content; padding: 12px 0 2px; color: var(--ink, #172033); font-size: 12px; font-weight: 650; cursor: pointer; }
+.collection-monitoring-v2-raw-source[open] > summary { margin-bottom: 4px; }
+html[data-theme="dark"] .collection-monitoring-v2-summary-table th { color: #fff; background: #a80f18; }
+html[data-theme="dark"] .collection-monitoring-v2-status-total { background: var(--table-head-soft, #252d39); }
+html[data-theme="dark"] .collection-monitoring-v2-status-row { background: var(--card, #1b2330); }
+html[data-theme="dark"] .collection-monitoring-v2-raw-source > summary { color: var(--ink-strong, #e8edf5); }
+@media (max-width: 1000px) {
+  .collection-monitoring-v2-status-row { grid-template-columns: minmax(110px, .8fr) minmax(110px, .6fr) minmax(150px, 1.2fr); }
+  .collection-monitoring-v2-status-values { grid-column: 1 / -1; }
+}
+@media (max-width: 700px) {
+  .collection-monitoring-v2-summary-actions { align-items: stretch; flex-direction: column; }
+  .collection-monitoring-v2-status-summary .collection-monitoring-v2-section-heading { align-items: stretch; }
+  .collection-monitoring-v2-status-total { text-align: left; }
+  .collection-monitoring-v2-status-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .collection-monitoring-v2-status-track, .collection-monitoring-v2-status-values { grid-column: 1 / -1; }
+  .collection-monitoring-v2-status-region { grid-column: 1; }
+  .collection-monitoring-v2-status-value { grid-column: 2; grid-row: 1; text-align: right; }
+  .collection-monitoring-v2-status-values { gap: 6px 10px; }
+  .collection-monitoring-v2-detail .collection-monitoring-v2-section-heading { flex-direction: column; }
+}

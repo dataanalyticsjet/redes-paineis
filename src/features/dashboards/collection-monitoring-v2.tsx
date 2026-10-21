@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, CalendarDays, Clock3, Database, Download, Filter, Layers3, MapPin, Percent, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, AlertCircle, BarChart3, CalendarDays, Clock3, Database, Download, Filter, Layers3, MapPin, Percent, RefreshCw, ShieldCheck } from "lucide-react";
 import { subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
 import { dashboardLocale, type DashboardLanguage, type DashboardTranslator } from "../../lib/i18n";
 import {
@@ -15,8 +15,14 @@ import {
 import {
   collectionMonitoringV2FilterOptions,
   collectionMonitoringV2ComparisonSlots,
+  collectionMonitoringV2BaseDetailMatrix,
+  collectionMonitoringV2RegionalSummaryMatrix,
+  collectionMonitoringV2RmSummaryMatrix,
+  COLLECTION_MONITORING_V2_STATUS_FIELDS,
+  collectionMonitoringV2RegionalStatusGroups,
   filterCollectionMonitoringV2Rows,
   formatCollectionMonitoringV2Value,
+  groupCollectionMonitoringV2BaseDetails,
   groupCollectionMonitoringV2Rows,
   collectionMonitoringV2PercentageVariation,
   collectionMonitoringV2RowsForDate,
@@ -24,8 +30,11 @@ import {
   mapCollectionMonitoringV2Record,
   summarizeCollectionMonitoringV2,
   collectionMonitoringV2ExcelMatrix,
+  type CollectionMonitoringV2BaseDetail,
   type CollectionMonitoringV2Filters,
+  type CollectionMonitoringV2Group,
   type CollectionMonitoringV2Row,
+  type CollectionMonitoringV2StatusField,
 } from "../../lib/data-foundation/collection-monitoring-v2-dashboard.ts";
 
 interface Props {
@@ -44,14 +53,59 @@ function errorText(error: unknown): string {
 
 type CollectionMonitoringV2Period = { dateFrom?: string; dateTo?: string };
 
+type ExportCell = string | number | Date | null;
+
+async function downloadMatrixExcel(
+  matrix: readonly (readonly ExportCell[])[],
+  filename: string,
+  sheetName: string,
+  percentageColumns: readonly number[] = [],
+): Promise<void> {
+  const XLSXModule = await import("xlsx-js-style");
+  const XLSX = XLSXModule.default ?? XLSXModule;
+  const worksheet = XLSX.utils.aoa_to_sheet(matrix.map((row) => [...row]));
+  const headers = matrix[0] ?? [];
+  worksheet["!cols"] = headers.map((header) => ({ wch: Math.min(32, Math.max(12, String(header ?? "").length + 3)) }));
+  for (let rowIndex = 1; rowIndex < matrix.length; rowIndex += 1) {
+    headers.forEach((_, columnIndex) => {
+      const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
+      const cell = worksheet[address];
+      if (cell && typeof cell.v === "number") cell.z = percentageColumns.includes(columnIndex) ? "0.00%" : "#,##0";
+    });
+  }
+  if (matrix.length > 0 && headers.length > 0) {
+    worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: matrix.length - 1, c: headers.length - 1 } }) };
+  }
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  XLSX.writeFile(workbook, filename, { compression: true });
+}
+
 function groupIdentity(group: ReturnType<typeof groupCollectionMonitoringV2Rows>[number], dimension: "region" | "rm"): string {
   return dimension === "region" ? group.region : `${group.rmArea}\u0000${group.rm}\u0000${group.region}`;
 }
 
-async function downloadExcel(rows: readonly CollectionMonitoringV2Row[], period: CollectionMonitoringV2Filters): Promise<void> {
+async function downloadExcel(
+  rows: readonly CollectionMonitoringV2Row[],
+  period: CollectionMonitoringV2Filters,
+  baseDetails: readonly CollectionMonitoringV2BaseDetail[],
+  t: DashboardTranslator,
+): Promise<void> {
   const XLSXModule = await import("xlsx-js-style");
   const XLSX = XLSXModule.default ?? XLSXModule;
   const workbook = XLSX.utils.book_new();
+  const summaryWorksheet = XLSX.utils.aoa_to_sheet(collectionMonitoringV2BaseDetailMatrix(baseDetails, t));
+  summaryWorksheet["!cols"] = [13, 16, 28, 20, 24, 22, 20, 20, 16, 16].map((wch) => ({ wch }));
+  if (baseDetails.length > 0) {
+    summaryWorksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: baseDetails.length, c: 9 } }) };
+  }
+  for (let rowIndex = 1; rowIndex <= baseDetails.length; rowIndex += 1) {
+    for (const columnIndex of [6, 7, 8, 9]) {
+      const cell = summaryWorksheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })];
+      if (cell) cell.z = "#,##0";
+    }
+  }
+  XLSX.utils.book_append_sheet(workbook, summaryWorksheet, "Resumo por base");
   const worksheet = XLSX.utils.aoa_to_sheet(collectionMonitoringV2ExcelMatrix(rows));
   worksheet["!cols"] = COLLECTION_MONITORING_V2_COLUMNS.map((key) => ({ wch: key === "data_date" ? 13 : 22 }));
   for (let rowIndex = 1; rowIndex <= rows.length; rowIndex += 1) {
@@ -85,7 +139,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const [publicationCount, setPublicationCount] = useState(0);
   const [filters, setFilters] = useState<CollectionMonitoringV2Filters>({});
   const [query, setQuery] = useState("");
+  const [detailQuery, setDetailQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [detailPage, setDetailPage] = useState(1);
   const activeRequest = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -169,6 +225,17 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const metrics = useMemo(() => summarizeCollectionMonitoringV2(currentRows), [currentRows]);
   const byRegion = useMemo(() => groupCollectionMonitoringV2Rows(currentRows, "region"), [currentRows]);
   const byRm = useMemo(() => groupCollectionMonitoringV2Rows(currentRows, "rm"), [currentRows]);
+  const regionalStatusGroups = useMemo(() => collectionMonitoringV2RegionalStatusGroups(currentRows), [currentRows]);
+  const baseDetails = useMemo(() => groupCollectionMonitoringV2BaseDetails(filteredRows), [filteredRows]);
+  const visibleBaseDetails = useMemo(() => {
+    const needle = detailQuery.trim().toLocaleLowerCase(dashboardLocale(language));
+    const matched = needle ? baseDetails.filter((row) => [
+      row.period, row.region, row.base, row.origin, row.rmArea, row.rm, row.rgm,
+    ].some((value) => value.toLocaleLowerCase(dashboardLocale(language)).includes(needle))) : baseDetails;
+    const pageCount = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
+    const activePage = Math.min(detailPage, pageCount);
+    return { matched, pageCount, activePage, rows: matched.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE) };
+  }, [baseDetails, detailPage, detailQuery, language]);
   const comparisonRowsWithFilters = useMemo(() => filterCollectionMonitoringV2Rows(
     [...rows, ...comparisonRows],
     { region: filters.region, rm: filters.rm, rmArea: filters.rmArea, rgm: filters.rgm, base: filters.base, origin: filters.origin },
@@ -181,6 +248,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     slot.key,
     new Map(groupCollectionMonitoringV2Rows(collectionMonitoringV2RowsForDate(comparisonRowsWithFilters, slot.date), "rm").map((group) => [groupIdentity(group, "rm"), group])),
   ])), [comparisonSlots, comparisonRowsWithFilters]);
+  const currentMappedBaseCount = useMemo(() => new Set(currentRows
+    .filter((row) => row.mappingConfirmed && row.baseCode !== "—")
+    .map((row) => row.baseCode)).size, [currentRows]);
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase(dashboardLocale(language));
     const matched = needle ? filteredRows.filter((row) => COLLECTION_MONITORING_V2_COLUMNS.some((key) => String(row[key] ?? "").toLocaleLowerCase(dashboardLocale(language)).includes(needle))) : filteredRows;
@@ -188,11 +258,13 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     const activePage = Math.min(page, pageCount);
     return { matched, pageCount, activePage, rows: matched.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE) };
   }, [filteredRows, language, page, query]);
+  const maxRegionalStatusTotal = Math.max(0, ...regionalStatusGroups.map((group) => group.componentTotal));
 
   function updateFilter<K extends keyof CollectionMonitoringV2Filters>(key: K, value: CollectionMonitoringV2Filters[K]) {
     const next = { ...filters, [key]: value };
     setFilters(next);
     setPage(1);
+    setDetailPage(1);
     if (key === "dateFrom" || key === "dateTo") {
       activeRequest.current?.abort();
       setRows([]);
@@ -210,7 +282,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
 
   function clearFilters() {
     setQuery("");
+    setDetailQuery("");
     setPage(1);
+    setDetailPage(1);
     if (requestedPeriod) {
       activeRequest.current?.abort();
       setRows([]);
@@ -338,6 +412,61 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     </section>;
   };
 
+  const regionalSummaryMatrix = collectionMonitoringV2RegionalSummaryMatrix(byRegion, metrics, currentMappedBaseCount, t);
+  const rmSummaryMatrix = collectionMonitoringV2RmSummaryMatrix(byRm, metrics, currentMappedBaseCount, t);
+  const downloadRegionalSummary = () => void downloadMatrixExcel(
+    regionalSummaryMatrix,
+    "monitoramento-coleta-v2_por-regional.xlsx",
+    "Por regional",
+    [6, 7],
+  );
+  const downloadRmSummary = () => void downloadMatrixExcel(
+    rmSummaryMatrix,
+    "monitoramento-coleta-v2_por-rm.xlsx",
+    "Por RM",
+    [7, 8],
+  );
+  const statusColors: Record<CollectionMonitoringV2StatusField, string> = {
+    status_received_at_base: "#d71920",
+    status_dispatched_from_base: "#f28e2b",
+    arrived_sorting_center: "#61758a",
+  };
+  const statusBaseCount = regionalStatusGroups.reduce((sum, group) => sum + group.basesWithMovement, 0);
+
+  const monitoringTable = (
+    title: string,
+    dimension: "region" | "rm",
+    groups: readonly CollectionMonitoringV2Group[],
+    matrix: readonly (readonly ExportCell[])[],
+    onDownload: () => void,
+  ) => <section className="collection-monitoring-v2-card collection-monitoring-v2-summary-card" aria-label={t(title)}>
+    <div className="collection-monitoring-v2-section-heading">
+      <div><h2>{t(title)}</h2><p>{t("Valores do último snapshot publicado dentro do intervalo selecionado.")}</p></div>
+      <div className="collection-monitoring-v2-summary-actions"><span>{formatShortDate(currentSnapshot.date ?? undefined)}</span><button type="button" className="collection-monitoring-v2-export" onClick={onDownload} disabled={groups.length === 0}><Download size={15} /> {t("Baixar Excel")}</button></div>
+    </div>
+    <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-summary-scroll">
+      <table className="collection-monitoring-v2-table collection-monitoring-v2-summary-table">
+        <thead><tr>{matrix[0]?.map((header, index) => <th key={`${String(header)}-${index}`}>{String(header ?? "")}</th>)}</tr></thead>
+        <tbody>{groups.map((group) => <tr key={dimension === "region" ? group.region : groupIdentity(group, "rm")}>
+          {dimension === "region" ? <>
+            <td>{group.region}</td><td>{group.rgm}</td><td className="number-cell">{number(group.baseCount)}</td>
+            <td className="number-cell">{number(group.planned)}</td><td className="number-cell">{number(group.awaiting)}</td><td className="number-cell">{number(group.collected)}</td>
+            <td className="number-cell">{percent(group.collectionRate)}</td><td className="number-cell">{percent(group.awaitingRate)}</td>
+          </> : <>
+            <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.baseCount)}</td>
+            <td className="number-cell">{number(group.planned)}</td><td className="number-cell">{number(group.awaiting)}</td><td className="number-cell">{number(group.collected)}</td>
+            <td className="number-cell">{percent(group.collectionRate)}</td><td className="number-cell">{percent(group.awaitingRate)}</td>
+          </>}
+        </tr>)}</tbody>
+        <tfoot><tr>
+          <th>{t("Total geral")}</th>{dimension === "region" ? <td>—</td> : <><td>—</td><td>—</td></>}
+          <td className="number-cell">{number(currentMappedBaseCount)}</td><td className="number-cell">{number(metrics.planned)}</td><td className="number-cell">{number(metrics.awaiting)}</td><td className="number-cell">{number(metrics.collected)}</td><td className="number-cell">{percent(metrics.collectionRate)}</td><td className="number-cell">{percent(metrics.awaitingRate)}</td>
+        </tr></tfoot>
+      </table>
+      {groups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum grupo encontrado para os filtros selecionados.")}</p> : null}
+    </div>
+  </section>;
+
   const periodSelector = <div className="collection-monitoring-v2-filter-grid">{dateFilters}</div>;
   if (status === "loading" || loadedScope !== scopeKey) return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" /><div><p>{t("Carregando publicação do Monitoramento de Coleta…")}</p>{progressScope === scopeKey && progress.total > 0 ? <p>{t("Carregando {loaded} de {total} registros do período…", { loaded: number(progress.loaded), total: number(progress.total) })}</p> : null}{periodSelector}</div></section>;
   if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : t("Aguardando primeira importação.")}</p>{periodSelector}</section>;
@@ -402,11 +531,53 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       {comparisonTable("Retenção por regional", byRegion, "region")}
       {comparisonTable("Retenção por RM", byRm, "rm")}
     </section>
-    <section className="collection-monitoring-v2-card collection-monitoring-v2-detail">
-      <div className="collection-monitoring-v2-section-heading"><div><h2>{t("Detalhamento da fonte")}</h2><p>{t("Detalhamento e Excel respeitam o intervalo selecionado; cards e valores atuais usam o último snapshot do intervalo.")}</p></div><button type="button" className="collection-monitoring-v2-export" onClick={() => void downloadExcel(filteredRows, filters)} disabled={filteredRows.length === 0}><Download size={16} /> {t("Baixar Excel")}</button></div>
-      <div className="collection-monitoring-v2-toolbar"><label><span>{t("Pesquisar")}</span><input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder={t("Pesquisar registros")} /></label><span>{number(filteredRows.length)} {t("registros filtrados")}</span></div>
-      <div className="collection-monitoring-v2-table-scroll"><table className="collection-monitoring-v2-table collection-monitoring-v2-source-table"><thead><tr>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <th key={key}>{t(COLLECTION_MONITORING_V2_HEADERS[key])}</th>)}</tr></thead><tbody>{visibleRows.rows.map((row) => <tr key={`${row.publication_id}:${row.source_row_no}`}>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <td key={key} className={key === "data_date" ? "date-cell" : typeof row[key] === "number" || /^[\d.]+$/.test(String(row[key] ?? "")) ? "number-cell" : ""}>{formatCollectionMonitoringV2Value(row[key], key, dashboardLocale(language))}</td>)}</tr>)}</tbody></table>{visibleRows.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum registro encontrado para os filtros selecionados.")}</p> : null}</div>
-      <div className="collection-monitoring-v2-pagination"><span>{t("Página {page} de {pages}", { page: visibleRows.activePage, pages: visibleRows.pageCount })} · {number(visibleRows.matched.length)} {t("registros")}</span><div><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={visibleRows.activePage <= 1}>{t("Anterior")}</button><button type="button" onClick={() => setPage((current) => Math.min(visibleRows.pageCount, current + 1))} disabled={visibleRows.activePage >= visibleRows.pageCount}>{t("Próxima")}</button></div></div>
+    {monitoringTable("Monitoramento por regional", "region", byRegion, regionalSummaryMatrix, downloadRegionalSummary)}
+    {monitoringTable("Monitoramento por RM", "rm", byRm, rmSummaryMatrix, downloadRmSummary)}
+    <section className="collection-monitoring-v2-card collection-monitoring-v2-status-summary" aria-label={t("Total por regional e status")}>
+      <div className="collection-monitoring-v2-section-heading">
+        <div><h2><BarChart3 size={17} /> {t("Total por regional e status")}</h2><p>{t("A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
+        <div className="collection-monitoring-v2-status-total"><span>{t("Bases com movimento")}</span><strong>{number(statusBaseCount)}</strong><small>{t("Retenção total")}: {number(metrics.retentionTotal)}</small></div>
+      </div>
+      <div className="collection-monitoring-v2-status-legend" aria-label={t("Componentes de retenção")}>
+        {COLLECTION_MONITORING_V2_STATUS_FIELDS.map((field) => <span key={field}><i style={{ backgroundColor: statusColors[field] }} />{t(COLLECTION_MONITORING_V2_HEADERS[field])}</span>)}
+      </div>
+      <div className="collection-monitoring-v2-status-list">
+        {regionalStatusGroups.map((group) => <article className="collection-monitoring-v2-status-row" key={group.region}>
+          <div className="collection-monitoring-v2-status-region"><strong>{group.region}</strong><span>{t("{count} base(s) com movimento", { count: number(group.basesWithMovement) })}</span></div>
+          <div className="collection-monitoring-v2-status-value"><strong>{number(group.retentionTotal)}</strong><small>{t("Retenção total")}</small></div>
+          <div className="collection-monitoring-v2-status-track" aria-label={`${group.region}: ${number(group.retentionTotal)}`}>
+            <div style={{ width: `${maxRegionalStatusTotal ? (group.componentTotal / maxRegionalStatusTotal) * 100 : 0}%` }}>
+              {group.components.map((component) => <span key={component.field} style={{ width: `${group.componentTotal ? (component.value / group.componentTotal) * 100 : 0}%`, backgroundColor: statusColors[component.field] }} title={`${t(COLLECTION_MONITORING_V2_HEADERS[component.field])}: ${number(component.value)}`} />)}
+            </div>
+          </div>
+          <div className="collection-monitoring-v2-status-values">
+            {group.components.map((component) => <span key={component.field}><i style={{ backgroundColor: statusColors[component.field] }} />{t(COLLECTION_MONITORING_V2_HEADERS[component.field])}: {number(component.value)}</span>)}
+          </div>
+        </article>)}
+        {regionalStatusGroups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Não há regionais com movimento para os filtros selecionados.")}</p> : null}
+      </div>
+    </section>
+    <section className="collection-monitoring-v2-card collection-monitoring-v2-detail" aria-label={t("Dados por base")}>
+      <div className="collection-monitoring-v2-section-heading"><div><h2>{t("Dados por base")}</h2><p>{t("Detalhamento e Excel respeitam o intervalo selecionado; cards e valores atuais usam o último snapshot do intervalo.")}</p></div><button type="button" className="collection-monitoring-v2-export" onClick={() => void downloadExcel(filteredRows, filters, baseDetails, t)} disabled={filteredRows.length === 0}><Download size={16} /> {t("Baixar Excel")}</button></div>
+      <div className="collection-monitoring-v2-toolbar"><label><span>{t("Pesquisar")}</span><input type="search" value={detailQuery} onChange={(event) => { setDetailQuery(event.target.value); setDetailPage(1); }} placeholder={t("Buscar base, regional, RM, RGM, origem ou período")} /></label><span>{number(visibleBaseDetails.matched.length)} {t("registros filtrados")}</span></div>
+      <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-base-summary-scroll">
+        <table className="collection-monitoring-v2-table collection-monitoring-v2-base-summary-table">
+          <thead><tr>{["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Total"].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+          <tbody>{visibleBaseDetails.rows.map((row, index) => <tr key={`${index}:${row.period}:${row.region}:${row.base}:${row.origin}:${row.rmArea}:${row.rm}:${row.rgm}`}>
+            <td className="date-cell">{formatShortDate(row.period)}</td><td>{row.region}</td><td>{row.base}</td><td>{row.origin}</td>
+            <td><span>{row.rm}</span>{row.rmArea !== "Sem região do RM" ? <small className="collection-monitoring-v2-rm-area">{row.rmArea}</small> : null}</td><td>{row.rgm}</td>
+            <td className="number-cell">{number(row.planned)}</td><td className="number-cell">{number(row.awaiting)}</td><td className="number-cell">{number(row.collected)}</td><td className="number-cell">{number(row.total)}</td>
+          </tr>)}</tbody>
+        </table>
+        {visibleBaseDetails.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum registro encontrado para os filtros selecionados.")}</p> : null}
+      </div>
+      <div className="collection-monitoring-v2-pagination"><span>{t("Página {page} de {pages}", { page: visibleBaseDetails.activePage, pages: visibleBaseDetails.pageCount })} · {number(visibleBaseDetails.matched.length)} {t("registros")}</span><div><button type="button" onClick={() => setDetailPage((current) => Math.max(1, current - 1))} disabled={visibleBaseDetails.activePage <= 1}>{t("Anterior")}</button><button type="button" onClick={() => setDetailPage((current) => Math.min(visibleBaseDetails.pageCount, current + 1))} disabled={visibleBaseDetails.activePage >= visibleBaseDetails.pageCount}>{t("Próxima")}</button></div></div>
+      <details className="collection-monitoring-v2-raw-source">
+        <summary>{t("Dados originais da fonte (23 colunas)")} · {number(filteredRows.length)} {t("registros")}</summary>
+        <div className="collection-monitoring-v2-toolbar"><label><span>{t("Pesquisar")}</span><input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder={t("Pesquisar registros")} /></label><span>{number(filteredRows.length)} {t("registros filtrados")}</span></div>
+        <div className="collection-monitoring-v2-table-scroll"><table className="collection-monitoring-v2-table collection-monitoring-v2-source-table"><thead><tr>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <th key={key}>{t(COLLECTION_MONITORING_V2_HEADERS[key])}</th>)}</tr></thead><tbody>{visibleRows.rows.map((row) => <tr key={`${row.publication_id}:${row.source_row_no}`}>{COLLECTION_MONITORING_V2_COLUMNS.map((key) => <td key={key} className={key === "data_date" ? "date-cell" : typeof row[key] === "number" || /^[\d.]+$/.test(String(row[key] ?? "")) ? "number-cell" : ""}>{formatCollectionMonitoringV2Value(row[key], key, dashboardLocale(language))}</td>)}</tr>)}</tbody></table>{visibleRows.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum registro encontrado para os filtros selecionados.")}</p> : null}</div>
+        <div className="collection-monitoring-v2-pagination"><span>{t("Página {page} de {pages}", { page: visibleRows.activePage, pages: visibleRows.pageCount })} · {number(visibleRows.matched.length)} {t("registros")}</span><div><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={visibleRows.activePage <= 1}>{t("Anterior")}</button><button type="button" onClick={() => setPage((current) => Math.min(visibleRows.pageCount, current + 1))} disabled={visibleRows.activePage >= visibleRows.pageCount}>{t("Próxima")}</button></div></div>
+      </details>
     </section>
     <footer className="dashboard-footer"><span><ShieldCheck size={15} /> {t("Dados filtrados no backend conforme autorização Feishu.")}</span><span><CalendarDays size={15} /> {t("Publicação vigente · Contrato V2")}</span></footer>
   </div>;

@@ -135,6 +135,7 @@ import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
   monitoringCollectionRate,
+  summarizeMonitoringStatusValues,
 } from "../../lib/monitoring-formulas";
 import { extractSpecialSellerCodes } from "../../lib/special-sellers";
 import {
@@ -1021,14 +1022,15 @@ function monitoringStatusesForMetrics(statuses: readonly string[], metrics: Read
 }
 
 function monitoringMetricsForRow(row: WorkbookRow, statuses: readonly string[]): MonitoringMetrics {
-  const metrics: MonitoringMetrics = { orderVolume: 0, awaiting: 0, collected: 0 };
-  for (const status of statuses) {
-    const metric = monitoringMetricForStatus(status);
-    if (metric === "Previsto a coletar") metrics.orderVolume += parseNumeric(row[status]);
-    if (metric === "Aguardando coleta") metrics.awaiting += parseNumeric(row[status]);
-    if (metric === "Coletado") metrics.collected += parseNumeric(row[status]);
-  }
-  return metrics;
+  const values = new Map(statuses.map((status) => [status, parseNumeric(row[status])]));
+  return summarizeMonitoringStatusValues(statuses, values, monitoringMeasureForStatus);
+}
+
+function monitoringMeasureForStatus(status: string): "planned" | "awaiting" | "collected" | null {
+  const metric = monitoringMetricForStatus(status);
+  if (metric === "Previsto a coletar") return "planned";
+  if (metric === "Aguardando coleta") return "awaiting";
+  return metric === "Coletado" ? "collected" : null;
 }
 
 interface FirstScanMetrics {
@@ -1079,10 +1081,10 @@ function monitoringMetricValueFromMap(
   statuses: readonly string[],
   metric: MonitoringMetric,
 ): number {
-  return statuses.reduce(
-    (sum, status) => monitoringMetricForStatus(status) === metric ? sum + (values.get(status) ?? 0) : sum,
-    0,
-  );
+  const summary = summarizeMonitoringStatusValues(statuses, values, monitoringMeasureForStatus);
+  if (metric === "Previsto a coletar") return summary.orderVolume;
+  if (metric === "Aguardando coleta") return summary.awaiting;
+  return summary.collected;
 }
 
 function addMonitoringMetrics(target: MonitoringMetrics, value: MonitoringMetrics): void {

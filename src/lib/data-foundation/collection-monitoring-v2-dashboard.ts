@@ -48,6 +48,36 @@ export interface CollectionMonitoringV2Group extends CollectionMonitoringV2Metri
   baseCount: number;
 }
 
+export interface CollectionMonitoringV2BaseDetail {
+  period: string;
+  region: string;
+  base: string;
+  origin: string;
+  rmArea: string;
+  rm: string;
+  rgm: string;
+  planned: number;
+  awaiting: number;
+  collected: number;
+  total: number;
+}
+
+export type CollectionMonitoringV2StatusField =
+  | "status_received_at_base"
+  | "status_dispatched_from_base"
+  | "arrived_sorting_center";
+
+export interface CollectionMonitoringV2StatusComponent {
+  field: CollectionMonitoringV2StatusField;
+  value: number;
+}
+
+export interface CollectionMonitoringV2RegionalStatusGroup extends CollectionMonitoringV2Group {
+  basesWithMovement: number;
+  componentTotal: number;
+  components: CollectionMonitoringV2StatusComponent[];
+}
+
 export interface CollectionMonitoringV2ComparisonSlot {
   key: "d2" | "d1" | "current";
   date: string;
@@ -230,6 +260,123 @@ export function groupCollectionMonitoringV2Rows(
     group.baseCount = bases.get(key)?.size ?? 0;
   }
   return [...groups.values()].sort((left, right) => right.planned - left.planned || left.label.localeCompare(right.label, "pt-BR"));
+}
+
+export type CollectionMonitoringV2SummaryMatrixCell = string | number | null;
+
+export function collectionMonitoringV2RegionalSummaryMatrix(
+  groups: readonly CollectionMonitoringV2Group[],
+  metrics: CollectionMonitoringV2Metrics,
+  mappedBaseCount: number,
+  translate: (label: string) => string = (label) => label,
+): CollectionMonitoringV2SummaryMatrixCell[][] {
+  return [
+    [translate("Regional"), "RGM", translate("Bases vinculadas"), translate("Previsto a coletar"), translate("Aguardando coleta"), translate("Coletado"), translate("Taxa de coleta"), translate("Taxa de pedidos aguardando coleta")],
+    ...groups.map((group) => [group.region, group.rgm, group.baseCount, group.planned, group.awaiting, group.collected, group.collectionRate, group.awaitingRate]),
+    [translate("Total geral"), "—", mappedBaseCount, metrics.planned, metrics.awaiting, metrics.collected, metrics.collectionRate, metrics.awaitingRate],
+  ];
+}
+
+export function collectionMonitoringV2RmSummaryMatrix(
+  groups: readonly CollectionMonitoringV2Group[],
+  metrics: CollectionMonitoringV2Metrics,
+  mappedBaseCount: number,
+  translate: (label: string) => string = (label) => label,
+): CollectionMonitoringV2SummaryMatrixCell[][] {
+  return [
+    [translate("Região do RM"), translate("Responsável do RM"), "RGM", translate("Bases vinculadas"), translate("Previsto a coletar"), translate("Aguardando coleta"), translate("Coletado"), translate("Taxa de coleta"), translate("Taxa de pedidos aguardando coleta")],
+    ...groups.map((group) => [group.rmArea, group.rm, group.rgm, group.baseCount, group.planned, group.awaiting, group.collected, group.collectionRate, group.awaitingRate]),
+    [translate("Total geral"), "—", "—", mappedBaseCount, metrics.planned, metrics.awaiting, metrics.collected, metrics.collectionRate, metrics.awaitingRate],
+  ];
+}
+
+export function groupCollectionMonitoringV2BaseDetails(
+  rows: readonly CollectionMonitoringV2Row[],
+): CollectionMonitoringV2BaseDetail[] {
+  const groups = new Map<string, CollectionMonitoringV2BaseDetail>();
+  for (const row of rows) {
+    const period = String(row.data_date ?? "").slice(0, 10);
+    const identity = JSON.stringify([
+      period, row.region, row.baseCode, row.base, row.origin, row.rmArea, row.rm, row.rgm,
+    ]);
+    const group = groups.get(identity) ?? {
+      period,
+      region: row.region,
+      base: row.base,
+      origin: row.origin,
+      rmArea: row.rmArea,
+      rm: row.rm,
+      rgm: row.rgm,
+      planned: 0,
+      awaiting: 0,
+      collected: 0,
+      total: 0,
+    };
+    group.planned += toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup);
+    group.awaiting += toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup);
+    group.total += toQuantity(row.status_received_at_base) +
+      toQuantity(row.status_dispatched_from_base) + toQuantity(row.arrived_sorting_center);
+    groups.set(identity, group);
+  }
+  return [...groups.values()]
+    .map((group) => ({ ...group, collected: group.planned - group.awaiting }))
+    .sort((left, right) => right.total - left.total || right.period.localeCompare(left.period) || left.base.localeCompare(right.base, "pt-BR"));
+}
+
+export const COLLECTION_MONITORING_V2_STATUS_FIELDS: readonly CollectionMonitoringV2StatusField[] = [
+  "status_received_at_base",
+  "status_dispatched_from_base",
+  "arrived_sorting_center",
+];
+
+export function collectionMonitoringV2RegionalStatusGroups(
+  rows: readonly CollectionMonitoringV2Row[],
+): CollectionMonitoringV2RegionalStatusGroup[] {
+  const rowsByRegion = new Map<string, CollectionMonitoringV2Row[]>();
+  for (const row of rows) {
+    const regionRows = rowsByRegion.get(row.region) ?? [];
+    regionRows.push(row);
+    rowsByRegion.set(row.region, regionRows);
+  }
+
+  return groupCollectionMonitoringV2Rows(rows, "region").map((group) => {
+    const regionRows = rowsByRegion.get(group.region) ?? [];
+    const components = COLLECTION_MONITORING_V2_STATUS_FIELDS.map((field) => ({
+      field,
+      value: regionRows.reduce((sum, row) => sum + toQuantity(row[field]), 0),
+    })).filter((component) => component.value > 0);
+    const basesWithMovement = new Set(regionRows.flatMap((row) => {
+      const hasMovement = COLLECTION_MONITORING_V2_STATUS_FIELDS.some((field) => toQuantity(row[field]) > 0);
+      if (!hasMovement) return [];
+      if (row.mappingConfirmed && row.baseCode !== "—") return [`code:${row.baseCode}`];
+      const rawName = toText(row.source_base_name).toLocaleLowerCase("pt-BR");
+      return rawName && rawName !== "sem base" ? [`name:${rawName}`] : [];
+    })).size;
+    const componentTotal = components.reduce((sum, component) => sum + component.value, 0);
+    return { ...group, basesWithMovement, componentTotal, components };
+  }).filter((group) => group.componentTotal > 0)
+    .sort((left, right) => right.componentTotal - left.componentTotal || left.region.localeCompare(right.region, "pt-BR"));
+}
+
+export function collectionMonitoringV2BaseDetailMatrix(
+  rows: readonly CollectionMonitoringV2BaseDetail[],
+  translate: (label: string) => string = (label) => label,
+): (string | number)[][] {
+  return [
+    ["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Total"].map(translate),
+    ...rows.map((row) => [
+      row.period,
+      row.region,
+      row.base,
+      row.origin,
+      row.rm,
+      row.rgm,
+      row.planned,
+      row.awaiting,
+      row.collected,
+      row.total,
+    ]),
+  ];
 }
 
 export interface CollectionMonitoringV2FilterOptions {
