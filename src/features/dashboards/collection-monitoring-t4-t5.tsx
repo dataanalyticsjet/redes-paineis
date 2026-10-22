@@ -74,6 +74,21 @@ type T4T5Summary = {
   metadata: { publicationId: string; publishedAt: string | null; snapshotAsOf: string | null; publishedRowCount: number } | null;
   totals: T4T5Totals | null;
 };
+type T4T5SellerOutcomeSummary = {
+  snapshotDate: string;
+  identifiedSellers: number;
+  completeSellers: number;
+  partialSellers: number;
+  zeroSellers: number;
+  unclassifiedSellers: number;
+  unidentifiedRecords: number;
+  completePercent: number;
+  partialPercent: number;
+  zeroPercent: number;
+  positiveDistinctJmsPdds: number;
+};
+type T4T5SellerResultState = { queryKey: string; value: T4T5SellerOutcomeSummary };
+type T4T5SellerErrorState = { queryKey: string; message: string };
 type T4T5Group = Record<string, string | number | null>;
 type T4T5GroupPage = { rows: T4T5Group[]; total: number; limit: number; offset: number };
 type T4T5RecordPage = { records: Record<string, unknown>[]; total: number; limit: number; offset: number };
@@ -251,6 +266,9 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
   const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<T4T5Summary | null>(null);
+  const [sellerResult, setSellerResult] = useState<T4T5SellerResultState | null>(null);
+  const [sellerFailure, setSellerFailure] = useState<T4T5SellerErrorState | null>(null);
+  const [sellerRetry, setSellerRetry] = useState(0);
   const [options, setOptions] = useState<T4T5Options>({ regions: [], rms: [], pdds: [], origins: [] });
   const [optionsLoading, setOptionsLoading] = useState(true);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -279,6 +297,10 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
   const activeGroupOffset = groupData[activeGroup]?.offset;
   const requestedGroupOffset = (groupPage - 1) * 100;
   const optionsQueryKey = JSON.stringify([scopeKey, filters.dateFrom, filters.dateTo, reload]);
+  const sellerQueryKey = JSON.stringify([scopeKey, filters, summary?.snapshotDate, reload, sellerRetry]);
+  const sellerSummary = sellerResult?.queryKey === sellerQueryKey ? sellerResult.value : null;
+  const sellerError = sellerFailure?.queryKey === sellerQueryKey ? sellerFailure.message : null;
+  const sellerLoading = status === "ready" && Boolean(summary?.hasData && !sellerSummary && !sellerError);
   const number = useCallback((value: unknown) => formatInteger(value, language), [language]);
 
   useEffect(() => {
@@ -291,6 +313,8 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
       if (!failure.path.includes(SOURCE_ID)) return;
       abortAll();
       setSummary(null);
+      setSellerResult(null);
+      setSellerFailure(null);
       setRecords([]);
       setRecordTotal(0);
       setGroupData({});
@@ -387,6 +411,29 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
   }, [dates.length, filters, reload, scopeKey, t]);
 
   useEffect(() => {
+    if (status !== "ready" || !summary?.hasData || !summary.snapshotDate) {
+      return undefined;
+    }
+    let active = true;
+    const controllers = controllersRef.current;
+    const controller = trackController(controllers);
+    const params = withParams(buildFilters(filters), [["snapshot_date", summary.snapshotDate]]);
+    void requestJson<T4T5SellerOutcomeSummary>(apiPath("seller-summary", params), controller.signal).then((result) => {
+      if (!active || controller.signal.aborted) return;
+      if (result.snapshotDate !== summary.snapshotDate) throw new Error("snapshot_mismatch");
+      setSellerResult({ queryKey: sellerQueryKey, value: result });
+      setSellerFailure(null);
+    }).catch((cause: unknown) => {
+      if (!active || controller.signal.aborted) return;
+      setSellerResult(null);
+      setSellerFailure({ queryKey: sellerQueryKey, message: errorMessage(cause, t) });
+    }).finally(() => {
+      releaseController(controllers, controller);
+    });
+    return () => { active = false; controller.abort(); releaseController(controllers, controller); };
+  }, [filters, reload, scopeKey, sellerQueryKey, sellerRetry, status, summary?.hasData, summary?.snapshotDate, t]);
+
+  useEffect(() => {
     if ((status !== "ready" && status !== "empty") || dates.length === 0 || !filters.dateFrom || !filters.dateTo
       || (filters.dateFrom && filters.dateTo && filters.dateFrom > filters.dateTo)) {
       return undefined;
@@ -481,12 +528,20 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
     return () => { active = false; controller.abort(); releaseController(controllers, controller); };
   }, [activeGroup, activeGroupOffset, filters, groupPage, optionsLoading, reload, requestedGroupOffset, scopeKey, status, summary?.snapshotDate, t]);
 
+  function retrySellerSummary() {
+    setSellerResult(null);
+    setSellerFailure(null);
+    setSellerRetry((value) => value + 1);
+  }
+
   function applyFilters(next: T4T5Filters) {
     const periodChanged = next.dateFrom !== filters.dateFrom || next.dateTo !== filters.dateTo;
     const hasInvalidDateRange = Boolean(next.dateFrom && next.dateTo && next.dateFrom > next.dateTo);
     setRecordPage(1);
     setGroupPage(1);
     setSummary(null);
+    setSellerResult(null);
+    setSellerFailure(null);
     setRecords([]);
     setRecordTotal(0);
     setGroupData({});
@@ -517,6 +572,8 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
     setRecordPage(1);
     setGroupPage(1);
     setSummary(null);
+    setSellerResult(null);
+    setSellerFailure(null);
     setRecords([]);
     setRecordTotal(0);
     setGroupData({});
@@ -561,6 +618,8 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
     setRegionalError(null);
     setGroupError(null);
     setSummary(null);
+    setSellerResult(null);
+    setSellerFailure(null);
     setRecords([]);
     setRecordTotal(0);
     setGroupData({});
@@ -682,13 +741,29 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
           <small>{t("Volume total")}: {number(totals.totalVolume)}</small>
           <i><AlertCircle size={18} /></i>
         </article>
-      </section>
-      <section className="collection-monitoring-t4-t5-kpis">
-        {STATUS_FIELDS.map((field, index) => <article className="collection-monitoring-t4-t5-kpi" key={field}>
-          <span>{t(STATUS_LABELS[field])}</span><strong>{number(totals.statuses[field])}</strong>
-          <small>{t("Soma independente do campo JMS")}</small><i style={{ color: statusColors[index] }}><Activity size={18} /></i>
-        </article>)}
-        <article className="collection-monitoring-t4-t5-kpi"><span>{t("Registros consultados")}</span><strong>{number(totals.records)}</strong><small>{t("Linhas físicas no snapshot")}</small><i><Layers3 size={18} /></i></article>
+        <article className="collection-monitoring-t4-t5-kpi collection-monitoring-t4-t5-summary-kpi collection-monitoring-t4-t5-seller-kpi">
+          <span>{t("Resultado dos Sellers")}</span>
+          <strong>{sellerSummary ? number(sellerSummary.identifiedSellers) : sellerLoading ? "…" : "—"}</strong>
+          <small>{t("Sellers identificados por shopId no snapshot")}</small>
+          {sellerSummary ? <div className="collection-monitoring-t4-t5-seller-results">
+            <div><span>{t("Completo")}</span><b>{number(sellerSummary.completeSellers)} · {formatPercent(sellerSummary.completePercent, language)}</b></div>
+            <div><span>{t("Parcial")}</span><b>{number(sellerSummary.partialSellers)} · {formatPercent(sellerSummary.partialPercent, language)}</b></div>
+            <div><span>{t("Zerado")}</span><b>{number(sellerSummary.zeroSellers)} · {formatPercent(sellerSummary.zeroPercent, language)}</b></div>
+            {sellerSummary.unclassifiedSellers > 0 ? <div><span>{t("Não classificado")}</span><b>{number(sellerSummary.unclassifiedSellers)}</b></div> : null}
+          </div> : null}
+          {sellerSummary?.unidentifiedRecords ? <small>{t("{count} registros sem shopId não entram na contagem", { count: number(sellerSummary.unidentifiedRecords) })}</small> : null}
+          {sellerLoading ? <small role="status">{t("Carregando resultado dos Sellers…")}</small> : null}
+          {sellerError ? <div className="collection-monitoring-t4-t5-seller-error" role="alert"><small>{t("Não foi possível carregar o resultado dos Sellers.")}</small><button type="button" onClick={retrySellerSummary}>{t("Tentar novamente")}</button></div> : null}
+          <i><Layers3 size={18} /></i>
+        </article>
+        <article className="collection-monitoring-t4-t5-kpi collection-monitoring-t4-t5-summary-kpi">
+          <span>{t("Bases")}</span>
+          <strong>{sellerSummary ? number(sellerSummary.positiveDistinctJmsPdds) : sellerLoading ? "…" : "—"}</strong>
+          <small>{t("PDDs JMS distintos com volume operacional positivo")}</small>
+          <small>{t("Regionais oficiais DoomsDay")}: {number(totals.regions)}</small>
+          {sellerError ? <div className="collection-monitoring-t4-t5-seller-error" role="alert"><small>{t("A contagem de PDDs JMS está indisponível.")}</small><button type="button" onClick={retrySellerSummary}>{t("Tentar novamente")}</button></div> : null}
+          <i><MapPin size={18} /></i>
+        </article>
       </section>
       <p className="collection-monitoring-t4-t5-snapshot-note">{t("Snapshot de posição")}: {formatDate(summary.snapshotDate, language)} · {t("As contagens por status são independentes e não representam pedidos únicos.")}</p>
 

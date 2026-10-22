@@ -19,6 +19,7 @@ from app.services.collection_monitoring_t4_t5 import (
     get_detail_page,
     get_filter_options,
     get_group_page,
+    get_seller_outcomes_summary,
 )
 from app.services.data_foundation.contracts import contract_sha256, get_contract
 from app.services.data_foundation.queries import _query_plan
@@ -399,6 +400,17 @@ def test_summary_indicators_match_official_2026_10_20_sample_values():
     assert totals["processingRatePercent"] == pytest.approx(99.3283, abs=0.0001)
     assert totals["awaitingRatePercent"] == pytest.approx(0.6717, abs=0.0001)
 
+    outcomes = get_seller_outcomes_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        snapshot_date=date(2026, 10, 20), date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+    )
+    assert str(outcomes["snapshotDate"]) == str(summary["snapshotDate"])
+    assert outcomes["identifiedSellers"] == 1
+    assert outcomes["completeSellers"] == 0
+    assert outcomes["partialSellers"] == 1
+    assert outcomes["zeroSellers"] == 0
+    assert outcomes["positiveDistinctJmsPdds"] == 1
+
 
 def test_summary_indicator_rates_are_zero_when_volume_denominator_is_zero():
     engine, contract, table = _create_database()
@@ -572,6 +584,10 @@ def test_aborted_t4_t5_facts_are_excluded_even_if_a_stale_head_exists():
         engine, identity=MATRIX_USER, dimension="region", filters=T4T5Filters(),
         snapshot_date=date(2026, 10, 18), limit=100, offset=0,
     )
+    seller_summary = get_seller_outcomes_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        snapshot_date=date(2026, 10, 18), date_from=date(2026, 10, 18), date_to=date(2026, 10, 18),
+    )
 
     assert summary["hasData"] is False
     assert options["snapshotDate"] is None
@@ -580,6 +596,96 @@ def test_aborted_t4_t5_facts_are_excluded_even_if_a_stale_head_exists():
     assert details["total"] == 0
     assert groups["rows"] == []
     assert groups["total"] == 0
+    assert seller_summary["identifiedSellers"] == 0
+    assert seller_summary["positiveDistinctJmsPdds"] == 0
+
+
+def test_seller_outcomes_use_exact_shop_ids_and_respect_official_mapping_scope():
+    engine, contract, table = _create_database()
+    _insert_publication(engine, contract, table, day=20, rows=[
+        {"source_base_name": "PDD SPE", "seller_id": "000123", "collected": 1},
+        {"source_base_name": "PDD SPE", "seller_id": "000124", "awaiting_collection": 2, "collected": 1},
+        {"source_base_name": "PDD CE", "seller_id": "000124", "received": 1},
+        {"reported_origin_region": "SPE", "source_base_name": "Unknown PDD", "seller_id": "ZERO", "awaiting_collection": 5},
+        {"source_base_name": "PDD CE", "seller_id": None, "collected": 2},
+        {"source_base_name": "PDD CE", "seller_id": "   ", "received": 2},
+        {"source_base_name": "PDD SPE", "seller_id": "abc", "collected": 1},
+        {"source_base_name": "PDD SPE", "seller_id": "ABC", "collected": 1},
+        {"source_base_name": "PDD SPE", "seller_id": "123", "collected": 1},
+        {"source_base_name": "PDD 0", "seller_id": "NO-VOLUME", **dict.fromkeys(STATUS_COLUMNS, 0)},
+    ])
+
+    statements: list[str] = []
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        matrix = get_seller_outcomes_summary(
+            engine, identity=MATRIX_USER, filters=T4T5Filters(),
+            snapshot_date=date(2026, 10, 20), date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert matrix["identifiedSellers"] == 7
+    assert matrix["completeSellers"] == 4
+    assert matrix["partialSellers"] == 1
+    assert matrix["zeroSellers"] == 2
+    assert matrix["unclassifiedSellers"] == 0
+    assert matrix["unidentifiedRecords"] == 2
+    assert matrix["positiveDistinctJmsPdds"] == 3
+    assert matrix["completePercent"] == pytest.approx(4 / 7 * 100)
+    assert matrix["partialPercent"] == pytest.approx(1 / 7 * 100)
+    assert matrix["zeroPercent"] == pytest.approx(2 / 7 * 100)
+    assert sum(matrix[key] for key in ("completeSellers", "partialSellers", "zeroSellers", "unclassifiedSellers")) == matrix["identifiedSellers"]
+    assert not any(identifier in str(matrix) for identifier in ("000123", "000124", "NO-VOLUME"))
+
+    seller_queries = [sql for sql in statements if table in sql]
+    assert len(seller_queries) == 1
+    assert "base_mapping_entries" not in seller_queries[0]
+    assert "source_daily_head" in seller_queries[0]
+    assert "publication_state = 'PUBLISHED'" in seller_queries[0]
+
+    for identity in (REGIONAL_ADMIN, {
+        "platform_role": "USER", "organizational_scope": "base", "role": "regional",
+        "home_base": "BASE-SPE", "home_region": "SPE",
+    }):
+        scoped = get_seller_outcomes_summary(
+            engine, identity=identity, filters=T4T5Filters(),
+            snapshot_date=date(2026, 10, 20), date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        )
+        assert scoped["identifiedSellers"] == 5
+        assert scoped["completeSellers"] == 4
+        assert scoped["partialSellers"] == 1
+        assert scoped["zeroSellers"] == 0
+        assert scoped["positiveDistinctJmsPdds"] == 1
+
+    filtered_matrix = get_seller_outcomes_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(region="SPE"),
+        snapshot_date=date(2026, 10, 20), date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+    )
+    assert filtered_matrix["identifiedSellers"] == 5
+    assert filtered_matrix["positiveDistinctJmsPdds"] == 1
+
+    with pytest.raises(DataFoundationError, match="snapshot_date_outside_filter_period"):
+        get_seller_outcomes_summary(
+            engine, identity=MATRIX_USER, filters=T4T5Filters(),
+            snapshot_date=date(2026, 10, 20), date_from=date(2026, 10, 19), date_to=date(2026, 10, 19),
+        )
+
+
+def test_seller_outcomes_exclude_aborted_publications_and_return_empty_counts():
+    engine, contract, table = _create_database()
+    _insert_aborted_snapshot_with_stale_head(engine, contract, table)
+    result = get_seller_outcomes_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        snapshot_date=date(2026, 10, 18), date_from=date(2026, 10, 18), date_to=date(2026, 10, 18),
+    )
+    assert result["identifiedSellers"] == 0
+    assert result["completeSellers"] == 0
+    assert result["partialSellers"] == 0
+    assert result["zeroSellers"] == 0
+    assert result["positiveDistinctJmsPdds"] == 0
 
 
 def test_summary_and_filter_options_each_scan_t4_t5_facts_once():

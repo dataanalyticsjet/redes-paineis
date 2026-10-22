@@ -58,6 +58,7 @@ from app.services.collection_monitoring_t4_t5 import (
     get_detail_page,
     get_filter_options,
     get_group_page,
+    get_seller_outcomes_summary,
 )
 
 
@@ -202,6 +203,43 @@ def collection_monitoring_t4_t5_summary(
                 assigned_driver=assigned_driver, order_origin=order_origin, search=search,
             ),
             date_from=date_from, date_to=date_to,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-monitoring-t4-t5/seller-summary")
+def collection_monitoring_t4_t5_seller_summary(
+    snapshot_date: date = Query(...),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
+    rm_regional: str | None = Query(default=None, max_length=64),
+    base_code: str | None = Query(default=None, max_length=64),
+    source_base_name: str | None = Query(default=None, max_length=191),
+    rm_region: str | None = Query(default=None, max_length=96),
+    rm_responsible: str | None = Query(default=None, max_length=160),
+    customer_name: str | None = Query(default=None, max_length=191),
+    store_name: str | None = Query(default=None, max_length=191),
+    seller_id: str | None = Query(default=None, max_length=64),
+    assigned_driver: str | None = Query(default=None, max_length=191),
+    order_origin: str | None = Query(default=None, max_length=96),
+    search: str | None = Query(default=None, max_length=191),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_seller_outcomes_summary(
+            _engine(), identity=viewer.identity, snapshot_date=snapshot_date,
+            date_from=date_from, date_to=date_to,
+            filters=_t4t5_filters(
+                region=region, rm_regional=rm_regional, base_code=base_code, source_base_name=source_base_name,
+                rm_region=rm_region, rm_responsible=rm_responsible,
+                customer_name=customer_name, store_name=store_name, seller_id=seller_id,
+                assigned_driver=assigned_driver, order_origin=order_origin, search=search,
+            ),
         )
     except DataFoundationError as error:
         raise _error(error) from None

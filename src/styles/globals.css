@@ -9848,11 +9848,17 @@ html[data-theme="dark"] .collection-monitoring-v2-raw-source > summary { color: 
 .collection-monitoring-t4-t5-state h2 { margin: 0 0 4px; color: var(--ink-strong, #172033); font-size: 17px; }
 .collection-monitoring-t4-t5-state p { margin: 0; }
 .collection-monitoring-t4-t5-spin { color: #d71920; animation: collection-monitoring-t4-t5-spin 1s linear infinite; }
-.collection-monitoring-t4-t5-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+
 .collection-monitoring-t4-t5-kpi { position: relative; display: grid; align-content: start; gap: 8px; min-height: 112px; min-width: 0; padding: 15px; overflow: hidden; border: 1px solid var(--border, #e5e7eb); border-radius: 14px; background: var(--card, #fff); box-shadow: var(--shadow); }
 .collection-monitoring-t4-t5-kpi > span { color: var(--muted, #64748b); font-size: 11px; font-weight: 700; text-transform: uppercase; }
-.collection-monitoring-t4-t5-summary-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.collection-monitoring-t4-t5-summary-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
 .collection-monitoring-t4-t5-summary-kpi { min-height: 132px; border-left: 3px solid #d71920; }
+.collection-monitoring-t4-t5-seller-kpi { align-content: start; }
+.collection-monitoring-t4-t5-seller-results { display: grid; gap: 4px; margin-top: 2px; }
+.collection-monitoring-t4-t5-seller-results > div { display: flex; justify-content: space-between; gap: 6px; color: var(--muted, #64748b); font-size: 10px; }
+.collection-monitoring-t4-t5-seller-results b { color: var(--ink-strong, #172033); font-variant-numeric: tabular-nums; text-align: right; }
+.collection-monitoring-t4-t5-seller-error { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.collection-monitoring-t4-t5-seller-error button { padding: 0; border: 0; color: #c5161d; background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
 .collection-monitoring-t4-t5-kpi strong { color: var(--ink-strong, #172033); font-size: clamp(20px, 2.2vw, 28px); font-variant-numeric: tabular-nums; line-height: 1.05; }
 .collection-monitoring-t4-t5-kpi small { color: var(--muted, #64748b); font-size: 10px; }
 .collection-monitoring-t4-t5-kpi > i { position: absolute; top: 13px; right: 13px; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: #d71920; background: rgb(215 25 32 / 7%); }
@@ -9896,14 +9902,14 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 }
 @media (max-width: 760px) {
   .collection-monitoring-t4-t5-card { padding: 12px; }
-  .collection-monitoring-t4-t5-filter-grid, .collection-monitoring-t4-t5-kpis, .collection-monitoring-t4-t5-summary-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .collection-monitoring-t4-t5-filter-grid, .collection-monitoring-t4-t5-summary-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .collection-monitoring-t4-t5-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
   .collection-monitoring-t4-t5-section-heading, .collection-monitoring-t4-t5-toolbar, .collection-monitoring-t4-t5-pagination { align-items: stretch; flex-direction: column; }
   .collection-monitoring-t4-t5-status-row { grid-template-columns: minmax(0, 1fr) auto; }
   .collection-monitoring-t4-t5-status-row .collection-monitoring-t4-t5-track, .collection-monitoring-t4-t5-status-row .collection-monitoring-t4-t5-legend { grid-column: 1 / -1; }
 }
 @media (max-width: 440px) {
-  .collection-monitoring-t4-t5-filter-grid, .collection-monitoring-t4-t5-kpis, .collection-monitoring-t4-t5-summary-kpis, .collection-monitoring-t4-t5-meta { grid-template-columns: 1fr; }
+  .collection-monitoring-t4-t5-filter-grid, .collection-monitoring-t4-t5-summary-kpis, .collection-monitoring-t4-t5-meta { grid-template-columns: 1fr; }
 }
 @media (max-width: 1000px) {
   .collection-monitoring-v2-status-row { grid-template-columns: minmax(110px, .8fr) minmax(110px, .6fr) minmax(150px, 1.2fr); }

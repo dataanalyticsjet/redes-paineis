@@ -19,6 +19,10 @@ test("T4/T5 dashboard starts with the latest published date and queries server s
 
   assert.match(component, /dates\?contract_version=\$\{CONTRACT_VERSION\}&latest_only=true/);
   assert.match(component, /apiPath\("summary"/);
+  assert.match(component, /apiPath\("seller-summary"/);
+  assert.match(component, /result\.snapshotDate !== summary\.snapshotDate/);
+  assert.match(component, /sellerResult\?\.queryKey === sellerQueryKey/);
+  assert.match(component, /JSON\.stringify\(\[scopeKey, filters, summary\?\.snapshotDate, reload, sellerRetry\]\)/);
   assert.match(component, /apiPath\("groups"/);
   assert.match(component, /apiPath\("records"/);
   assert.match(component, /PAGE_SIZE = 50/);
@@ -45,7 +49,7 @@ test("T4/T5 dashboard starts with the latest published date and queries server s
   assert.doesNotMatch(component, /function changeRecordPage\(page: number\) \{[^}]*setSummary\(null\)/);
 });
 
-test("T4/T5 shows the approved processing summary and preserves independent status cards", async () => {
+test("T4/T5 shows four principal cards and preserves status data for the tables", async () => {
   const component = await readFile(new URL("../src/features/dashboards/collection-monitoring-t4-t5.tsx", import.meta.url), "utf8");
 
   for (const field of [
@@ -58,7 +62,12 @@ test("T4/T5 shows the approved processing summary and preserves independent stat
   assert.match(component, /totals\.processingVolume/);
   assert.match(component, /totals\.awaitingCollectionVolume/);
   assert.match(component, /totals\.totalVolume/);
-  assert.match(component, /Soma independente do campo JMS/);
+  assert.equal((component.match(/className="collection-monitoring-t4-t5-kpi collection-monitoring-t4-t5-summary-kpi/g) ?? []).length, 4);
+  assert.doesNotMatch(component, /collection-monitoring-t4-t5-kpis/);
+  assert.doesNotMatch(component, /Soma independente do campo JMS/);
+  assert.match(component, /Resultado dos Sellers/);
+  assert.match(component, /PDDs JMS distintos com volume operacional positivo/);
+  assert.match(component, /Regionais oficiais DoomsDay/);
   assert.match(component, /As contagens por status são independentes e não representam pedidos únicos/);
   assert.doesNotMatch(component, /collectionRate|totalPedidosUnicos/);
 
@@ -81,6 +90,8 @@ test("T4/T5 retains the full source export and shows data state without invented
   assert.match(backend, /stream_results=True/);
   assert.match(backend, /MAX_XLSX_DATA_ROWS/);
   assert.match(api, /def collection_monitoring_t4_t5_export\([\s\S]*?viewer: AuthenticatedViewer = Depends\(get_current_viewer\)/);
+  assert.match(api, /def collection_monitoring_t4_t5_seller_summary\([\s\S]*?viewer: AuthenticatedViewer = Depends\(get_current_viewer\)/);
+  assert.match(backend, /def get_seller_outcomes_summary/);
 });
 
 test("T4/T5 headings and operational statuses use the selected interface language", () => {
@@ -98,6 +109,13 @@ test("T4/T5 headings and operational statuses use the selected interface languag
     "Chegou ao SC",
     "{count} lojas",
     "{count} PDDs",
+    "Resultado dos Sellers",
+    "Sellers identificados por shopId no snapshot",
+    "Completo",
+    "Parcial",
+    "Zerado",
+    "PDDs JMS distintos com volume operacional positivo",
+    "Regionais oficiais DoomsDay",
   ];
 
   for (const source of sources) {

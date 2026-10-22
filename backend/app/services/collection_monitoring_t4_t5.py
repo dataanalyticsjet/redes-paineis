@@ -532,6 +532,120 @@ def get_dashboard_summary(
     )
 
 
+def get_seller_outcomes_summary(
+    engine: Engine,
+    *,
+    identity: dict[str, Any],
+    filters: T4T5Filters,
+    snapshot_date: date,
+    date_from: date | None,
+    date_to: date | None,
+) -> dict[str, object]:
+    """Count seller outcomes and positive raw JMS PDDs for one authorized snapshot."""
+    if date_from and date_to and date_from > date_to:
+        raise DataFoundationError("date_range_invalid", 422)
+    if (date_from is not None and snapshot_date < date_from) or (
+        date_to is not None and snapshot_date > date_to
+    ):
+        raise DataFoundationError("snapshot_date_outside_filter_period", 422)
+
+    plan, where, parameters = _query(
+        engine, identity, filters, date_from=snapshot_date, date_to=snapshot_date,
+    )
+    _assert_map_available(engine)
+    # Only a backend-resolved MATRIX scope without organization-dependent filters
+    # may skip the DoomsDay row join. Regional/base queries retain the scoped join.
+    from_sql = (
+        plan.fact_from_sql
+        if _matrix_mapping_filters_absent(identity, filters)
+        else plan.from_sql
+    )
+    seller_key = _mapping_key_sql("scoped_rows.seller_id", engine.dialect.name)
+    pdd_key = _mapping_key_sql("scoped_rows.source_base_name", engine.dialect.name)
+    processing_columns = tuple(
+        field for field in STATUS_COLUMNS if field != "awaiting_collection"
+    )
+    processing_sql = " + ".join(
+        f"COALESCE(fact.`{field}`, 0)" for field in processing_columns
+    )
+    operational_sql = " + ".join(
+        f"COALESCE(fact.`{field}`, 0)" for field in STATUS_COLUMNS
+    )
+    with engine.connect() as connection:
+        row = connection.execute(text(f"""
+            WITH scoped_rows AS (
+                SELECT fact.seller_id, fact.source_base_name,
+                       ({processing_sql}) AS processing_volume,
+                       COALESCE(fact.awaiting_collection, 0) AS awaiting_volume,
+                       ({operational_sql}) AS operational_volume
+                {from_sql}
+                WHERE {where}
+            ), seller_groups AS (
+                SELECT {seller_key} AS seller_key,
+                       SUM(processing_volume) AS processing_volume,
+                       SUM(awaiting_volume) AS awaiting_volume
+                FROM scoped_rows
+                WHERE seller_id IS NOT NULL AND TRIM(seller_id) <> ''
+                GROUP BY {seller_key}
+            ), pdd_groups AS (
+                SELECT {pdd_key} AS pdd_key, SUM(operational_volume) AS operational_volume
+                FROM scoped_rows
+                WHERE source_base_name IS NOT NULL AND TRIM(source_base_name) <> ''
+                GROUP BY {pdd_key}
+            ), seller_metrics AS (
+                SELECT COUNT(*) AS identified_sellers,
+                       COALESCE(SUM(CASE WHEN processing_volume > 0 AND awaiting_volume = 0
+                                         THEN 1 ELSE 0 END), 0) AS complete_sellers,
+                       COALESCE(SUM(CASE WHEN processing_volume > 0 AND awaiting_volume > 0
+                                         THEN 1 ELSE 0 END), 0) AS partial_sellers,
+                       COALESCE(SUM(CASE WHEN processing_volume = 0
+                                         THEN 1 ELSE 0 END), 0) AS zero_sellers,
+                       COALESCE(SUM(CASE WHEN (processing_volume > 0 AND awaiting_volume < 0)
+                                               OR processing_volume < 0
+                                         THEN 1 ELSE 0 END), 0) AS unclassified_sellers
+                FROM seller_groups
+            ), unidentified_metrics AS (
+                SELECT COUNT(*) AS unidentified_records
+                FROM scoped_rows
+                WHERE seller_id IS NULL OR TRIM(seller_id) = ''
+            ), pdd_metrics AS (
+                SELECT COALESCE(SUM(CASE WHEN operational_volume > 0
+                                         THEN 1 ELSE 0 END), 0) AS positive_jms_pdds
+                FROM pdd_groups
+            )
+            SELECT seller_metrics.*, unidentified_metrics.unidentified_records,
+                   pdd_metrics.positive_jms_pdds
+            FROM seller_metrics
+            CROSS JOIN unidentified_metrics
+            CROSS JOIN pdd_metrics
+        """), parameters).mappings().one()
+
+    identified = int(row["identified_sellers"] or 0)
+    complete = int(row["complete_sellers"] or 0)
+    partial = int(row["partial_sellers"] or 0)
+    zero = int(row["zero_sellers"] or 0)
+    unclassified = int(row["unclassified_sellers"] or 0)
+
+    def percentage(value: int) -> float:
+        return value * 100 / identified if identified else 0.0
+
+    return {
+        "sourceId": SOURCE_ID,
+        "contractVersion": CONTRACT_VERSION,
+        "snapshotDate": snapshot_date,
+        "identifiedSellers": identified,
+        "completeSellers": complete,
+        "partialSellers": partial,
+        "zeroSellers": zero,
+        "unclassifiedSellers": unclassified,
+        "unidentifiedRecords": int(row["unidentified_records"] or 0),
+        "completePercent": percentage(complete),
+        "partialPercent": percentage(partial),
+        "zeroPercent": percentage(zero),
+        "positiveDistinctJmsPdds": int(row["positive_jms_pdds"] or 0),
+    }
+
+
 def get_group_page(
     engine: Engine,
     *,
