@@ -210,6 +210,122 @@ export function summarizeCollectionRateV3Attempts(
   };
 }
 
+export interface CollectionRateV3RegionalAttemptDay {
+  orders: number;
+  quantityToCollect: number;
+  collectedPlusAttempts: number;
+  rate: number | null;
+}
+
+export interface CollectionRateV3RegionalAttemptRow {
+  region: string;
+  rgm: string;
+  days: CollectionRateV3RegionalAttemptDay[];
+  totalOrders: number;
+}
+
+export interface CollectionRateV3RegionalAttemptSummary {
+  dates: string[];
+  rows: CollectionRateV3RegionalAttemptRow[];
+  totals: CollectionRateV3RegionalAttemptDay[];
+  totalOrders: number;
+  unassigned: { records: number; orders: number; quantityToCollect: number };
+}
+
+export function formatCollectionRateV3RegionalAttemptRate(value: number | null, locale: string): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat(locale, {
+    style: "percent",
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function emptyRegionalAttemptDay(): Omit<CollectionRateV3RegionalAttemptDay, "rate"> {
+  return { orders: 0, quantityToCollect: 0, collectedPlusAttempts: 0 };
+}
+
+function addRegionalAttemptRow(
+  target: Omit<CollectionRateV3RegionalAttemptDay, "rate">,
+  row: CollectionRateV3DashboardRow,
+): void {
+  target.orders += quantity(row.order_quantity);
+  target.quantityToCollect += quantity(row.quantity_to_collect);
+  target.collectedPlusAttempts += quantity(row.collected_plus_attempts_quantity);
+}
+
+function finishRegionalAttemptDay(
+  value: Omit<CollectionRateV3RegionalAttemptDay, "rate">,
+): CollectionRateV3RegionalAttemptDay {
+  return { ...value, rate: value.quantityToCollect > 0 ? value.collectedPlusAttempts / value.quantityToCollect : null };
+}
+
+/**
+ * Builds the regional presentation from rows already loaded and authorized by the Data Foundation.
+ * Regional labels follow the source's proxyAreaName (reported_region); RGM comes from the
+ * existing official NEW BI region-to-RGM mapping. Each selected day remains independent.
+ */
+export function summarizeCollectionRateV3RegionalAttempts(
+  rows: readonly CollectionRateV3DashboardRow[],
+  selectedDates: readonly string[],
+): CollectionRateV3RegionalAttemptSummary {
+  const dates = [...new Set(selectedDates.map(text).filter(Boolean))].sort();
+  const dateSet = new Set(dates);
+  const regionGroups = new Map<string, Map<string, Omit<CollectionRateV3RegionalAttemptDay, "rate">>>();
+  const totalByDate = new Map<string, Omit<CollectionRateV3RegionalAttemptDay, "rate">>();
+  const unassigned = { records: 0, orders: 0, quantityToCollect: 0 };
+
+  for (const row of rows) {
+    const date = text(row.data_date);
+    if (!dateSet.has(date)) continue;
+    const region = text(row.reported_region);
+    if (!region) {
+      unassigned.records += 1;
+      unassigned.orders += quantity(row.order_quantity);
+      unassigned.quantityToCollect += quantity(row.quantity_to_collect);
+      continue;
+    }
+
+    const byDate = regionGroups.get(region) ?? new Map();
+    const regionalDay = byDate.get(date) ?? emptyRegionalAttemptDay();
+    addRegionalAttemptRow(regionalDay, row);
+    byDate.set(date, regionalDay);
+    regionGroups.set(region, byDate);
+
+    const totalDay = totalByDate.get(date) ?? emptyRegionalAttemptDay();
+    addRegionalAttemptRow(totalDay, row);
+    totalByDate.set(date, totalDay);
+  }
+
+  const regionalRows = [...regionGroups.entries()].map(([region, byDate]) => {
+    const days = dates.map((date) => finishRegionalAttemptDay(byDate.get(date) ?? emptyRegionalAttemptDay()));
+    return {
+      region,
+      rgm: officialRgmForRegion(region) ?? UNASSIGNED_RGM,
+      days,
+      totalOrders: days.reduce((sum, day) => sum + day.orders, 0),
+    };
+  });
+  const latestDateIndex = Math.max(0, dates.length - 1);
+  regionalRows.sort((left, right) => {
+    const leftRate = left.days[latestDateIndex]?.rate ?? null;
+    const rightRate = right.days[latestDateIndex]?.rate ?? null;
+    if (leftRate === null && rightRate !== null) return 1;
+    if (leftRate !== null && rightRate === null) return -1;
+    if (leftRate !== null && rightRate !== null && leftRate !== rightRate) return rightRate - leftRate;
+    return left.region.localeCompare(right.region, "pt-BR", { numeric: true });
+  });
+  const totals = dates.map((date) => finishRegionalAttemptDay(totalByDate.get(date) ?? emptyRegionalAttemptDay()));
+
+  return {
+    dates,
+    rows: regionalRows,
+    totals,
+    totalOrders: totals.reduce((sum, day) => sum + day.orders, 0),
+    unassigned,
+  };
+}
+
 function groupKey(row: CollectionRateV3DashboardRow, dimension: "region" | "rmArea"): string {
   return dimension === "region" ? row.region : [row.rmArea, row.rm, row.rgm].join("\u0000");
 }

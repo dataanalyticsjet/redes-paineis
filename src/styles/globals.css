@@ -5526,6 +5526,10 @@ tbody tr:hover td {
   font-size: 11.5px;
 }
 
+.dashboard-main-taxa-v2 .taxa-v2-regional-attempts-table-single {
+  min-width: 640px;
+}
+
 .dashboard-main-taxa-v2 .taxa-v2-summary-table th,
 .dashboard-main-taxa-v2 .taxa-v2-summary-table td {
   height: 38px;

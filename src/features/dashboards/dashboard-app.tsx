@@ -125,8 +125,10 @@ import {
   summarizeCollectionRateV3Daily,
   summarizeCollectionRateV3Monthly,
   summarizeCollectionRateV3Origins,
+  summarizeCollectionRateV3RegionalAttempts,
   collectionRateV3ExcelNumberFormat,
   collectionRateV3ExcelValue,
+  formatCollectionRateV3RegionalAttemptRate,
   formatCollectionRateV3Cell,
   type CollectionRateV3DashboardRow,
   type CollectionRateV3Filters,
@@ -5592,13 +5594,22 @@ export function DashboardApp() {
     () => filterCollectionRateV3Rows(taxaV2Rows, taxaV2Filters),
     [taxaV2Rows, taxaV2Filters],
   );
+  const taxaV2RegionalDates = useMemo(() => {
+    const publishedDates = [...new Set(taxaV2Rows.map((row) => String(row.data_date)))].sort();
+    if (publishedDates.length > 0) return publishedDates;
+    const { dateFrom, dateTo } = collectionRateV2State.period;
+    return dateFrom && dateFrom === dateTo ? [dateFrom] : [];
+  }, [collectionRateV2State.period, taxaV2Rows]);
   const taxaV2CardSummaries = useMemo(
     () => summarizeCollectionRateV3Cards(taxaV2FilteredRows),
     [taxaV2FilteredRows],
   );
   const taxaV2Summary = taxaV2CardSummaries.totals;
   const taxaV2AttemptRate = taxaV2CardSummaries.attempts;
-  const taxaV2ByRegion = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "region"), [taxaV2FilteredRows]);
+  const taxaV2RegionalAttempts = useMemo(
+    () => summarizeCollectionRateV3RegionalAttempts(taxaV2FilteredRows, taxaV2RegionalDates),
+    [taxaV2FilteredRows, taxaV2RegionalDates],
+  );
   const taxaV2ByRmArea = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
   const taxaV2Daily = useMemo(() => summarizeCollectionRateV3Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
   const taxaV2Monthly = useMemo(() => summarizeCollectionRateV3Monthly(taxaV2FilteredRows), [taxaV2FilteredRows]);
@@ -9165,8 +9176,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
 
                   <section className="charts-grid taxa-v2-summary-grid">
                     <article className="chart-card">
-                      <div className="card-heading"><div><span className="card-eyebrow">{t("POR REGIONAL")}</span><h2>{t("Taxa com tentativa por Regional")}</h2><p>{t("A taxa com tentativa e os valores derivados dela estão pendentes; os pedidos usam SUM(totalCount).")}</p></div></div>
-                      <div className="taxa-poc-table-wrap taxa-v2-summary-table-wrap"><table className="dashboard-data-table taxa-poc-table taxa-v2-summary-table taxa-v2-regional-summary-table taxa-poc-regional-rgm-table" data-testid="taxa-v2-regional-summary"><thead><tr><th>{t("Regional")}</th><th>RGM</th><th>{t("Bases")}</th>{taxaV2Dates.map((date) => <th className="taxa-poc-date-header" key={date}><span>{formatDate(date, true)}</span><small>{t("Taxa tentativa / pedidos")}</small></th>)}<th>{t("Total de pedidos")}</th><th>{t("Taxa de coleta")}</th></tr></thead><tbody>{taxaV2ByRegion.map((row) => <tr key={row.key}><th><span>{t(row.label)}</span></th><td>{t(row.rgm)}</td><td>{formatNumber(row.baseCount)}</td>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(row.daily.get(date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(row.totalOrders)}</td><td>{formatTaxaRate(row.collectionRate)}</td></tr>)}</tbody><tfoot><tr><th colSpan={3}>{t("Total geral")}</th>{taxaV2Dates.map((date) => <td key={date}><strong className="empty">{t("Pendente")}</strong><small>{formatNumber(taxaV2Daily.find((point) => point.date === date)?.totalOrders ?? 0)}</small></td>)}<td>{formatNumber(taxaV2Summary.totalOrders)}</td><td>{formatTaxaRate(taxaV2Summary.collectionRate)}</td></tr></tfoot></table></div>
+                      <div className="card-heading"><div><span className="card-eyebrow">{t("POR REGIONAL")}</span><h2>{t("Taxa de coleta com tentativa por regional — período selecionado")}</h2><p>{t("Pedidos = SUM(totalCount). Taxa diária = SUM(Pedidos coletados + Tentativas de coleta) / SUM(Qtd a coletar). Em vários dias, cada data é exibida separadamente; não há taxa do período.")}</p></div></div>
+                      <div className="taxa-poc-table-wrap taxa-v2-summary-table-wrap"><table className={`dashboard-data-table taxa-poc-table taxa-v2-summary-table taxa-v2-regional-attempts-table${taxaV2RegionalAttempts.dates.length <= 1 ? " taxa-v2-regional-attempts-table-single" : ""}`} data-testid="taxa-v2-regional-summary"><thead><tr><th>{t("Regional")}</th><th>RGM</th>{taxaV2RegionalAttempts.dates.map((date) => <th className="taxa-poc-date-header" key={date}><span>{formatDate(date, true).toLocaleUpperCase(dashboardLocale(activeDashboardLanguage()))}</span><small>{formatWeekday(date)}</small><small>{t("Taxa de coleta com tentativa")}</small></th>)}<th>{t("Total de pedidos")}</th></tr></thead><tbody>{taxaV2RegionalAttempts.rows.map((row) => <tr key={row.region}><th scope="row"><span>{row.region}</span></th><td>{t(row.rgm)}</td>{row.days.map((day, index) => <td key={taxaV2RegionalAttempts.dates[index]}><strong className={day.rate === null ? "empty" : ""}>{formatCollectionRateV3RegionalAttemptRate(day.rate, dashboardLocale(activeDashboardLanguage()))}</strong></td>)}<td>{formatNumber(row.totalOrders)}</td></tr>)}{taxaV2RegionalAttempts.rows.length === 0 ? <tr><td colSpan={taxaV2RegionalAttempts.dates.length + 3}><EmptyChart message={t("Não há regionais com movimento para os filtros selecionados.")} /></td></tr> : null}</tbody><tfoot><tr><th colSpan={2}>{t("Total geral")}</th>{taxaV2RegionalAttempts.totals.map((day, index) => <td key={taxaV2RegionalAttempts.dates[index]}><strong className={day.rate === null ? "empty" : ""}>{formatCollectionRateV3RegionalAttemptRate(day.rate, dashboardLocale(activeDashboardLanguage()))}</strong></td>)}<td>{formatNumber(taxaV2RegionalAttempts.totalOrders)}</td></tr></tfoot></table></div>
+                      {taxaV2RegionalAttempts.unassigned.records > 0 ? <p className="filter-note taxa-v2-regional-attempts-note" data-testid="taxa-v2-regional-attempts-note">{t("{orders} pedidos sem Regional ({planned} previstos) ficam fora do subtotal desta tabela; permanecem preservados na fonte e auditáveis nos escopos autorizados.", { orders: formatNumber(taxaV2RegionalAttempts.unassigned.orders), planned: formatNumber(taxaV2RegionalAttempts.unassigned.quantityToCollect) })}</p> : null}
                     </article>
                     <article className="chart-card">
                       <div className="card-heading"><div><span className="card-eyebrow">RM</span><h2>{t("Taxa com tentativa por RM")}</h2><p>{t("Agrupamento organizacional pelo DoomsDay; a taxa com tentativa permanece pendente.")}</p></div></div>

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   collectionRateV3ExcelNumberFormat,
   collectionRateV3ExcelValue,
+  formatCollectionRateV3RegionalAttemptRate,
   collectionRateV3FilterOptions,
   filterCollectionRateV3Rows,
   formatCollectionRateV3Cell,
@@ -15,12 +16,15 @@ import {
   summarizeCollectionRateV3Daily,
   summarizeCollectionRateV3Monthly,
   summarizeCollectionRateV3Origins,
+  summarizeCollectionRateV3RegionalAttempts,
 } from "../src/lib/data-foundation/collection-rate-v3-dashboard.ts";
 import {
   COLLECTION_RATE_V3_COLUMNS,
   COLLECTION_RATE_V3_HEADERS,
   type CollectionRateV3Record,
 } from "../src/lib/data-foundation/collection-rate-v3.ts";
+import { officialRgmForRegion, UNASSIGNED_RGM } from "../src/lib/responsibility.ts";
+import { translateDashboardText } from "../src/lib/i18n.ts";
 
 function record(overrides: Partial<CollectionRateV3Record> = {}): CollectionRateV3Record {
   return {
@@ -250,6 +254,132 @@ test("single-pass V3 card summaries and filter options preserve existing results
   assert.deepEqual(summarizeCollectionRateV3Daily(rows).map((item) => item.date), ["2026-10-18", "2026-10-19"]);
   assert.deepEqual(summarizeCollectionRateV3Monthly(rows).map((item) => item.month), ["2026-10"]);
   assert.deepEqual(summarizeCollectionRateV3Origins(rows).map((item) => item.origin), ["Marketplace", "Loja"]);
+});
+
+test("regional attempt table reconciles the 21 October official workbook figures", () => {
+  const source = [
+    ["CE", 6_116, 63, 63],
+    ["SPN", 140_135, 106_834, 106_800],
+    ["MG", 133_168, 105_881, 105_103],
+    ["SPS", 368_663, 319_075, 315_415],
+    ["SPE", 476_714, 399_463, 394_483],
+    ["GP", 31_252, 18_029, 17_646],
+    ["RJ", 203_244, 171_673, 164_993],
+    ["PR", 33_944, 21_386, 20_131],
+    ["SR", 34_070, 22_332, 18_420],
+    ["BA", 383, 0, 0],
+    ["", 30, 3, 0],
+  ] as const;
+  const rows = source.map(([reported_region, order_quantity, quantity_to_collect, collected_plus_attempts_quantity], index) =>
+    mapCollectionRateV3Record(record({
+      deadline_at: "2026-10-21 00:00:00",
+      reported_region: reported_region || null,
+      source_row_no: index + 2,
+      order_quantity,
+      quantity_to_collect,
+      collected_plus_attempts_quantity,
+    })),
+  );
+  const summary = summarizeCollectionRateV3RegionalAttempts(rows, ["2026-10-21"]);
+
+  assert.deepEqual(summary.dates, ["2026-10-21"]);
+  assert.equal(2 + summary.dates.length + 1, 4);
+  assert.deepEqual(summary.rows.map((row) => row.region), ["CE", "SPN", "MG", "SPS", "SPE", "GP", "RJ", "PR", "SR", "BA"]);
+  const roundedRates = summary.rows.map(({ days }) => {
+    const rate = days[0]?.rate;
+    return rate === null || rate === undefined ? null : Math.round(rate * 1000) / 10;
+  });
+  assert.deepEqual(roundedRates, [100, 100, 99.3, 98.9, 98.8, 97.9, 96.1, 94.1, 82.5, null]);
+  assert.equal(summary.rows.find((row) => row.region === "CE")?.days[0]?.rate, 1);
+  assert.equal(summary.rows.find((row) => row.region === "BA")?.days[0]?.rate, null);
+  assert.equal(summary.rows.find((row) => row.region === "CE")?.rgm, officialRgmForRegion("CE"));
+  assert.equal(summary.rows.find((row) => row.region === "BA")?.rgm, officialRgmForRegion("BA"));
+  assert.equal(formatCollectionRateV3RegionalAttemptRate(summary.rows[0]?.days[0]?.rate ?? null, "pt-BR"), "100,0%");
+  assert.equal(formatCollectionRateV3RegionalAttemptRate(null, "pt-BR"), "—");
+  assert.equal(summary.totalOrders, 1_427_689);
+  assert.equal(summary.totals[0]?.quantityToCollect, 1_164_736);
+  assert.equal(summary.totals[0]?.collectedPlusAttempts, 1_143_054);
+  assert.ok(Math.abs((summary.totals[0]?.rate ?? 0) - 0.9813846227814716) < 1e-12);
+  assert.equal(formatCollectionRateV3RegionalAttemptRate(summary.totals[0]?.rate ?? null, "pt-BR"), "98,1%");
+  assert.deepEqual(summary.unassigned, { records: 1, orders: 30, quantityToCollect: 3 });
+  assert.ok(summary.rows.every((row) => row.days.length === 1));
+});
+
+test("regional attempt table shows independent daily rates and never creates a period rate", () => {
+  const rows = [
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-20 00:00:00", reported_region: "CE", order_quantity: 10, quantity_to_collect: 10, collected_plus_attempts_quantity: 8 })),
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-20 00:00:00", reported_region: "SPN", source_row_no: 3, order_quantity: 20, quantity_to_collect: 20, collected_plus_attempts_quantity: 10 })),
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-21 00:00:00", reported_region: "CE", source_row_no: 4, order_quantity: 20, quantity_to_collect: 20, collected_plus_attempts_quantity: 18 })),
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-21 00:00:00", reported_region: "SPN", source_row_no: 5, order_quantity: 10, quantity_to_collect: 10, collected_plus_attempts_quantity: 6 })),
+  ];
+  const summary = summarizeCollectionRateV3RegionalAttempts(rows, ["2026-10-21", "2026-10-20"]);
+
+  assert.deepEqual(summary.dates, ["2026-10-20", "2026-10-21"]);
+  assert.deepEqual(summary.totals.map((day) => day.rate), [0.6, 0.8]);
+  assert.equal(summary.rows.find((row) => row.region === "CE")?.totalOrders, 30);
+  assert.deepEqual(summary.rows.find((row) => row.region === "CE")?.days.map((day) => day.rate), [0.8, 0.9]);
+  assert.equal("periodRate" in summary, false);
+});
+
+test("regional attempt table keeps the authorized filtered subset and handles no data", () => {
+  const regional = mapCollectionRateV3Record(record({
+    reported_region: "CE",
+    resolved_base_code: "CE-01",
+    effective_base_code: "CE-01",
+    mapping_resolution: "CODE_MATCH",
+    effective_mapping_resolution: "CODE_MATCH",
+    mapped_region: "CE",
+    mapped_base_name: "Base Ceará",
+    order_quantity: 12,
+    quantity_to_collect: 10,
+    collected_plus_attempts_quantity: 9,
+  }));
+  const other = mapCollectionRateV3Record(record({
+    reported_region: "SPN",
+    source_row_no: 3,
+    resolved_base_code: "SPN-01",
+    effective_base_code: "SPN-01",
+    mapping_resolution: "CODE_MATCH",
+    effective_mapping_resolution: "CODE_MATCH",
+    mapped_region: "SPN",
+    mapped_base_name: "Base Norte",
+    order_quantity: 50,
+    quantity_to_collect: 40,
+    collected_plus_attempts_quantity: 35,
+  }));
+  const filtered = filterCollectionRateV3Rows([regional, other], { regions: new Set(["CE"]) });
+  const summary = summarizeCollectionRateV3RegionalAttempts(filtered, ["2026-10-13"]);
+  assert.deepEqual(summary.rows.map((row) => row.region), ["CE"]);
+  assert.equal(summary.totalOrders, 12);
+
+  const noRows = summarizeCollectionRateV3RegionalAttempts([], ["2026-10-21"]);
+  assert.deepEqual(noRows.rows, []);
+  assert.equal(noRows.totals[0]?.rate, null);
+  assert.equal(noRows.totalOrders, 0);
+});
+
+test("regional table markup contains only the requested four column families", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const tableStart = source.indexOf('data-testid="taxa-v2-regional-summary"');
+  const tableEnd = source.indexOf("</table>", tableStart);
+  assert.ok(tableStart >= 0 && tableEnd > tableStart);
+  const table = source.slice(tableStart, tableEnd);
+  assert.match(table, /t\("Regional"\)/);
+  assert.match(table, /RGM/);
+  assert.match(table, /taxaV2RegionalAttempts\.dates\.map/);
+  assert.match(table, /t\("Total de pedidos"\)/);
+  assert.doesNotMatch(table, /t\("Bases"\)|t\("Taxa de coleta"\)|Pendente/);
+  assert.match(table, /formatDate\(date, true\)\.toLocaleUpperCase/);
+  assert.match(table, /formatWeekday\(date\)/);
+  assert.equal(officialRgmForRegion("not-a-region"), undefined);
+  assert.equal(UNASSIGNED_RGM, "Sem RGM");
+});
+
+test("regional attempt table notes and title are translated to English and Simplified Chinese", () => {
+  assert.equal(translateDashboardText("en", "Taxa de coleta com tentativa por regional — período selecionado"), "Collection attempt rate by region — selected period");
+  assert.equal(translateDashboardText("zh", "Taxa de coleta com tentativa por regional — período selecionado"), "各区域所选周期尝试揽收率");
+  assert.notEqual(translateDashboardText("en", "Pedidos = SUM(totalCount). Taxa diária = SUM(Pedidos coletados + Tentativas de coleta) / SUM(Qtd a coletar). Em vários dias, cada data é exibida separadamente; não há taxa do período."), "Pedidos = SUM(totalCount). Taxa diária = SUM(Pedidos coletados + Tentativas de coleta) / SUM(Qtd a coletar). Em vários dias, cada data é exibida separadamente; não há taxa do período.");
 });
 
 test("V3 numeric formatting and Excel export preserve native numeric values", () => {
