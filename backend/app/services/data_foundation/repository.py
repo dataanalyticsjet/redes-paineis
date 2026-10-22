@@ -600,6 +600,8 @@ def create_preview_job(
     request_id: str | None,
 ) -> str:
     contract = get_contract(source_id, summary.contract_version)
+    if source_id == "base_mapping_official" and contract.version >= 2:
+        raise DataFoundationError("mapping_candidate_endpoint_required", 409)
     job_id = uuid.uuid4()
     status = "VALIDATED" if summary.can_publish else "INVALID"
     with connection.begin():
@@ -1120,6 +1122,8 @@ def publish_import_job(
     binary_job_id = _uuid_bytes(job_id)
     with engine.begin() as connection:
         job = load_import_job(connection, job_id, lock=True)
+        if job["source_id"] == "base_mapping_official":
+            raise DataFoundationError("mapping_candidate_publication_not_enabled", 409)
         if job["submitted_by_user_id"] != actor_user_id and job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
             raise DataFoundationError("import_job_not_publishable", 409)
         if job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
@@ -2081,6 +2085,8 @@ def validate_job_again(
         if job["submitted_by_user_id"] != actor_user_id:
             raise DataFoundationError("import_job_not_found", 404)
         source_id = str(job["source_id"])
+        if source_id == "base_mapping_official" and int(job["contract_version"]) >= 2:
+            raise DataFoundationError("mapping_candidate_repreview_required", 409)
         try:
             contract = get_contract(source_id, int(job["contract_version"]))
         except KeyError:

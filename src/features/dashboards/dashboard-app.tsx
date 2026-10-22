@@ -1,5 +1,7 @@
 "use client";
 
+import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revision.ts";
+
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 
 import { AssistantHome } from "../home/assistant-home";
@@ -3084,7 +3086,8 @@ export function DashboardApp() {
   );
   const isMatrixAdminViewer = canReadMonitoringV2(viewerIdentity);
   const isAuthorizedDashboardViewer = canReadDashboardV2Data(viewerIdentity);
-  const dashboardCacheIdentity = dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity);
+  const [mappingEpoch, setMappingEpoch] = useState(0);
+  const dashboardCacheIdentity = `${dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity)}:map:${mappingEpoch}`;
   const regionalAccessPendingMessage = viewerIdentity?.region_resolution_status === "SYNC_FAILED"
     ? t("Não foi possível confirmar sua regional no Feishu. Seus dados estão temporariamente indisponíveis. Aguarde uma nova sincronização ou solicite liberação ao administrador.")
     : t("Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.");
@@ -3112,6 +3115,19 @@ export function DashboardApp() {
     jtMonitoringV2RequestRef.current = null;
     setJtMonitoringV2State((current) => ({ ...current, status: "idle", loading: false, records: [], totalAvailable: 0, loadedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, dateCountsSignature: null, error: null }));
   }, []);
+  useEffect(() => {
+    if (!viewerAuthorization || !isAuthorizedDashboardViewer || !Object.hasOwn(DASHBOARD_V2_SOURCE_BY_PANEL, view)) return undefined;
+    return monitorMappingRevision(apiFetch, () => {
+      clearProtectedDashboardData();
+      setDashboardAvailability({ status: "idle" });
+      setMappingEpoch(value => value + 1);
+    }, {
+      setInterval: (callback, ms) => window.setInterval(callback, ms),
+      clearInterval: id => window.clearInterval(id as number),
+      addFocus: callback => window.addEventListener("focus", callback),
+      removeFocus: callback => window.removeEventListener("focus", callback),
+    });
+  }, [clearProtectedDashboardData, isAuthorizedDashboardViewer, view, viewerAuthorization]);
   const applyViewerIdentity = useCallback((identity: ViewerIdentity) => {
     const previous = viewerIdentityRef.current;
     if (previous && !sameViewerIdentity(previous, identity)) {
@@ -3198,7 +3214,7 @@ export function DashboardApp() {
       window.clearTimeout(loadingTimer);
       controller.abort();
     };
-  }, [isFirstMileUnderReview, isAuthorizedDashboardViewer, view, viewerAuthorization]);
+  }, [isFirstMileUnderReview, isAuthorizedDashboardViewer, mappingEpoch, view, viewerAuthorization]);
 
   useEffect(() => {
     monitoringFilterSnapshot.current = {
@@ -3964,7 +3980,7 @@ export function DashboardApp() {
     return () => {
       active = false;
     };
-  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, isFirstMileUnderReview, isMatrixAdminViewer, view, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
+  }, [applyBipagemLoadedData, applyDamageLoadedData, applyLoadedData, applyMovementLoadedData, applySellerPerformanceLoadedData, applyTaxaLoadedData, isFirstMileUnderReview, isMatrixAdminViewer, mappingEpoch, view, viewerAuthorization, viewerIdentity, viewerIdentity?.region]);
 
   useEffect(() => {
     if (view !== "monitoramento" || !isFirstMileUnderReview || !viewerAuthorization || !isAuthorizedDashboardViewer || !dashboardSourcesReady || !import.meta.env.DEV || !referenceBaseTestRequested) return undefined;

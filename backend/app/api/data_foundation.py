@@ -49,6 +49,8 @@ from app.services.data_foundation.repository import (
     validate_job_again,
 )
 from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
+from app.services.data_foundation.network_directory_candidate import preview_network_directory
+from app.services.data_foundation.network_directory_versioning import prepare_network_directory_candidate
 from app.services.collection_monitoring_v2_retention import get_regional_retention_table
 from app.services.collection_monitoring_t4_t5 import (
     MAX_GROUP_PAGE_SIZE,
@@ -599,6 +601,73 @@ async def preview_import(
     except OSError:
         raise HTTPException(status_code=503, detail="import_storage_unavailable") from None
     return {"jobId": job_id, **summary.as_api_dict()}
+
+
+@router.post("/base-mapping/network-directory/preview")
+async def preview_network_directory_route(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    """Read-only candidate review; never approves or replaces the active map."""
+    _require_feature(imports=True)
+    _same_origin(request)
+    _safe_upload_name(file.filename)
+    content = await file.read(32 * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="workbook_empty")
+    if len(content) > 32 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="workbook_file_too_large")
+    try:
+        return await run_in_threadpool(preview_network_directory, _engine(), content)
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/base-mapping/network-directory/candidates")
+async def prepare_network_directory_route(
+    request: Request, file: UploadFile = File(...),
+    expected_map_version_id: str = Form(...),
+    review_sha256: str = Form(..., min_length=64, max_length=64),
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature(imports=True)
+    _same_origin(request)
+    file_name = _safe_upload_name(file.filename)
+    content = await file.read(32 * 1024 * 1024 + 1)
+    if len(content) > 32 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="workbook_file_too_large")
+    settings = get_settings()
+    if settings.data_import_staging_directory is None:
+        raise HTTPException(status_code=503, detail="import_storage_unavailable")
+    try:
+        return await run_in_threadpool(prepare_network_directory_candidate,
+            _engine(), content=content, file_name=file_name, actor_user_id=admin.user.id,
+            staging_directory=settings.data_import_staging_directory,
+            expected_map_version_id=expected_map_version_id, review_sha256=review_sha256,
+            idempotency_key=idempotency_key, request_id=_request_id(request),
+        )
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/base-mapping/revision")
+def mapping_revision_route(viewer: AuthenticatedViewer = Depends(get_current_viewer)) -> dict[str, object]:
+    _require_metadata_feature()
+    from app.services.data_foundation.mapping_revision import read_revision
+    from app.services.data_foundation.queries import _scope_clause
+    try:
+        _scope_clause(viewer.identity, {}, dialect=_engine().dialect.name)
+        return read_revision(_engine())
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 
 
 @router.post("/base-mapping/initial-migration/preview")

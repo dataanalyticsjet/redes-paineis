@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     data_db_user: str | None = None
     data_db_password: str | None = None
     data_queries_enabled: bool = False
+    data_mapping_unit_metadata_enabled: bool = False
     data_import_enabled: bool = False
     data_import_staging_directory: Path | None = None
 

@@ -10,6 +10,8 @@ from sqlalchemy import Engine, text
 
 from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS, get_contract
 from app.services.data_foundation.mapping_resolution import build_mapping_query, code_only_mapping
+from app.core.config import get_settings
+from app.services.data_foundation.mapping_revision import request_revision, observe_revision
 from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError, fact_table_for_contract
 
 
@@ -271,6 +273,10 @@ def _query_plan(
          AND current_version.version_state = 'PUBLISHED'
         {mapping_query.joins}
     """
+    revision_context = request_revision.get()
+    if revision_context and revision_context.get("expected"):
+        params["requested_map_version"] = uuid.UUID(revision_context["expected"].split(":", 1)[0]).bytes
+        mapping_from_sql = mapping_from_sql.replace("ON current_map.current_key = 'OFFICIAL'", "ON current_map.current_key = 'OFFICIAL' AND current_map.map_version_id = :requested_map_version")
     from_sql = f"{fact_from_sql} {mapping_from_sql}"
     where_parts = [
         "fact.source_id = :source_id",
@@ -317,6 +323,10 @@ def _query_plan(
         "effective_entry.rm_region AS mapped_rm_area",
         "effective_entry.rm_responsible AS mapped_rm",
     ])
+    if get_settings().data_mapping_unit_metadata_enabled:
+        unit_type = ("json_extract(effective_entry.unit_metadata, '$.unit_type')" if sql_dialect == "sqlite"
+                     else "JSON_UNQUOTE(JSON_EXTRACT(effective_entry.unit_metadata, '$.unit_type'))")
+        fields.append(f"{unit_type} AS mapped_unit_type")
     if source_id == "pdd_collection_failure" and contract.version == 2:
         fields.extend([
             "fact.source_sheet_name AS source_sheet_name",
@@ -336,7 +346,7 @@ def _query_plan(
 def _assert_map_available(engine: Engine) -> None:
     with engine.connect() as connection:
         current = connection.execute(text("""
-            SELECT 1
+            SELECT current_map.map_version_id, """ + ("current_map.changed_at" if get_settings().data_mapping_unit_metadata_enabled else "NULL") + """ AS changed_at
             FROM base_mapping_current AS current_map
             JOIN base_mapping_versions AS version
               ON version.map_version_id = current_map.map_version_id
@@ -346,6 +356,7 @@ def _assert_map_available(engine: Engine) -> None:
         """)).first()
     if current is None:
         raise DataFoundationError("official_mapping_unavailable", 503)
+    observe_revision(bytes(current[0]), current[1])
 
 
 def _is_resolved_matrix_scope(identity: dict[str, Any]) -> bool:
@@ -622,6 +633,10 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
                 "visibleBaseCount": 0,
             }
         count_filter = "current_entry.map_version_id = :map_version_id"
+        if get_settings().data_mapping_unit_metadata_enabled:
+            kind = ("json_extract(current_entry.unit_metadata, '$.unit_type')" if engine.dialect.name == "sqlite"
+                    else "JSON_UNQUOTE(JSON_EXTRACT(current_entry.unit_metadata, '$.unit_type'))")
+            count_filter += f" AND (current_entry.unit_metadata IS NULL OR {kind} IN ('OWN','FRANCHISE'))"
         if scope:
             count_filter += f" AND {scope}"
         count = int(connection.execute(text(f"""
@@ -739,6 +754,14 @@ def get_records(
                 if isinstance(value, Decimal):
                     record[key] = format(value, "f")
             records.append(record)
+    context = request_revision.get()
+    if context is not None and context.get("expected"):
+        from app.services.data_foundation.mapping_revision import read_revision
+        current = read_revision(engine)
+        if current["revision"] != context["expected"]:
+            context["observed"] = current["revision"]
+            raise DataFoundationError("mapping_revision_changed", 409)
+        context["validated"] = True
     return {"sourceId": source_id, "records": records, "total": total, "limit": limit, "offset": offset}
 
 

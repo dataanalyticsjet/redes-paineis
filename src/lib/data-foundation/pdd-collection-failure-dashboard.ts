@@ -1,3 +1,4 @@
+import { isOperationalMappedBase } from "./mapping-revision.ts";
 import type { PddCollectionFailureV2Period, PddCollectionFailureV2Record } from "./pdd-collection-failure.ts";
 
 export const PDD_COLLECTION_FAILURE_V2_HEADERS = [
@@ -209,7 +210,7 @@ export function summarizePddCollectionFailureV2ByRegion(
       dimensions, metrics: emptyMetrics(), bases: new Set<string>(),
     };
     addRecord(group.metrics, record);
-    group.bases.add(`${dimensions.baseCode}\u0000${dimensions.base}`);
+    if (isOperationalMappedBase(record)) group.bases.add(`${dimensions.baseCode}\u0000${dimensions.base}`);
     groups.set(dimensions.region, group);
   }
   return [...groups].map(([region, group]) => ({
@@ -231,7 +232,7 @@ export function summarizePddCollectionFailureV2ByRm(
     const key = JSON.stringify([dimensions.region, dimensions.rmArea, dimensions.rm, dimensions.rgm]);
     const group = groups.get(key) ?? { dimensions, metrics: emptyMetrics(), bases: new Set<string>() };
     addRecord(group.metrics, record);
-    group.bases.add(`${dimensions.baseCode}\u0000${dimensions.base}`);
+    if (isOperationalMappedBase(record)) group.bases.add(`${dimensions.baseCode}\u0000${dimensions.base}`);
     groups.set(key, group);
   }
   return [...groups.values()].map(({ dimensions, metrics, bases }) => ({
@@ -329,7 +330,7 @@ export function analyzePddCollectionFailureV2(
       regions.set(dimensions.region, regionGroup);
     }
     addRecord(regionGroup.metrics, record);
-    regionGroup.bases.add(baseIdentity);
+    if (isOperationalMappedBase(record)) regionGroup.bases.add(baseIdentity);
 
     const rmKey = JSON.stringify([dimensions.region, dimensions.rmArea, dimensions.rm, dimensions.rgm]);
     let rmGroup = rms.get(rmKey);
@@ -338,7 +339,7 @@ export function analyzePddCollectionFailureV2(
       rms.set(rmKey, rmGroup);
     }
     addRecord(rmGroup.metrics, record);
-    rmGroup.bases.add(baseIdentity);
+    if (isOperationalMappedBase(record)) rmGroup.bases.add(baseIdentity);
 
     const baseKey = JSON.stringify([dimensions.region, dimensions.baseCode, dimensions.base]);
     let baseGroup = bases.get(baseKey);

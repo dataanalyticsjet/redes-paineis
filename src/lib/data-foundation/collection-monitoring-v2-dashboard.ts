@@ -1,3 +1,4 @@
+import { isOperationalMappedBase } from "./mapping-revision.ts";
 import { officialRgmForRegion, UNASSIGNED_RGM, UNASSIGNED_RM, UNASSIGNED_RM_AREA } from "../responsibility.ts";
 import { COLLECTION_MONITORING_V2_COLUMNS, COLLECTION_MONITORING_V2_HEADERS, type CollectionMonitoringV2Record } from "./collection-monitoring-v2.ts";
 
@@ -242,7 +243,7 @@ export function groupCollectionMonitoringV2Rows(
     group.retainedAtBase += toQuantity(row.status_received_at_base);
     group.dispatchedFromBase += toQuantity(row.status_dispatched_from_base);
     group.arrivedAtCenter += toQuantity(row.arrived_sorting_center);
-    if (row.mappingConfirmed && row.baseCode !== "—") {
+    if (row.mappingConfirmed && row.baseCode !== "—" && isOperationalMappedBase(row)) {
       const groupBases = bases.get(key) ?? new Set<string>();
       groupBases.add(row.baseCode);
       bases.set(key, groupBases);
@@ -348,7 +349,7 @@ export function collectionMonitoringV2RegionalStatusGroups(
     const basesWithMovement = new Set(regionRows.flatMap((row) => {
       const hasMovement = COLLECTION_MONITORING_V2_STATUS_FIELDS.some((field) => toQuantity(row[field]) > 0);
       if (!hasMovement) return [];
-      if (row.mappingConfirmed && row.baseCode !== "—") return [`code:${row.baseCode}`];
+      if (row.mappingConfirmed && row.baseCode !== "—" && isOperationalMappedBase(row)) return [`code:${row.baseCode}`];
       const rawName = toText(row.source_base_name).toLocaleLowerCase("pt-BR");
       return rawName && rawName !== "sem base" ? [`name:${rawName}`] : [];
     })).size;

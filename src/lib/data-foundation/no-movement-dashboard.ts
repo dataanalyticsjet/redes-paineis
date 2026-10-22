@@ -149,6 +149,7 @@ export function noMovementSourceExcelNumberFormat(header: string): string | unde
 }
 
 export interface NoMovementDashboardRecord {
+  mapped_unit_type?: unknown;
   key: string;
   region: string;
   rmArea: string;
@@ -200,6 +201,7 @@ export function mapNoMovementV2Record(record: NoMovementV2Record): NoMovementDas
     Object.entries(NO_MOVEMENT_SOURCE_HEADERS).map(([key, header]) => [header, record[key as keyof NoMovementV2Record]]),
   );
   return {
+    mapped_unit_type: (record as NoMovementV2Record & { mapped_unit_type?: unknown }).mapped_unit_type,
     key: `${textValue(record.publication_id)}:${numericValue(record.source_row_no)}`,
     region,
     rmArea: textValue(record.mapped_rm_area) || UNASSIGNED_RM_AREA,

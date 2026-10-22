@@ -20,6 +20,23 @@ export interface BilingualDashboardText {
 }
 
 const translations: Record<string, { en: string; zh: string; pt?: string }> = {
+  "Nova fonte oficial — Gestão de Rede": { en: "New official source — Network Management", zh: "新官方来源—网络管理" },
+  "A candidata será preparada para revisão. A publicação exige aprovação em uma etapa futura.": { en: "The candidate will be prepared for review. Publishing requires approval in a later stage.", zh: "候选版本将准备供审核，发布须在后续阶段获得批准。" },
+  "Lista de contatos da Gestão de Rede (.xlsx)": { en: "Network Management contact list (.xlsx)", zh: "网络管理通讯录（.xlsx）" },
+  "Gerar prévia da candidata": { en: "Preview candidate", zh: "预览候选版本" },
+  "Validando candidata DoomsDay…": { en: "Validating DoomsDay candidate…", zh: "正在验证DoomsDay候选版本…" },
+  "Unidades": { en: "Units", zh: "单位" },
+  "Bases operacionais": { en: "Operational bases", zh: "运营网点" },
+  "Novas unidades": { en: "New units", zh: "新增单位" },
+  "Unidades ausentes": { en: "Missing units", zh: "缺失单位" },
+  "Auditoria completa da candidata": { en: "Full candidate audit", zh: "完整候选版本审核" },
+  "Preparar candidata para revisão": { en: "Prepare candidate for review", zh: "准备候选版本供审核" },
+  "Candidata preparada. A versão vigente continua ativa.": { en: "Candidate prepared. The current version remains active.", zh: "候选版本已准备，当前版本继续生效。" },
+  "Esta ação exige autorização administrativa global.": { en: "This action requires global administrative authorization.", zh: "此操作需要全局管理授权。" },
+  "A preparação depende da estrutura e do contrato aprovados pelo administrador.": { en: "Preparation requires the administrator-approved schema and contract.", zh: "准备操作需要管理员批准的数据结构和契约。" },
+  "O cadastro mudou. Gere uma nova prévia antes de preparar.": { en: "The directory changed. Generate a new preview before preparing.", zh: "目录已变化，请重新预览后再准备。" },
+  "Não foi possível preparar a candidata DoomsDay.": { en: "Unable to prepare the DoomsDay candidate.", zh: "无法准备DoomsDay候选版本。" },
+  "mapping_revision_changed": { en: "The organizational directory changed. Reloading authorized data.", zh: "组织目录已变更，正在重新加载授权数据。" },
   "PRIMEIRA DIGITALIZAÇÃO": { en: "FIRST SCAN", zh: "首次扫描" },
   "Últimos 3 dias do filtro; a variação compara somente o último dia com o dia anterior.": { en: "Last 3 available filtered dates; change compares only the last date with the preceding date.", zh: "筛选范围内最近3个有数据的日期；变化仅比较最后一天与前一个日期。" },
   "Volume previsto: último dia exibido. Variação diária convencional: (atual − anterior) / anterior; sem base de comparação ou denominador zero, —. A fórmula de variação do JMS ainda não foi confirmada.": { en: "Planned volume: last displayed date. Conventional daily change: (current − previous) / previous; no comparison or zero denominator: —. The JMS change formula is not yet confirmed.", zh: "预计量取最后显示日期。常规日变化：(当前−前期)/前期；无对比数据或分母为零时显示—。JMS变化公式尚未确认。" },

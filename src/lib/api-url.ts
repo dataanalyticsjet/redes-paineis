@@ -1,3 +1,4 @@
+import { currentMappingRevision, mappingGeneration, acceptMappingRevision, assertMappingGeneration, isOrganizationalDataPath } from "./data-foundation/mapping-revision.ts";
 import { invalidateDashboardDataCache } from "./data-foundation/dashboard-data-cache.ts";
 
 type ViteImportMeta = ImportMeta & {
@@ -39,7 +40,12 @@ export function apiUrl(path: string): string {
 }
 
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(apiUrl(path), { ...init, credentials: "include" }).then((response) => {
+  const organizational = (init?.method ?? "GET") === "GET" && isOrganizationalDataPath(path);
+  const expectedGeneration = mappingGeneration();
+  const headers = new Headers(init?.headers);
+  const revision = currentMappingRevision();
+  if (organizational && revision) headers.set("X-Doomsday-Revision", revision);
+  return fetch(apiUrl(path), { ...init, headers, credentials: "include" }).then((response) => {
     if ((response.status === 401 || response.status === 403) && isProtectedDataApiPath(path)) {
       invalidateDashboardDataCache();
       const failure: ProtectedApiAuthorizationFailure = { path, status: response.status };
@@ -49,6 +55,23 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
         } catch {
           // A UI listener must never change the API response observed by its caller.
         }
+      }
+    }
+    if (organizational) {
+      assertMappingGeneration(expectedGeneration);
+      const observed = response.headers.get("X-Doomsday-Revision");
+      const activeRevision = currentMappingRevision();
+      if (observed && activeRevision && activeRevision !== revision && observed !== activeRevision) {
+        throw new Error("mapping_revision_changed");
+      }
+      if (observed) acceptMappingRevision(observed);
+      assertMappingGeneration(expectedGeneration);
+      if (response.ok && response.body) {
+        const guarded = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) { assertMappingGeneration(expectedGeneration); controller.enqueue(chunk); },
+          flush() { assertMappingGeneration(expectedGeneration); },
+        }));
+        return new Response(guarded, { status: response.status, statusText: response.statusText, headers: response.headers });
       }
     }
     return response;

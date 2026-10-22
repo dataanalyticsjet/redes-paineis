@@ -1,3 +1,4 @@
+import { isOperationalMappedBase } from "./data-foundation/mapping-revision.ts";
 export const MOVEMENT_SUMMARY_METRICS = [
   ["totalStopped", "Total sem movimentação"],
   ["from2Days", "Total há 2 dias ou mais"],
@@ -180,6 +181,7 @@ export interface MovementSnapshotSummary {
 }
 
 export function summarizeMovementSnapshot(rows: readonly {
+  mapped_unit_type?: unknown;
   region: string;
   sourceRegion?: string;
   code: string;
@@ -201,7 +203,7 @@ export function summarizeMovementSnapshot(rows: readonly {
   const over14Days = rows.reduce((sum, record) => sum + record.over14Days, 0);
   const over30Days = rows.reduce((sum, record) => sum + record.over30Days, 0);
   const criticalBaseCodes = new Set(
-    rows.filter((record) => movementFrom2DaysTotal(record) > 0)
+    rows.filter((record) => movementFrom2DaysTotal(record) > 0 && isOperationalMappedBase(record))
       .map((record) => record.code.trim())
       .filter((code) => code && code !== "—"),
   );

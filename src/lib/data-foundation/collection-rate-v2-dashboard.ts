@@ -1,3 +1,4 @@
+import { isOperationalMappedBase } from "./mapping-revision.ts";
 import { officialRgmForRegion, UNASSIGNED_RGM, UNASSIGNED_RM, UNASSIGNED_RM_AREA } from "../responsibility.ts";
 import { resolvePublishedRegionalAssignment } from "./regional-assignment.ts";
 import type { CollectionRateV2Record } from "./collection-rate-v2.ts";
@@ -179,7 +180,7 @@ export function groupCollectionRateV2Rows(
     group.daily.set(day, daily);
     if (row.mapping_resolution === "CODE_MATCH" && text(row.resolved_base_code)) {
       const baseCodes = basesByGroup.get(key) ?? new Set<string>();
-      baseCodes.add(text(row.resolved_base_code));
+      if (isOperationalMappedBase(row)) baseCodes.add(text(row.resolved_base_code));
       basesByGroup.set(key, baseCodes);
     }
   }

@@ -1,5 +1,7 @@
 "use client";
 
+import { isOperationalMappedBase } from "../../lib/data-foundation/mapping-revision.ts";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, BarChart3, CalendarDays, Clock3, Database, Download, Filter, Layers3, MapPin, Percent, RefreshCw, ShieldCheck } from "lucide-react";
 import { subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
@@ -230,7 +232,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     return { matched, pageCount, activePage, rows: matched.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE) };
   }, [baseDetails, detailPage, detailQuery, language]);
   const currentMappedBaseCount = useMemo(() => new Set(currentRows
-    .filter((row) => row.mappingConfirmed && row.baseCode !== "—")
+    .filter((row) => row.mappingConfirmed && row.baseCode !== "—" && isOperationalMappedBase(row))
     .map((row) => row.baseCode)).size, [currentRows]);
   const visibleRows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase(dashboardLocale(language));

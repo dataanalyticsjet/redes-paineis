@@ -424,6 +424,33 @@ COLLECTION_MONITORING_V2_CONTRACT = SourceContract(
     expected_sample_rows=None,
 )
 
+NETWORK_DIRECTORY_CONTRACT = SourceContract(
+    source_id="base_mapping_official",
+    display_name="DoomsDay — Lista de Contatos da Gestão de Rede",
+    workbook_name="网络管理通讯录 Lista de contatos da Gestão de Rede.xlsx",
+    sheet_name="网点通讯录 Contato das Bases",
+    header_row=1,
+    version=2,
+    history_policy="SNAPSHOT_REPLACE_ALL",
+    grain_description="Uma unidade por código oficial textual; candidata organizacional versionada, sem ativação automática.",
+    columns=(
+        _c("base_code", "Cód. da Base 网点编号", "BASE_CODE", max_length=64),
+        _c("base_name", "Nome da Base 网点名称", "TEXT", max_length=191),
+        _c("regional_name", "Regional 区域", "TEXT", nullable=True, max_length=64),
+        _c("rm_region", "Região do RM 区域", "TEXT", nullable=True, max_length=96),
+        _c("rm_responsible", "RM", "TEXT", nullable=True, max_length=160),
+        _c("supervisor", "Supervisor/Coordenador 片区网管", "TEXT", nullable=True),
+        _c("base_responsible", "Responsável da Base 网点负责人", "TEXT", nullable=True),
+        _c("parent_record", "父记录", "TEXT", nullable=True),
+        _c("unit_type_raw", "Tipo de Base 网点性质", "TEXT"),
+        _c("notes", "Observação 备注", "TEXT", nullable=True),
+        _c("opened_at_raw", "开网日期", "TEXT", nullable=True),
+        _c("enabled_status_raw", "启用状态", "TEXT"),
+        _c("updated_at_raw", "最后更新时间", "TEXT", nullable=True),
+    ),
+    expected_sample_rows=None,
+)
+
 CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
     (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
 }
@@ -431,6 +458,7 @@ CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CON
 CONTRACT_VERSIONS[("collection_rate", 2)] = COLLECTION_RATE_V2_CONTRACT
 CONTRACT_VERSIONS[("collection_rate", 3)] = COLLECTION_RATE_V3_CONTRACT
 CONTRACT_VERSIONS[("collection_monitoring", 2)] = COLLECTION_MONITORING_V2_CONTRACT
+CONTRACT_VERSIONS[("base_mapping_official", 2)] = NETWORK_DIRECTORY_CONTRACT
 
 
 def get_contract(source_id: str, version: int | None = None) -> SourceContract:

@@ -1,3 +1,4 @@
+import { isOperationalMappedBase } from "./mapping-revision.ts";
 import { officialRgmForRegion, UNASSIGNED_RGM, UNASSIGNED_RM, UNASSIGNED_RM_AREA } from "../responsibility.ts";
 import { resolvePublishedRegionalAssignment } from "./regional-assignment.ts";
 import {
@@ -360,7 +361,7 @@ export function groupCollectionRateV3Rows(
     group.daily.set(day, daily);
     const resolution = text(row.effective_mapping_resolution ?? row.mapping_resolution);
     const code = text(row.effective_base_code ?? row.resolved_base_code);
-    if (["CODE_MATCH", "NAME_APPROVED"].includes(resolution) && code) {
+    if (["CODE_MATCH", "NAME_APPROVED"].includes(resolution) && code && isOperationalMappedBase(row)) {
       const codes = basesByGroup.get(key) ?? new Set<string>();
       codes.add(code);
       basesByGroup.set(key, codes);

@@ -1,5 +1,7 @@
 "use client";
 
+import { NetworkDirectoryCandidate } from "./network-directory-candidate.tsx";
+
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiFetch } from "../../lib/api-url";
 import {
@@ -898,6 +900,8 @@ export function DataFoundationAdmin({
           </div>
         </div>
       ) : null}
+
+      {canImport ? <NetworkDirectoryCandidate enabled={importActionsEnabled} t={t} /> : null}
 
       {canImport ? (
         <section className="data-foundation-card data-foundation-initial-map">
