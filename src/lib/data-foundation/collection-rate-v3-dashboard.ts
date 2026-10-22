@@ -484,3 +484,31 @@ export function collectionRateV3ExcelNumberFormat(
 }
 
 export const collectionRateV3DetailColumns = COLLECTION_RATE_V3_COLUMNS;
+
+/** Percentage presentation only; source rates remain unchanged, including rates above 100%. */
+export function collectionRateV3ProgressWidth(rate: number | null): string {
+  return `${rate !== null && Number.isFinite(rate) ? Math.min(1, Math.max(0, rate)) * 100 : 0}%`;
+}
+
+export interface CollectionRateV3MonthlyChartPoint {
+  month: string;
+  collectionRate: number | null;
+  attemptRate: number | null;
+}
+
+export function collectionRateV3MonthlyChartPoints(
+  rows: readonly CollectionRateV3DashboardRow[],
+): CollectionRateV3MonthlyChartPoint[] {
+  const months = new Map<string, CollectionRateV3DashboardRow[]>();
+  for (const row of rows) {
+    const month = row.data_date.slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;
+    const group = months.get(month) ?? [];
+    group.push(row);
+    months.set(month, group);
+  }
+  return [...months].sort(([left], [right]) => left.localeCompare(right)).map(([month, group]) => {
+    const summary = summarizeCollectionRateV3Cards(group);
+    return { month, collectionRate: summary.totals.collectionRate, attemptRate: summary.attempts.rate };
+  });
+}

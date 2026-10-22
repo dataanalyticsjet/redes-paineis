@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   collectionRateV3ExcelNumberFormat,
+  collectionRateV3MonthlyChartPoints,
+  collectionRateV3ProgressWidth,
   collectionRateV3ExcelValue,
   formatCollectionRateV3RegionalAttemptRate,
   collectionRateV3FilterOptions,
@@ -392,4 +394,77 @@ test("V3 numeric formatting and Excel export preserve native numeric values", ()
   assert.equal(collectionRateV3ExcelValue("2026-10-13 00:00:00", "deadline_at"), "2026-10-13 00:00:00");
   assert.equal(collectionRateV3ExcelNumberFormat("deadline_at"), "dd/mm/yyyy hh:mm");
   assert.match(formatCollectionRateV3Cell("2026-10-13 00:00:00", "deadline_at", "pt-BR"), /13\/10\/2026/);
+});
+
+
+test("login progress reflects its own collection rate regardless of relative order volume", () => {
+  for (const [rate, width] of [[0, "0%"], [0.25, "25%"], [0.5, "50%"], [0.75, "75%"], [0.95, "95%"], [1, "100%"], [null, "0%"], [-0.2, "0%"], [1.2, "100%"], [NaN, "0%"]] as const) {
+    assert.equal(collectionRateV3ProgressWidth(rate), width);
+  }
+  const origins = summarizeCollectionRateV3Origins([
+    mapCollectionRateV3Record(record({ order_origin: "Large volume", quantity_to_collect: 10000, collected_quantity: 5000 })),
+    mapCollectionRateV3Record(record({ order_origin: "Small volume", quantity_to_collect: 100, collected_quantity: 95 })),
+  ]);
+  assert.equal(collectionRateV3ProgressWidth(origins[1]!.collectionRate), "95%");
+});
+
+test("monthly chart reuses the validated ratio-of-sums formulas without changing daily summaries", () => {
+  const rows = [
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-20 00:00:00", quantity_to_collect: 10, collected_quantity: 5, collected_plus_attempts_quantity: 8 })),
+    mapCollectionRateV3Record(record({ deadline_at: "2026-10-21 00:00:00", quantity_to_collect: 90, collected_quantity: 85, collected_plus_attempts_quantity: 90 })),
+    mapCollectionRateV3Record(record({ deadline_at: "2027-01-01 00:00:00", quantity_to_collect: 0, collected_quantity: 0, collected_plus_attempts_quantity: 0 })),
+  ];
+  const dailyBefore = summarizeCollectionRateV3Daily(rows);
+  const monthly = collectionRateV3MonthlyChartPoints(rows);
+  assert.deepEqual(monthly, [
+    { month: "2026-10", collectionRate: 0.9, attemptRate: 0.98 },
+    { month: "2027-01", collectionRate: null, attemptRate: null },
+  ]);
+  const oldMonthly = summarizeCollectionRateV3Monthly(rows);
+  assert.equal(monthly[0]!.collectionRate, oldMonthly[0]!.collectionRate);
+  assert.equal(monthly[0]!.attemptRate, summarizeCollectionRateV3Attempts(rows.slice(0,2)).rate);
+  assert.deepEqual(summarizeCollectionRateV3Daily(rows), dailyBefore);
+  assert.deepEqual(collectionRateV3MonthlyChartPoints([]), []);
+});
+
+test("Taxa presentation puts regional table, unchanged daily chart, monthly comparison and login in order", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const positions = ['data-testid="taxa-v2-kpi-grid"', 'data-testid="taxa-v2-regional-summary"', 'data-testid="taxa-v2-daily-chart"', '<CollectionRateV3MonthlyChart points=', 'data-testid="taxa-v2-origin-summary"', 'data-testid="taxa-v2-rm-summary"', 'data-testid="taxa-v2-monthly-summary"'].map((marker) => {
+    assert.equal(source.split(marker).length - 1, 1, marker + " remains unique");
+    return source.indexOf(marker);
+  });
+  assert.deepEqual([...positions].sort((a,b) => a-b), positions);
+  assert.match(source, /width: collectionRateV3ProgressWidth\(item.collectionRate\)/);
+  assert.doesNotMatch(source, /item.planned \/ taxaV2ByOrigin\[0\]/);
+});
+
+test("monthly chart renders real points, both series, translated periods and empty states", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { createRequire } = await import("node:module");
+  const { pathToFileURL } = await import("node:url");
+  const { transpileModule, JsxEmit, ModuleKind, ScriptTarget } = await import("typescript");
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const require = createRequire(import.meta.url);
+  const source = await readFile(new URL("../src/features/dashboards/collection-rate-v3-monthly-chart.tsx", import.meta.url), "utf8");
+  const output = transpileModule(source, { compilerOptions: { jsx: JsxEmit.ReactJSX, module: ModuleKind.ESNext, target: ScriptTarget.ES2022 } }).outputText.replaceAll('"react/jsx-runtime"', JSON.stringify(pathToFileURL(require.resolve("react/jsx-runtime")).href));
+  const { CollectionRateV3MonthlyChart } = await import("data:text/javascript;base64," + Buffer.from(output).toString("base64"));
+  const t = (key: string, params?: Record<string,string|number>) => translateDashboardText("pt", key, params);
+  const props = { locale: "pt-BR", formatRate: (rate: number|null) => formatCollectionRateV3RegionalAttemptRate(rate,"pt-BR"), t };
+  const html = renderToStaticMarkup(createElement(CollectionRateV3MonthlyChart, { ...props, points: [{ month: "2026-10", collectionRate: 0.908, attemptRate: 0.981 }] }));
+  assert.match(html, /Ano 2026/);
+  assert.match(html, /90,8%/);
+  assert.match(html, /98,1%/);
+  assert.match(html, /out\./);
+  assert.equal((html.match(/<circle /g) ?? []).length, 2);
+  assert.match(html, /taxa-v3-series-collection/);
+  assert.match(html, /taxa-v3-series-attempt/);
+  const extremes = renderToStaticMarkup(createElement(CollectionRateV3MonthlyChart, { ...props, points: [{ month: "2026-10", collectionRate: 0, attemptRate: 0.5 }, { month: "2027-01", collectionRate: 1, attemptRate: null }] }));
+  assert.doesNotMatch(extremes, /NaN|Infinity/);
+  assert.match(extremes, /2026–2027/);
+  assert.equal((extremes.match(/<circle /g) ?? []).length, 3);
+  const empty = renderToStaticMarkup(createElement(CollectionRateV3MonthlyChart, { ...props, points: [] }));
+  assert.match(empty, /Sem datas publicadas no período/);
+  assert.doesNotMatch(empty, /<svg/);
 });

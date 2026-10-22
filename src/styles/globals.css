@@ -9930,3 +9930,25 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
   .collection-monitoring-v2-status-values { gap: 6px 10px; }
   .collection-monitoring-v2-detail .collection-monitoring-v2-section-heading { flex-direction: column; }
 }
+
+/* Taxa V3 presentation: deliberately scoped to avoid changing other dashboards. */
+.dashboard-main-taxa-v2 .taxa-v3-full-width { grid-template-columns: minmax(0, 1fr); }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-card { min-width: 0; min-height: 0; }
+.dashboard-main-taxa-v2 .taxa-v3-year-badge { flex-shrink: 0; padding: 6px 10px; border: 1px solid #ffd4d8; border-radius: 999px; color: var(--jnt-red); font-size: 11px; font-weight: 600; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-plot { overflow-x: auto; border: 1px solid var(--table-grid); border-radius: 14px; padding: 6px 10px; background: var(--card); }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-plot svg { display: block; width: 100%; min-width: 560px; height: auto; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-grid { stroke: var(--table-grid); stroke-width: 1; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-axis { fill: var(--muted); font-size: 11px; font-weight: 600; }
+.dashboard-main-taxa-v2 .taxa-v3-series-collection { color: var(--jnt-red); }
+.dashboard-main-taxa-v2 .taxa-v3-series-attempt { color: #ff741f; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-plot polyline { fill: none; stroke: currentColor; stroke-width: 2.5; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-plot circle { fill: var(--card); stroke: currentColor; stroke-width: 3; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-plot g > text:not(.taxa-v3-comparison-axis) { fill: currentColor; font-size: 11px; font-weight: 650; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px 24px; padding-top: 14px; font-size: 12px; color: var(--muted); }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-legend i { width: 20px; height: 3px; border-radius: 2px; background: var(--jnt-red); }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-legend .taxa-v3-legend-attempt { background: #ff741f; }
+
+.dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading { margin-bottom: 16px; }
+.dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading > div:first-child,
+.dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading > div:first-child .card-eyebrow { text-align: left; }

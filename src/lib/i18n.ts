@@ -20,6 +20,8 @@ export interface BilingualDashboardText {
 }
 
 const translations: Record<string, { en: string; zh: string; pt?: string }> = {
+  "Performance por login": { en: "Performance by login", zh: "各登录来源表现" },
+  "Taxa de coleta ponderada pelas quantidades.": { en: "Collection rate weighted by quantities.", zh: "按数量加权计算的揽收率。" },
   "Fonte de dados": { en: "Data source", zh: "数据来源" },
   "Fonte de dados — {dashboard}": { en: "Data source — {dashboard}", zh: "数据源 — {dashboard}" },
   "Fonte de dados ainda não configurada para este painel.": { en: "A data source has not been configured for this dashboard yet.", zh: "此仪表板尚未配置数据源。" },
