@@ -5,6 +5,7 @@ import {
   analyzePddCollectionFailureV2,
   filterPddCollectionFailureV2Records,
   isPddCollectionFailureV2SingleOperationalDate,
+  PDD_COLLECTION_FAILURE_V2_HEADERS,
   pddCollectionFailureV2Dimensions,
   pddCollectionFailureV2FilterOptions,
   summarizePddCollectionFailureV2,
@@ -69,6 +70,32 @@ test("usa as 15 colunas do Bot 02 e não substitui quantidade pela taxa original
   assert.equal(summary.ordersUnscannedAtReceipt, 40);
   assert.equal(summary.ordersUnscannedAtCollection, 100);
   assert.equal(summary.collectionFailureRate, 0.25);
+});
+
+test("card, tabelas e resumo de exportação somam a coluna oficial de não bipados no recebimento", () => {
+  const rows = [
+    record(2, {
+      total_orders: 100,
+      orders_unscanned_at_receipt: 20,
+      orders_unscanned_at_collection: 3,
+    }),
+    record(3, {
+      total_orders: 300,
+      orders_unscanned_at_receipt: 35,
+      orders_unscanned_at_collection: 8,
+    }),
+  ];
+  const analysis = analyzePddCollectionFailureV2(rows);
+
+  assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS[8], "orders_unscanned_at_receipt");
+  assert.equal(PDD_COLLECTION_FAILURE_V2_HEADERS[8], "Qtd pedidos não bipados no recebimento da coleta");
+  assert.equal(analysis.summary.ordersUnscannedAtReceipt, 55);
+  assert.equal(analysis.summary.ordersUnscannedAtCollection, 11);
+  assert.equal(analysis.regionalSummary[0]?.ordersUnscannedAtReceipt, 55);
+  assert.equal(analysis.rmSummary[0]?.ordersUnscannedAtReceipt, 55);
+  assert.equal(analysis.baseSummary[0]?.ordersUnscannedAtReceipt, 55);
+  assert.equal(analysis.summary.collectionFailureRate, 11 / 400);
+  assert.deepEqual(analysis.filteredRecords.map((row) => row.orders_unscanned_at_receipt), [20, 35]);
 });
 
 test("exige um dia operacional único antes de calcular indicadores e tabelas", () => {

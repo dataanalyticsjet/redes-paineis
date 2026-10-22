@@ -13,6 +13,7 @@ import {
   noMovementAvailabilityMessage,
 } from "../src/lib/data-foundation/no-movement-dashboard.ts";
 import { NO_MOVEMENT_V2_COLUMNS } from "../src/lib/data-foundation/no-movement.ts";
+import { summarizeMovementSnapshot } from "../src/lib/movement-summary.ts";
 
 const record = (sourceRowNo: number) => ({
   reported_region: "Regional original",
@@ -54,6 +55,8 @@ test("JMS adapter preserves physical rows, raw fields and exact DECIMAL strings"
   assert.equal(first.rm, "Victor");
   assert.equal(first.code, "DUP-001");
   assert.equal(first.totalStopped, 100);
+  assert.equal(first.inTransit, 900);
+  assert.equal(summarizeMovementSnapshot([first]).inTransit, 900);
   assert.equal(first.over14Days, 30);
   assert.equal(first.over30Days, 36);
   assert.equal(first.values[NO_MOVEMENT_SOURCE_HEADERS.stopped_14_plus_days_rate], "0.300000000000000001");
@@ -124,7 +127,10 @@ test("exportação mantém quantidades numéricas e aplica formato inteiro na co
   assert.equal(noMovementSourceExcelNumberFormat(NO_MOVEMENT_SOURCE_HEADERS.last_operation_at), "dd/mm/yyyy hh:mm");
   assert.equal(noMovementSourceExcelNumberFormat(NO_MOVEMENT_SOURCE_HEADERS.stopped_14_plus_days_rate), "0.0%");
 
+  const mappingSource = await readFile(new URL("../src/lib/data-foundation/no-movement-dashboard.ts", import.meta.url), "utf8");
   const appSource = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  assert.match(mappingSource, /inTransit: numericValue\(record\.orders_in_transit\)/);
+  assert.match(appSource, /formatCompact\(movementSummary\.inTransit\)/);
   assert.match(appSource, /noMovementSourceExcelValue\(row\.values\[column\], column\)/);
   assert.match(appSource, /movementLoaded\.displayColumns\.map\(noMovementSourceExcelNumberFormat\)/);
 });
