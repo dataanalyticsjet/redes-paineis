@@ -51,6 +51,11 @@ from app.services.data_foundation.repository import (
 from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
 from app.services.data_foundation.network_directory_candidate import preview_network_directory
 from app.services.data_foundation.network_directory_versioning import prepare_network_directory_candidate
+from app.services.data_foundation.network_directory_activation import (
+    get_network_directory_activation_status,
+    publish_network_directory_candidate,
+    rollback_network_directory_candidate,
+)
 from app.services.collection_monitoring_v2_retention import get_regional_retention_table
 from app.services.collection_monitoring_t4_t5 import (
     MAX_GROUP_PAGE_SIZE,
@@ -79,6 +84,13 @@ class NameMappingDecisionPayload(BaseModel):
     resolution_state: Literal["LINKED", "AMBIGUOUS", "REJECTED"] = Field(alias="resolutionState")
     target_base_code: str | None = Field(default=None, alias="targetBaseCode", max_length=64)
     review_note: str = Field(alias="reviewNote", min_length=1, max_length=500)
+
+
+class NetworkDirectoryActivationPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    expected_official_map_version_id: str = Field(alias="expectedOfficialMapVersionId", min_length=36, max_length=36)
+    review_sha256: str = Field(alias="reviewSha256", min_length=64, max_length=64)
 
 
 def _require_feature(*, imports: bool = False) -> None:
@@ -651,6 +663,62 @@ async def prepare_network_directory_route(
             idempotency_key=idempotency_key, request_id=_request_id(request),
         )
     except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/base-mapping/network-directory/candidates/prepared")
+def network_directory_activation_status(
+    _admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature(imports=True)
+    try:
+        return get_network_directory_activation_status(_engine())
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/base-mapping/network-directory/candidates/{map_version_id}/publish")
+def publish_network_directory_route(
+    map_version_id: str,
+    payload: NetworkDirectoryActivationPayload,
+    request: Request,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature(imports=True)
+    _same_origin(request)
+    try:
+        return publish_network_directory_candidate(
+            _engine(), map_version_id=map_version_id,
+            expected_official_map_version_id=payload.expected_official_map_version_id,
+            review_sha256=payload.review_sha256, idempotency_key=idempotency_key,
+            actor_user_id=admin.user.id, request_id=_request_id(request),
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/base-mapping/network-directory/candidates/{map_version_id}/rollback")
+def rollback_network_directory_route(
+    map_version_id: str,
+    request: Request,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature(imports=True)
+    _same_origin(request)
+    try:
+        return rollback_network_directory_candidate(
+            _engine(), map_version_id=map_version_id, idempotency_key=idempotency_key,
+            actor_user_id=admin.user.id, request_id=_request_id(request),
+        )
+    except DataFoundationError as error:
         raise _error(error) from None
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None

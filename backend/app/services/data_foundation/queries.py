@@ -11,7 +11,9 @@ from sqlalchemy import Engine, text
 from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS, get_contract
 from app.services.data_foundation.mapping_resolution import build_mapping_query, code_only_mapping
 from app.core.config import get_settings
-from app.services.data_foundation.mapping_revision import request_revision, observe_revision
+from app.services.data_foundation.mapping_revision import (
+    request_revision, observe_revision, unit_metadata_enabled, supports_unit_metadata,
+)
 from app.services.data_foundation.repository import DAILY_SOURCES, FACT_TABLES, DataFoundationError, fact_table_for_contract
 
 
@@ -142,6 +144,7 @@ def _query_plan(
     publication_id: str | None = None,
     contract_version: int | None = None,
     sql_dialect: str = "mysql",
+    include_unit_metadata: bool | None = None,
 ) -> ScopedQuery:
     # Validate and build the server-resolved scope before planning any fact read.
     scope_parameters: dict[str, object] = {}
@@ -323,7 +326,7 @@ def _query_plan(
         "effective_entry.rm_region AS mapped_rm_area",
         "effective_entry.rm_responsible AS mapped_rm",
     ])
-    if get_settings().data_mapping_unit_metadata_enabled:
+    if (get_settings().data_mapping_unit_metadata_enabled if include_unit_metadata is None else include_unit_metadata):
         unit_type = ("json_extract(effective_entry.unit_metadata, '$.unit_type')" if sql_dialect == "sqlite"
                      else "JSON_UNQUOTE(JSON_EXTRACT(effective_entry.unit_metadata, '$.unit_type'))")
         fields.append(f"{unit_type} AS mapped_unit_type")
@@ -343,10 +346,15 @@ def _query_plan(
     )
 
 
-def _assert_map_available(engine: Engine) -> None:
+def _assert_map_available(engine: Engine) -> bool:
     with engine.connect() as connection:
+        metadata_schema_ready = supports_unit_metadata(connection)
+        changed_at = "current_map.changed_at" if metadata_schema_ready else "NULL"
+        version_metadata = "version.candidate_metadata" if metadata_schema_ready else "NULL"
+        version_number = "version.version_no" if metadata_schema_ready else "NULL"
         current = connection.execute(text("""
-            SELECT current_map.map_version_id, """ + ("current_map.changed_at" if get_settings().data_mapping_unit_metadata_enabled else "NULL") + """ AS changed_at
+            SELECT current_map.map_version_id, """ + changed_at + """ AS changed_at,
+                   """ + version_number + """ AS version_no, """ + version_metadata + """ AS candidate_metadata
             FROM base_mapping_current AS current_map
             JOIN base_mapping_versions AS version
               ON version.map_version_id = current_map.map_version_id
@@ -356,7 +364,9 @@ def _assert_map_available(engine: Engine) -> None:
         """)).first()
     if current is None:
         raise DataFoundationError("official_mapping_unavailable", 503)
-    observe_revision(bytes(current[0]), current[1])
+    metadata_enabled = unit_metadata_enabled(connection=None, version_no=current[2], candidate_metadata=current[3])
+    observe_revision(bytes(current[0]), current[1] if metadata_enabled else None)
+    return metadata_enabled
 
 
 def _is_resolved_matrix_scope(identity: dict[str, Any]) -> bool:
@@ -615,9 +625,11 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
     # This validates scope before any database query and applies it to counts.
     scope = _scope_clause(identity, parameters, mapping_alias="current_entry", dialect=engine.dialect.name)
     with engine.connect() as connection:
+        metadata_schema_ready = supports_unit_metadata(connection)
+        version_metadata = "version.candidate_metadata" if metadata_schema_ready else "NULL"
         current = connection.execute(text("""
             SELECT version.map_version_id, version.version_no, version.version_state,
-                   version.published_at
+                   version.published_at, """ + version_metadata + """ AS candidate_metadata
             FROM base_mapping_current AS pointer
             JOIN base_mapping_versions AS version
               ON version.map_version_id = pointer.map_version_id
@@ -633,7 +645,8 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
                 "visibleBaseCount": 0,
             }
         count_filter = "current_entry.map_version_id = :map_version_id"
-        if get_settings().data_mapping_unit_metadata_enabled:
+        if unit_metadata_enabled(connection, version_no=current["version_no"],
+                                 candidate_metadata=current["candidate_metadata"]):
             kind = ("json_extract(current_entry.unit_metadata, '$.unit_type')" if engine.dialect.name == "sqlite"
                     else "JSON_UNQUOTE(JSON_EXTRACT(current_entry.unit_metadata, '$.unit_type'))")
             count_filter += f" AND (current_entry.unit_metadata IS NULL OR {kind} IN ('OWN','FRANCHISE'))"
@@ -683,7 +696,14 @@ def get_records(
         contract_version=contract_version,
         sql_dialect=engine.dialect.name,
     )
-    _assert_map_available(engine)
+    include_unit_metadata = _assert_map_available(engine)
+    if include_unit_metadata != get_settings().data_mapping_unit_metadata_enabled:
+        plan = _query_plan(
+            source_id, identity, date_from=date_from, date_to=date_to,
+            base_code=base_code, region=region, publication_id=publication_id,
+            contract_version=contract_version, sql_dialect=engine.dialect.name,
+            include_unit_metadata=include_unit_metadata,
+        )
     where = f"WHERE {plan.where_sql}"
     order = "fact.data_date DESC, fact.source_row_no ASC" if source_id in DAILY_SOURCES else "fact.source_row_no ASC"
     use_metadata_count = _matrix_daily_metadata_eligible(
@@ -791,7 +811,14 @@ def get_date_counts(
         contract_version=contract_version,
         sql_dialect=engine.dialect.name,
     )
-    _assert_map_available(engine)
+    include_unit_metadata = _assert_map_available(engine)
+    if include_unit_metadata != get_settings().data_mapping_unit_metadata_enabled:
+        plan = _query_plan(
+            source_id, identity, date_from=date_from, date_to=date_to,
+            base_code=base_code, region=region, publication_id=publication_id,
+            contract_version=contract_version, sql_dialect=engine.dialect.name,
+            include_unit_metadata=include_unit_metadata,
+        )
     metadata_fallback_has_published: bool | None = None
     use_metadata_dates = _matrix_daily_metadata_eligible(
         identity,
