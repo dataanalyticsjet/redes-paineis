@@ -15,7 +15,12 @@ from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection
 
 from app.services.data_foundation.contracts import get_contract
-from app.services.data_foundation.queries import _assert_map_available, _query_plan
+from app.services.data_foundation.queries import (
+    _assert_map_available,
+    _daily_metadata_consistency_expression,
+    _is_resolved_matrix_scope,
+    _query_plan,
+)
 from app.services.data_foundation.repository import DataFoundationError
 
 
@@ -75,6 +80,13 @@ class T4T5Filters:
 
 def _active(value: str | None) -> bool:
     return value is not None and value != ""
+
+
+def _matrix_unfiltered(identity: dict[str, Any], filters: T4T5Filters) -> bool:
+    """Whether publication metadata can safely replace a scoped fact count."""
+    return _is_resolved_matrix_scope(identity) and not any(
+        _active(value) for value in filters.__dict__.values()
+    )
 
 
 def _validated_filters(filters: T4T5Filters) -> T4T5Filters:
@@ -170,6 +182,42 @@ def _latest_date(
     date_from: date | None,
     date_to: date | None,
 ) -> date | None:
+    if _matrix_unfiltered(identity, filters):
+        _assert_map_available(engine)
+        parameters: dict[str, object] = {
+            "source_id": SOURCE_ID,
+            "contract_version": CONTRACT_VERSION,
+        }
+        date_predicates = []
+        if date_from is not None:
+            parameters["date_from"] = date_from
+            date_predicates.append("head.data_date >= :date_from")
+        if date_to is not None:
+            parameters["date_to"] = date_to
+            date_predicates.append("head.data_date <= :date_to")
+        date_sql = " AND " + " AND ".join(date_predicates) if date_predicates else ""
+        consistency = _daily_metadata_consistency_expression(engine.dialect.name)
+        with engine.connect() as connection:
+            row = connection.execute(text(f"""
+                SELECT MAX(head.data_date) AS snapshot_date,
+                       CASE WHEN {consistency} THEN 1 ELSE 0 END AS metadata_consistent
+                FROM source_daily_head AS head
+                JOIN source_publications AS publication
+                  ON publication.source_id = head.source_id
+                 AND publication.publication_id = head.publication_id
+                 AND publication.contract_version = :contract_version
+                 AND publication.publication_state = 'PUBLISHED'
+                JOIN source_publication_dates AS publication_dates
+                  ON publication_dates.source_id = head.source_id
+                 AND publication_dates.publication_id = head.publication_id
+                 AND publication_dates.data_date = head.data_date
+                WHERE head.source_id = :source_id
+                  AND publication_dates.row_count > 0
+                  {date_sql}
+            """), parameters).mappings().one()
+        if row["metadata_consistent"]:
+            return row["snapshot_date"]
+
     plan, where, parameters = _query(engine, identity, filters, date_from=date_from, date_to=date_to)
     _assert_map_available(engine)
     with engine.connect() as connection:
@@ -209,6 +257,60 @@ def _snapshot_metadata(connection: Connection, snapshot_date: date) -> dict[str,
     }
 
 
+def _matrix_metadata_count(
+    connection: Connection,
+    *,
+    date_from: date | None,
+    date_to: date | None,
+) -> int | None:
+    """Return an unfiltered MATRIX count from validated active-head metadata."""
+    parameters: dict[str, object] = {
+        "source_id": SOURCE_ID,
+        "contract_version": CONTRACT_VERSION,
+    }
+    date_predicates = []
+    if date_from is not None:
+        parameters["date_from"] = date_from
+        date_predicates.append("head.data_date >= :date_from")
+    if date_to is not None:
+        parameters["date_to"] = date_to
+        date_predicates.append("head.data_date <= :date_to")
+    date_sql = " AND " + " AND ".join(date_predicates) if date_predicates else ""
+    consistency = _daily_metadata_consistency_expression(connection.dialect.name)
+    row = connection.execute(text(f"""
+        SELECT COALESCE(SUM(publication_dates.row_count), 0) AS total,
+               CASE WHEN {consistency} THEN 1 ELSE 0 END AS metadata_consistent
+        FROM source_daily_head AS head
+        JOIN source_publications AS publication
+          ON publication.source_id = head.source_id
+         AND publication.publication_id = head.publication_id
+         AND publication.contract_version = :contract_version
+         AND publication.publication_state = 'PUBLISHED'
+        JOIN source_publication_dates AS publication_dates
+          ON publication_dates.source_id = head.source_id
+         AND publication_dates.publication_id = head.publication_id
+         AND publication_dates.data_date = head.data_date
+        WHERE head.source_id = :source_id
+          {date_sql}
+    """), parameters).mappings().one()
+    if not row["metadata_consistent"]:
+        return None
+    return int(row["total"])
+
+
+def _matrix_mapping_filters_absent(identity: dict[str, Any], filters: T4T5Filters) -> bool:
+    """Mapping joins may follow pagination only for MATRIX and unmapped filters."""
+    return _is_resolved_matrix_scope(identity) and not any(
+        _active(value) for value in (
+            filters.region,
+            filters.rm_regional,
+            filters.base_code,
+            filters.rm_region,
+            filters.rm_responsible,
+        )
+    )
+
+
 def get_dashboard_summary(
     engine: Engine,
     *,
@@ -217,30 +319,50 @@ def get_dashboard_summary(
     date_from: date | None,
     date_to: date | None,
 ) -> dict[str, object]:
-    snapshot_date = _latest_date(engine, identity, filters, date_from, date_to)
-    if snapshot_date is None:
-        return {
-            "sourceId": SOURCE_ID, "contractVersion": CONTRACT_VERSION,
-            "hasData": False, "snapshotDate": None, "metadata": None,
-            "totals": None,
-        }
     plan, where, parameters = _query(
-        engine, identity, filters, date_from=snapshot_date, date_to=snapshot_date,
+        engine, identity, filters, date_from=date_from, date_to=date_to,
     )
+    _assert_map_available(engine)
+    scoped_fields = [
+        "fact.data_date AS data_date",
+        "effective_entry.regional_name AS mapped_region",
+        "effective_entry.base_code AS mapped_base_code",
+        "fact.source_base_name AS source_base_name",
+        "fact.seller_id AS seller_id",
+        *(f"fact.`{field}` AS `{field}`" for field in STATUS_COLUMNS),
+    ]
     status_sql = ", ".join(
-        f"COALESCE(SUM(fact.`{field}`), 0) AS `{field}`" for field in STATUS_COLUMNS
+        f"COALESCE(SUM(scoped.`{field}`), 0) AS `{field}`" for field in STATUS_COLUMNS
     )
     with engine.connect() as connection:
         row = connection.execute(text(f"""
-            SELECT COUNT(*) AS record_count,
-                   COUNT(DISTINCT effective_entry.regional_name) AS region_count,
-                   COUNT(DISTINCT fact.source_base_name) AS pdd_count,
-                   COUNT(DISTINCT fact.seller_id) AS store_count,
-                   SUM(CASE WHEN effective_entry.base_code IS NULL THEN 1 ELSE 0 END) AS unmapped_record_count,
+            WITH scoped_rows AS (
+                SELECT {', '.join(scoped_fields)}
+                {plan.from_sql}
+                WHERE {where}
+            ), latest_snapshot AS (
+                SELECT MAX(data_date) AS snapshot_date
+                FROM scoped_rows
+            )
+            SELECT latest_snapshot.snapshot_date,
+                   COUNT(scoped.data_date) AS record_count,
+                   COUNT(DISTINCT scoped.mapped_region) AS region_count,
+                   COUNT(DISTINCT scoped.source_base_name) AS pdd_count,
+                   COUNT(DISTINCT scoped.seller_id) AS store_count,
+                   SUM(CASE WHEN scoped.data_date IS NOT NULL AND scoped.mapped_base_code IS NULL THEN 1 ELSE 0 END) AS unmapped_record_count,
                    {status_sql}
-            {plan.from_sql}
-            WHERE {where}
+            FROM latest_snapshot
+            LEFT JOIN scoped_rows AS scoped
+              ON scoped.data_date = latest_snapshot.snapshot_date
+            GROUP BY latest_snapshot.snapshot_date
         """), parameters).mappings().one()
+        snapshot_date = row["snapshot_date"]
+        if snapshot_date is None:
+            return {
+                "sourceId": SOURCE_ID, "contractVersion": CONTRACT_VERSION,
+                "hasData": False, "snapshotDate": None, "metadata": None,
+                "totals": None,
+            }
         metadata = _snapshot_metadata(connection, snapshot_date)
     if metadata is None:
         raise DataFoundationError("published_snapshot_metadata_inconsistent", 503)
@@ -300,24 +422,30 @@ def get_group_page(
             ", COUNT(DISTINCT fact.seller_id) AS distinct_stores"
         )
     with engine.connect() as connection:
-        total = int(connection.execute(text(f"""
-            SELECT COUNT(*) FROM (
-                SELECT 1 {plan.from_sql} WHERE {where} GROUP BY {group_by}
-            ) AS grouped_rows
-        """), parameters).scalar_one())
-        rows = connection.execute(text(f"""
+        rows = list(connection.execute(text(f"""
             SELECT {', '.join(selected)}, COUNT(*) AS record_count
-                   {extra_sql}, {status_sql}
+                   {extra_sql}, {status_sql}, COUNT(*) OVER() AS total_groups
             {plan.from_sql}
             WHERE {where}
             GROUP BY {group_by}
             ORDER BY record_count DESC, {group_by}
             LIMIT :group_limit OFFSET :group_offset
-        """), {**parameters, "group_limit": limit, "group_offset": offset}).mappings()
+        """), {**parameters, "group_limit": limit, "group_offset": offset}).mappings())
+        total = int(rows[0]["total_groups"]) if rows else 0
+        if not rows and offset > 0:
+            # Keep the historical total when a caller requests a page past the
+            # end. Normal pages need only the grouped query above.
+            total = int(connection.execute(text(f"""
+                SELECT COUNT(*) FROM (
+                    SELECT 1 {plan.from_sql} WHERE {where} GROUP BY {group_by}
+                ) AS grouped_rows
+            """), parameters).scalar_one())
         output = []
         for row in rows:
+            item = dict(row)
+            item.pop("total_groups", None)
             output.append({
-                **dict(row),
+                **item,
                 "record_count": int(row["record_count"]),
                 **{field: int(row[field] or 0) for field in STATUS_COLUMNS},
             })
@@ -335,42 +463,95 @@ def get_filter_options(
     date_from: date | None,
     date_to: date | None,
 ) -> dict[str, object]:
-    snapshot_date = _latest_date(engine, identity, filters, date_from, date_to)
-    if snapshot_date is None:
-        return {"sourceId": SOURCE_ID, "snapshotDate": None, "regions": [], "rms": [], "pdds": [], "origins": []}
+    _assert_map_available(engine)
     plan, where, parameters = _query(
-        engine, identity, filters, date_from=snapshot_date, date_to=snapshot_date,
+        engine, identity, filters, date_from=date_from, date_to=date_to,
     )
     with engine.connect() as connection:
-        regions = connection.execute(text(f"""
-            SELECT DISTINCT COALESCE(effective_entry.regional_name, 'Sem regional') AS value
-            {plan.from_sql} WHERE {where}
-            ORDER BY value LIMIT 500
-        """), parameters).scalars().all()
-        rms = connection.execute(text(f"""
-            SELECT DISTINCT COALESCE(effective_entry.regional_name, 'Sem regional') AS regional_name,
-                            COALESCE(effective_entry.rm_region, 'Sem região do RM') AS rm_region,
-                            COALESCE(effective_entry.rm_responsible, 'Sem RM') AS rm_responsible
-            {plan.from_sql} WHERE {where}
-            ORDER BY regional_name, rm_region, rm_responsible LIMIT 1000
+        rows = connection.execute(text(f"""
+            WITH scoped_rows AS (
+                SELECT fact.data_date AS data_date,
+                       COALESCE(effective_entry.regional_name, 'Sem regional') AS regional_name,
+                       COALESCE(effective_entry.rm_region, 'Sem região do RM') AS rm_region,
+                       COALESCE(effective_entry.rm_responsible, 'Sem RM') AS rm_responsible,
+                       fact.source_base_name AS source_base_name,
+                       fact.order_origin AS order_origin
+                {plan.from_sql}
+                WHERE {where}
+            ), latest_snapshot AS (
+                SELECT MAX(data_date) AS snapshot_date
+                FROM scoped_rows
+            ), option_rows AS (
+                SELECT DISTINCT
+                       scoped.regional_name,
+                       scoped.rm_region,
+                       scoped.rm_responsible,
+                       scoped.source_base_name,
+                       scoped.order_origin
+                FROM scoped_rows AS scoped
+                JOIN latest_snapshot
+                  ON scoped.data_date = latest_snapshot.snapshot_date
+            ), region_options AS (
+                SELECT DISTINCT regional_name AS value
+                FROM option_rows ORDER BY value LIMIT 500
+            ), rm_options AS (
+                SELECT DISTINCT regional_name, rm_region, rm_responsible
+                FROM option_rows
+                ORDER BY regional_name, rm_region, rm_responsible LIMIT 1000
+            ), pdd_options AS (
+                SELECT DISTINCT source_base_name AS value
+                FROM option_rows
+                WHERE source_base_name IS NOT NULL
+                ORDER BY value LIMIT 3000
+            ), origin_options AS (
+                SELECT DISTINCT order_origin AS value
+                FROM option_rows ORDER BY value LIMIT 1000
+            )
+            SELECT 'snapshot' AS kind,
+                   CAST(snapshot_date AS CHAR) AS first_value,
+                   NULL AS second_value,
+                   NULL AS third_value
+            FROM latest_snapshot
+            UNION ALL
+            SELECT 'region' AS kind, value AS first_value, NULL AS second_value, NULL AS third_value
+            FROM region_options
+            UNION ALL
+            SELECT 'rm', regional_name, rm_region, rm_responsible FROM rm_options
+            UNION ALL
+            SELECT 'pdd', value, NULL, NULL FROM pdd_options
+            UNION ALL
+            SELECT 'origin', value, NULL, NULL FROM origin_options
+            ORDER BY kind, first_value, second_value, third_value
         """), parameters).mappings().all()
-        pdds = connection.execute(text(f"""
-            SELECT DISTINCT fact.source_base_name AS value
-            {plan.from_sql} WHERE {where} AND fact.source_base_name IS NOT NULL
-            ORDER BY value LIMIT 3000
-        """), parameters).scalars().all()
-        origins = connection.execute(text(f"""
-            SELECT DISTINCT fact.order_origin AS value
-            {plan.from_sql} WHERE {where}
-            ORDER BY value LIMIT 1000
-        """), parameters).scalars().all()
+    snapshot_date = next(
+        (date.fromisoformat(str(row["first_value"])) for row in rows
+         if row["kind"] == "snapshot" and row["first_value"] is not None),
+        None,
+    )
+    regions: list[str] = []
+    rms: list[dict[str, str]] = []
+    pdds: list[str] = []
+    origins: list[str] = []
+    for row in rows:
+        if row["kind"] == "region":
+            regions.append(str(row["first_value"]))
+        elif row["kind"] == "rm":
+            rms.append({
+                "regional": str(row["first_value"]),
+                "region": str(row["second_value"]),
+                "responsible": str(row["third_value"]),
+            })
+        elif row["kind"] == "pdd":
+            pdds.append(str(row["first_value"]))
+        else:
+            origins.append(str(row["first_value"]))
     return {
         "sourceId": SOURCE_ID,
         "snapshotDate": snapshot_date,
-        "regions": [str(value) for value in regions],
-        "rms": [{"regional": str(row["regional_name"]), "region": str(row["rm_region"]), "responsible": str(row["rm_responsible"])} for row in rms],
-        "pdds": [str(value) for value in pdds],
-        "origins": [str(value) for value in origins],
+        "regions": regions,
+        "rms": rms,
+        "pdds": pdds,
+        "origins": origins,
     }
 
 
@@ -390,9 +571,29 @@ def get_detail_page(
     contract = get_contract(SOURCE_ID, CONTRACT_VERSION)
     selected_columns = ", ".join(f"fact.`{column.key}` AS `{column.key}`" for column in contract.columns)
     order = "fact.data_date DESC, fact.source_row_no ASC"
+    matrix_metadata_eligible = _matrix_unfiltered(identity, filters)
+    page_before_mapping = _matrix_mapping_filters_absent(identity, filters)
     with engine.connect() as connection:
-        total = int(connection.execute(text(f"SELECT COUNT(*) {plan.from_sql} WHERE {where}"), parameters).scalar_one())
-        result = connection.execute(text(f"""
+        total = _matrix_metadata_count(
+            connection, date_from=date_from, date_to=date_to,
+        ) if matrix_metadata_eligible else None
+        if total is None:
+            total = int(connection.execute(
+                text(f"SELECT COUNT(*) {plan.from_sql} WHERE {where}"), parameters,
+            ).scalar_one())
+        select_sql = f"""
+            SELECT {selected_columns}, fact.publication_id AS publication_id,
+                   fact.source_row_no AS source_row_no,
+                   effective_entry.base_code AS effective_base_code,
+                   effective_entry.base_name AS mapped_base_name,
+                   effective_entry.regional_name AS mapped_region,
+                   effective_entry.rm_region AS mapped_rm_area,
+                   effective_entry.rm_responsible AS mapped_rm,
+                   fact.mapping_resolution AS mapping_resolution
+            FROM page_facts AS fact
+            {plan.mapping_from_sql}
+            ORDER BY {order}
+        """ if page_before_mapping else f"""
             SELECT {selected_columns}, fact.publication_id AS publication_id,
                    fact.source_row_no AS source_row_no,
                    effective_entry.base_code AS effective_base_code,
@@ -405,7 +606,22 @@ def get_detail_page(
             WHERE {where}
             ORDER BY {order}
             LIMIT :page_limit OFFSET :page_offset
-        """), {**parameters, "page_limit": limit, "page_offset": offset})
+        """
+        if page_before_mapping:
+            result = connection.execute(text(f"""
+                WITH page_facts AS (
+                    SELECT fact.*
+                    {plan.fact_from_sql}
+                    WHERE {where}
+                    ORDER BY {order}
+                    LIMIT :page_limit OFFSET :page_offset
+                )
+                {select_sql}
+            """), {**parameters, "page_limit": limit, "page_offset": offset})
+        else:
+            result = connection.execute(text(select_sql), {
+                **parameters, "page_limit": limit, "page_offset": offset,
+            })
         output = []
         for row in result.mappings():
             record = dict(row)

@@ -16,9 +16,11 @@ from app.services.collection_monitoring_t4_t5 import (
     create_xlsx_export,
     get_dashboard_summary,
     get_detail_page,
+    get_filter_options,
     get_group_page,
 )
 from app.services.data_foundation.contracts import contract_sha256, get_contract
+from app.services.data_foundation.queries import _query_plan
 from app.services.data_foundation.repository import DataFoundationError, fact_table_for_contract
 from app.services.data_foundation.xlsx_parser import (
     MAX_UNCOMPRESSED_WORKBOOK_BYTES,
@@ -192,6 +194,75 @@ def _fixture_data():
     return engine
 
 
+def _insert_aborted_snapshot_with_stale_head(engine, contract, table: str) -> None:
+    snapshot_date = date(2026, 10, 18)
+    publication_id = uuid.UUID(int=18).bytes
+    values: dict[str, object] = {
+        column.key: 0 if column.kind == "INTEGER" else None
+        for column in contract.columns
+    }
+    values.update({
+        "data_date": snapshot_date,
+        "source_base_name": "PDD ABORTED",
+        "customer_name": "Registro abortado",
+        "store_name": "Loja antiga",
+        "seller_id": "ABORTED-1",
+        "order_origin": "App",
+        "awaiting_collection": 99,
+    })
+    columns = [
+        "source_id", "publication_id", "map_version_id", "source_row_no",
+        *[column.key for column in contract.columns], "resolved_base_code", "mapping_resolution",
+    ]
+    bind_names = [f"v_{index}" for index in range(len(columns))]
+    insert_fact = text(
+        f"INSERT INTO `{table}` ({', '.join(f'`{column}`' for column in columns)}) "
+        f"VALUES ({', '.join(f':{name}' for name in bind_names)})"
+    )
+    values.update({
+        "source_id": contract.source_id,
+        "publication_id": publication_id,
+        "map_version_id": MAPPING_ID,
+        "source_row_no": 1,
+        "resolved_base_code": None,
+        "mapping_resolution": "UNMAPPED",
+    })
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO source_publications
+              (publication_id, source_id, contract_version, version_no, map_version_id,
+               period_start, period_end, snapshot_as_of, published_at, row_count, publication_state)
+            VALUES (:publication_id, :source_id, 1, 18, :map_id,
+                    :snapshot_date, :snapshot_date, :snapshot_as_of, :published_at, 1, 'ABORTED')
+        """), {
+            "publication_id": publication_id,
+            "source_id": contract.source_id,
+            "map_id": MAPPING_ID,
+            "snapshot_date": snapshot_date,
+            "snapshot_as_of": "2026-10-18 10:00:00",
+            "published_at": "2026-10-18 10:05:00",
+        })
+        connection.execute(text("""
+            INSERT INTO source_publication_dates (source_id, publication_id, data_date, row_count)
+            VALUES (:source_id, :publication_id, :snapshot_date, 1)
+        """), {
+            "source_id": contract.source_id,
+            "publication_id": publication_id,
+            "snapshot_date": snapshot_date,
+        })
+        # Model a stale head as well as the real orphaned facts. The published
+        # publication-state join must still exclude this aborted snapshot.
+        connection.execute(text("""
+            INSERT INTO source_daily_head (source_id, data_date, publication_id)
+            VALUES (:source_id, :snapshot_date, :publication_id)
+        """), {
+            "source_id": contract.source_id,
+            "publication_id": publication_id,
+            "snapshot_date": snapshot_date,
+        })
+        connection.execute(insert_fact, {name: values[column] for name, column in zip(bind_names, columns)})
+
+
 def test_contract_is_versioned_and_keeps_the_fifteen_source_columns():
     contract = get_contract("collection_monitoring_t4_t5", 1)
     assert len(contract.columns) == 15
@@ -250,6 +321,28 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
     assert regional["totals"]["records"] == 1
     assert regional["totals"]["unmappedRecords"] == 0
 
+    matrix_options = get_filter_options(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    regional_options = get_filter_options(
+        engine, identity=REGIONAL_ADMIN, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    base_options = get_filter_options(
+        engine,
+        identity={
+            "platform_role": "USER", "organizational_scope": "base", "role": "regional",
+            "home_base": "BASE-SPE", "home_region": "SPE",
+        },
+        filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert matrix_options["regions"] == ["CE", "SPE", "Sem regional"]
+    assert regional_options["regions"] == ["SPE"]
+    assert regional_options["pdds"] == ["PDD SPE"]
+    assert base_options["pdds"] == ["PDD SPE"]
+
     regional_groups = get_group_page(
         engine, identity=MATRIX_ADMIN, dimension="region", filters=T4T5Filters(),
         snapshot_date=date(2026, 10, 20), limit=20, offset=0,
@@ -267,6 +360,89 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
         )
 
 
+def test_t4_t5_query_plan_starts_from_published_heads_without_changing_other_daily_sources():
+    matrix_plan = _query_plan(
+        "collection_monitoring_t4_t5", MATRIX_USER,
+        contract_version=1, date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        sql_dialect="mysql",
+    )
+    assert "FROM source_daily_head AS head" in matrix_plan.fact_from_sql
+    assert "STRAIGHT_JOIN source_publications AS active_publication" in matrix_plan.fact_from_sql
+    assert "publication_state = 'PUBLISHED'" in matrix_plan.fact_from_sql
+    assert "STRAIGHT_JOIN `fact_collection_monitoring_t4_t5` AS fact" in matrix_plan.fact_from_sql
+    assert "ROW_NUMBER()" not in matrix_plan.fact_from_sql
+    assert "head.data_date >= :date_from" in matrix_plan.where_sql
+    assert "head.data_date <= :date_to" in matrix_plan.where_sql
+
+    legacy_plan = _query_plan(
+        "collection_monitoring", MATRIX_USER,
+        contract_version=2, date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        sql_dialect="mysql",
+    )
+    assert "ROW_NUMBER()" in legacy_plan.fact_from_sql
+    assert "source_daily_head AS head" not in legacy_plan.fact_from_sql
+
+
+def test_aborted_t4_t5_facts_are_excluded_even_if_a_stale_head_exists():
+    engine, contract, table = _create_database()
+    _insert_aborted_snapshot_with_stale_head(engine, contract, table)
+
+    summary = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 18), date_to=date(2026, 10, 18),
+    )
+    options = get_filter_options(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 18), date_to=date(2026, 10, 18),
+    )
+    details = get_detail_page(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 18), date_to=date(2026, 10, 18), limit=50, offset=0,
+    )
+    groups = get_group_page(
+        engine, identity=MATRIX_USER, dimension="region", filters=T4T5Filters(),
+        snapshot_date=date(2026, 10, 18), limit=100, offset=0,
+    )
+
+    assert summary["hasData"] is False
+    assert options["snapshotDate"] is None
+    assert options["regions"] == []
+    assert details["records"] == []
+    assert details["total"] == 0
+    assert groups["rows"] == []
+    assert groups["total"] == 0
+
+
+def test_summary_and_filter_options_each_scan_t4_t5_facts_once():
+    engine = _fixture_data()
+    table = fact_table_for_contract("collection_monitoring_t4_t5", 1)
+    statements: list[str] = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        summary = get_dashboard_summary(
+            engine, identity=MATRIX_USER, filters=T4T5Filters(),
+            date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        )
+        summary_fact_queries = [sql for sql in statements if table in sql]
+        statements.clear()
+        options = get_filter_options(
+            engine, identity=MATRIX_USER, filters=T4T5Filters(),
+            date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+        )
+        options_fact_queries = [sql for sql in statements if table in sql]
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert summary["hasData"] is True
+    assert len(summary_fact_queries) == 1
+    assert options["snapshotDate"] == date(2026, 10, 20)
+    assert len(options_fact_queries) == 1
+
+
 def test_details_and_excel_keep_all_fifteen_original_columns_and_scope():
     engine = _fixture_data()
     detail = get_detail_page(
@@ -276,6 +452,33 @@ def test_details_and_excel_keep_all_fifteen_original_columns_and_scope():
     assert detail["total"] == 2
     assert len(detail["records"][0]) == 15 + 8
     assert all(row["mapped_region"] == "SPE" for row in detail["records"])
+
+    first_page = get_detail_page(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20), limit=2, offset=0,
+    )
+    last_page = get_detail_page(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20), limit=2, offset=2,
+    )
+    page_row_numbers = [row["source_row_no"] for row in first_page["records"] + last_page["records"]]
+    assert first_page["total"] == last_page["total"] == 3
+    assert len(first_page["records"]) == 2
+    assert len(last_page["records"]) == 1
+    assert len(set(page_row_numbers)) == 3
+
+    base_detail = get_detail_page(
+        engine,
+        identity={
+            "platform_role": "USER", "organizational_scope": "base", "role": "regional",
+            "home_base": "BASE-SPE", "home_region": "SPE",
+        },
+        filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20), limit=50, offset=0,
+    )
+    assert base_detail["total"] == 1
+    assert len(base_detail["records"]) == 1
+    assert base_detail["records"][0]["mapped_region"] == "SPE"
 
     export_path = create_xlsx_export(
         engine, identity=MATRIX_USER, filters=T4T5Filters(),

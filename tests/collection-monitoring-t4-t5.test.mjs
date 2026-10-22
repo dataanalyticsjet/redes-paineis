@@ -22,10 +22,27 @@ test("T4/T5 dashboard starts with the latest published date and queries server s
   assert.match(component, /apiPath\("groups"/);
   assert.match(component, /apiPath\("records"/);
   assert.match(component, /PAGE_SIZE = 50/);
-  assert.match(component, /requestRef\.current\?\.abort\(\)/);
+  assert.match(component, /controllersRef\.current/);
+  assert.match(component, /for \(const controller of controllers\) controller\.abort\(\)/);
   assert.match(component, /REQUEST_TIMEOUT_MS = 30_000/);
   assert.match(component, /snapshotAsOf \? new Intl\.DateTimeFormat/);
+  assert.doesNotMatch(component, /Promise\.all\(/);
   assert.doesNotMatch(component, /latest_only=false|limit=1000000/);
+
+  const cardsReady = component.indexOf('setStatus(nextSummary.hasData ? "ready" : "empty")');
+  const recordsRequest = component.indexOf('apiPath("records"');
+  const groupsRequest = component.indexOf('apiPath("groups"');
+  assert.ok(cardsReady >= 0 && recordsRequest > cardsReady);
+  assert.ok(groupsRequest > cardsReady);
+  assert.match(component, /setOptionsLoading\(true\)/);
+  assert.match(component, /setRecordsLoading\(true\)/);
+  assert.match(component, /setRegionalLoading\(true\)/);
+  assert.match(component, /status !== "ready" && status !== "empty"/);
+  assert.match(component, /status !== "ready" \|\| optionsLoading \|\| !summary\?\.hasData/);
+  assert.match(component, /status !== "ready" \|\| optionsLoading \|\| !summary\?\.snapshotDate/);
+  assert.match(component, /if \(!active \|\| controller\.signal\.aborted\) return/);
+  assert.match(component, /function changeRecordPage\(page: number\) \{\s*setRecords\(\[\]\);\s*setRecordsLoading\(true\);\s*setRecordsError\(null\);\s*setRecordPage\(page\);\s*\}/);
+  assert.doesNotMatch(component, /function changeRecordPage\(page: number\) \{[^}]*setSummary\(null\)/);
 });
 
 test("T4/T5 cards show independent source status sums and no inferred rates", async () => {

@@ -454,6 +454,7 @@ const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "Não foi possível carregar o Monitoramento T4 e T5. Tente novamente.": { en: "Could not load T4 and T5 monitoring. Try again.", zh: "无法加载 T4 和 T5 监控数据，请重试。" },
   "Sem dados para os filtros selecionados.": { en: "No data for the selected filters.", zh: "所选筛选条件没有数据。" },
   "Carregando agrupamento…": { en: "Loading grouped data…", zh: "正在加载分组数据…" },
+  "Carregando filtros operacionais…": { en: "Loading operational filters…", zh: "正在加载运营筛选项…" },
   "VISÃO CONSOLIDADA": { en: "CONSOLIDATED VIEW", zh: "综合视图" },
   "Monitoramento de Coleta T4 e T5": { en: "T4 and T5 Collection Monitoring", zh: "T4 和 T5 揽收监控" },
   "Acompanhe os volumes e status das coletas por regional, PDD, cliente, loja e motorista.": { en: "Track collection volumes and statuses by region, PDD, customer, store, and driver.", zh: "按区域、PDD、客户、店铺和司机查看揽收量及状态。" },
