@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, event, text
 from app.services.collection_monitoring_t4_t5 import (
     STATUS_COLUMNS,
     T4T5Filters,
+    _get_dashboard_summary_with_row_mapping,
     create_xlsx_export,
     get_dashboard_summary,
     get_detail_page,
@@ -306,6 +307,10 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
     assert matrix["totals"]["records"] == 3
     assert matrix["totals"]["unmappedRecords"] == 1
     assert matrix["totals"]["statuses"] == dict(zip(STATUS_COLUMNS, [15, 30, 45, 60, 75, 90, 105]))
+    assert matrix == _get_dashboard_summary_with_row_mapping(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
 
     filtered = get_dashboard_summary(
         engine, identity=MATRIX_USER, filters=T4T5Filters(region="SPE", customer_name="Cliente A"),
@@ -358,6 +363,117 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
             identity={"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "regional", "effective_regions": ["SPE"]},
             filters=T4T5Filters(), date_from=None, date_to=None,
         )
+
+
+def test_matrix_summary_resolves_distinct_pdd_keys_and_matches_row_level_reference():
+    engine, contract, table = _create_database()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO base_mapping_entries
+              (map_version_id, base_code, regional_name, base_name, uf_code, rm_region, rm_responsible)
+            VALUES
+              (:map_id, 'BASE-RJ', 'RJ', 'Twin PDD', 'RJ', 'RJ-RIO', 'RM Rio'),
+              (:map_id, 'BASE-MG', 'MG', 'Twin PDD', 'MG', 'MG-BH', 'RM Minas')
+        """), {"map_id": MAPPING_ID})
+        connection.execute(text("""
+            INSERT INTO base_mapping_name_decisions
+              (map_version_id, source_id, source_base_name, resolution_state, target_base_code)
+            VALUES
+              (:map_id, :source_id, 'Manual Exact', 'LINKED', 'BASE-CE'),
+              (:map_id, :source_id, 'Manual   Normalized', 'LINKED', 'BASE-SPE'),
+              (:map_id, :source_id, 'Decision Ambiguous', 'AMBIGUOUS', NULL)
+        """), {"map_id": MAPPING_ID, "source_id": contract.source_id})
+
+    _insert_publication(engine, contract, table, day=20, rows=[
+        {"source_base_name": "PDD SPE", "seller_id": "S-1", "awaiting_collection": 1},
+        {"source_base_name": " pdd   ce ", "seller_id": "S-2", "awaiting_collection": 2},
+        {"source_base_name": "Manual Exact", "seller_id": "S-3", "awaiting_collection": 3},
+        {"source_base_name": " manual   normalized ", "seller_id": "S-4", "awaiting_collection": 4},
+        {"source_base_name": "Twin PDD", "seller_id": "S-5", "awaiting_collection": 5},
+        {"source_base_name": "Decision Ambiguous", "seller_id": "S-6", "awaiting_collection": 6},
+        {"source_base_name": "Unknown PDD", "seller_id": "S-7", "awaiting_collection": 7},
+    ])
+
+    parameters = {
+        "identity": MATRIX_USER,
+        "filters": T4T5Filters(),
+        "date_from": date(2026, 10, 20),
+        "date_to": date(2026, 10, 20),
+    }
+    optimized = get_dashboard_summary(engine, **parameters)
+    reference = _get_dashboard_summary_with_row_mapping(engine, **parameters)
+
+    assert optimized == reference
+    assert optimized["totals"]["records"] == 7
+    assert optimized["totals"]["regions"] == 2
+    assert optimized["totals"]["unmappedRecords"] == 3
+    assert optimized["totals"]["statuses"]["awaiting_collection"] == 28
+
+
+def test_matrix_distinct_mapping_summary_keeps_fact_filters_and_falls_back_for_map_filters_and_scopes():
+    engine = _fixture_data()
+    fact_filtered = T4T5Filters(
+        customer_name="Cliente A", store_name="Loja 1", order_origin="App", search="PDD SPE",
+    )
+    optimized = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=fact_filtered,
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    reference = _get_dashboard_summary_with_row_mapping(
+        engine, identity=MATRIX_USER, filters=fact_filtered,
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert optimized == reference
+    assert optimized["totals"]["records"] == 1
+
+    matrix_regional_filter = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(region="SPE"),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert matrix_regional_filter["totals"]["records"] == 1
+
+    regional = get_dashboard_summary(
+        engine, identity=REGIONAL_ADMIN, filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert regional["totals"]["records"] == 1
+    assert regional["totals"]["unmappedRecords"] == 0
+
+    base = get_dashboard_summary(
+        engine,
+        identity={
+            "platform_role": "USER", "organizational_scope": "base", "role": "regional",
+            "home_base": "BASE-SPE", "home_region": "SPE",
+        },
+        filters=T4T5Filters(),
+        date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
+    )
+    assert base["totals"]["records"] == 1
+    assert base["totals"]["unmappedRecords"] == 0
+
+
+def test_matrix_summary_sql_resolves_mapping_after_distinct_keys_only():
+    engine = _fixture_data()
+    table = fact_table_for_contract("collection_monitoring_t4_t5", 1)
+    statements: list[str] = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        get_dashboard_summary(
+            engine, identity=MATRIX_USER, filters=T4T5Filters(),
+            date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    summary_sql = next(statement for statement in statements if table in statement)
+    assert "keyed_snapshot_facts AS" in summary_sql
+    assert "GROUP BY source_base_name_key, resolved_base_code_key, mapping_resolution_key" in summary_sql
+    assert "FROM mapping_keys AS fact" in summary_sql
+    assert summary_sql.index("GROUP BY source_base_name_key") < summary_sql.index("FROM mapping_keys AS fact")
 
 
 def test_t4_t5_query_plan_starts_from_published_heads_without_changing_other_daily_sources():

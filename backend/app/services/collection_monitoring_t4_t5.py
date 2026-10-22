@@ -311,7 +311,55 @@ def _matrix_mapping_filters_absent(identity: dict[str, Any], filters: T4T5Filter
     )
 
 
-def get_dashboard_summary(
+def _matrix_summary_distinct_mapping_eligible(
+    identity: dict[str, Any], filters: T4T5Filters,
+) -> bool:
+    """Allow row-independent national summaries to resolve DoomsDay per PDD key.
+
+    Any filter or authorization predicate that depends on the effective map keeps
+    using the existing row-level query. This fast path is limited to the backend
+    resolved MATRIX scope; ADMIN role alone never enables it.
+    """
+    return _matrix_mapping_filters_absent(identity, filters)
+
+
+def _mapping_key_sql(expression: str, dialect: str) -> str:
+    """Build an exact byte key, independent of database text collation."""
+    cast_type = "BLOB" if dialect == "sqlite" else "BINARY"
+    return f"HEX(CAST({expression} AS {cast_type}))"
+
+
+def _summary_result(connection: Connection, row: Any) -> dict[str, object]:
+    snapshot_date = row["snapshot_date"]
+    if snapshot_date is None:
+        return {
+            "sourceId": SOURCE_ID, "contractVersion": CONTRACT_VERSION,
+            "hasData": False, "snapshotDate": None, "metadata": None,
+            "totals": None,
+        }
+    metadata = _snapshot_metadata(connection, snapshot_date)
+    if metadata is None:
+        raise DataFoundationError("published_snapshot_metadata_inconsistent", 503)
+    totals = {
+        "records": int(row["record_count"]),
+        "regions": int(row["region_count"]),
+        "pdds": int(row["pdd_count"]),
+        "stores": int(row["store_count"]),
+        "unmappedRecords": int(row["unmapped_record_count"] or 0),
+        "statuses": {field: int(row[field] or 0) for field in STATUS_COLUMNS},
+    }
+    return {
+        "sourceId": SOURCE_ID,
+        "contractVersion": CONTRACT_VERSION,
+        "hasData": totals["records"] > 0,
+        "snapshotDate": snapshot_date,
+        "metadata": metadata,
+        "totals": totals,
+        "statusSumsAreIndependent": True,
+    }
+
+
+def _get_dashboard_summary_with_row_mapping(
     engine: Engine,
     *,
     identity: dict[str, Any],
@@ -319,6 +367,7 @@ def get_dashboard_summary(
     date_from: date | None,
     date_to: date | None,
 ) -> dict[str, object]:
+    """Reference/fallback summary retaining the original per-row map joins."""
     plan, where, parameters = _query(
         engine, identity, filters, date_from=date_from, date_to=date_to,
     )
@@ -356,33 +405,120 @@ def get_dashboard_summary(
               ON scoped.data_date = latest_snapshot.snapshot_date
             GROUP BY latest_snapshot.snapshot_date
         """), parameters).mappings().one()
-        snapshot_date = row["snapshot_date"]
-        if snapshot_date is None:
-            return {
-                "sourceId": SOURCE_ID, "contractVersion": CONTRACT_VERSION,
-                "hasData": False, "snapshotDate": None, "metadata": None,
-                "totals": None,
-            }
-        metadata = _snapshot_metadata(connection, snapshot_date)
-    if metadata is None:
-        raise DataFoundationError("published_snapshot_metadata_inconsistent", 503)
-    totals = {
-        "records": int(row["record_count"]),
-        "regions": int(row["region_count"]),
-        "pdds": int(row["pdd_count"]),
-        "stores": int(row["store_count"]),
-        "unmappedRecords": int(row["unmapped_record_count"] or 0),
-        "statuses": {field: int(row[field] or 0) for field in STATUS_COLUMNS},
-    }
-    return {
-        "sourceId": SOURCE_ID,
-        "contractVersion": CONTRACT_VERSION,
-        "hasData": totals["records"] > 0,
-        "snapshotDate": snapshot_date,
-        "metadata": metadata,
-        "totals": totals,
-        "statusSumsAreIndependent": True,
-    }
+        return _summary_result(connection, row)
+
+
+def _get_matrix_dashboard_summary_by_distinct_mapping_keys(
+    engine: Engine,
+    *,
+    identity: dict[str, Any],
+    filters: T4T5Filters,
+    date_from: date | None,
+    date_to: date | None,
+) -> dict[str, object]:
+    """Aggregate the national snapshot while resolving DoomsDay once per key.
+
+    Facts determine the latest matching date and every operational total. The
+    current DoomsDay resolver runs only against exact distinct source keys from
+    that snapshot; weighted unmapped counts preserve the original per-row sum.
+    """
+    plan, where, parameters = _query(
+        engine, identity, filters, date_from=date_from, date_to=date_to,
+    )
+    _assert_map_available(engine)
+    status_fields = ", ".join(
+        f"fact.`{field}` AS `{field}`" for field in STATUS_COLUMNS
+    )
+    summary_status_fields = ", ".join(
+        f"COALESCE(SUM(snapshot_facts.`{field}`), 0) AS `{field}`"
+        for field in STATUS_COLUMNS
+    )
+    name_key = _mapping_key_sql("snapshot_facts.source_base_name", engine.dialect.name)
+    resolved_key = _mapping_key_sql("snapshot_facts.resolved_base_code", engine.dialect.name)
+    resolution_key = _mapping_key_sql("snapshot_facts.mapping_resolution", engine.dialect.name)
+    with engine.connect() as connection:
+        row = connection.execute(text(f"""
+            WITH candidate_facts AS (
+                SELECT fact.data_date, fact.source_base_name, fact.seller_id,
+                       fact.resolved_base_code, fact.mapping_resolution,
+                       {status_fields}
+                {plan.fact_from_sql}
+                WHERE {where}
+            ), latest_snapshot AS (
+                SELECT MAX(data_date) AS snapshot_date
+                FROM candidate_facts
+            ), snapshot_facts AS (
+                SELECT candidate_facts.*
+                FROM candidate_facts
+                JOIN latest_snapshot
+                  ON candidate_facts.data_date = latest_snapshot.snapshot_date
+            ), keyed_snapshot_facts AS (
+                SELECT snapshot_facts.*,
+                       {name_key} AS source_base_name_key,
+                       {resolved_key} AS resolved_base_code_key,
+                       {resolution_key} AS mapping_resolution_key
+                FROM snapshot_facts
+            ), mapping_keys AS (
+                SELECT source_base_name_key,
+                       MIN(source_base_name) AS source_base_name,
+                       resolved_base_code_key,
+                       MIN(resolved_base_code) AS resolved_base_code,
+                       mapping_resolution_key,
+                       MIN(mapping_resolution) AS mapping_resolution,
+                       COUNT(*) AS fact_count
+                FROM keyed_snapshot_facts
+                GROUP BY source_base_name_key, resolved_base_code_key, mapping_resolution_key
+            ), resolved_mapping AS (
+                SELECT fact.source_base_name_key, fact.resolved_base_code_key,
+                       fact.mapping_resolution_key, fact.fact_count,
+                       effective_entry.base_code AS mapped_base_code,
+                       effective_entry.regional_name AS mapped_region
+                FROM mapping_keys AS fact
+                {plan.mapping_from_sql}
+            ), fact_totals AS (
+                SELECT COUNT(snapshot_facts.data_date) AS record_count,
+                       COUNT(DISTINCT snapshot_facts.source_base_name) AS pdd_count,
+                       COUNT(DISTINCT snapshot_facts.seller_id) AS store_count,
+                       {summary_status_fields}
+                FROM snapshot_facts
+            ), mapping_totals AS (
+                SELECT COUNT(DISTINCT resolved_mapping.mapped_region) AS region_count,
+                       COALESCE(SUM(CASE WHEN resolved_mapping.mapped_base_code IS NULL
+                                         THEN resolved_mapping.fact_count ELSE 0 END), 0)
+                           AS unmapped_record_count
+                FROM resolved_mapping
+            )
+            SELECT latest_snapshot.snapshot_date,
+                   fact_totals.record_count,
+                   mapping_totals.region_count,
+                   fact_totals.pdd_count,
+                   fact_totals.store_count,
+                   mapping_totals.unmapped_record_count,
+                   {', '.join(f'fact_totals.`{field}`' for field in STATUS_COLUMNS)}
+            FROM latest_snapshot
+            CROSS JOIN fact_totals
+            CROSS JOIN mapping_totals
+        """), parameters).mappings().one()
+        return _summary_result(connection, row)
+
+
+def get_dashboard_summary(
+    engine: Engine,
+    *,
+    identity: dict[str, Any],
+    filters: T4T5Filters,
+    date_from: date | None,
+    date_to: date | None,
+) -> dict[str, object]:
+    if _matrix_summary_distinct_mapping_eligible(identity, filters):
+        return _get_matrix_dashboard_summary_by_distinct_mapping_keys(
+            engine, identity=identity, filters=filters,
+            date_from=date_from, date_to=date_to,
+        )
+    return _get_dashboard_summary_with_row_mapping(
+        engine, identity=identity, filters=filters,
+        date_from=date_from, date_to=date_to,
+    )
 
 
 def get_group_page(
