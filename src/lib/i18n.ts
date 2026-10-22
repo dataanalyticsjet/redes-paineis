@@ -20,6 +20,12 @@ export interface BilingualDashboardText {
 }
 
 const translations: Record<string, { en: string; zh: string; pt?: string }> = {
+  "PRIMEIRA DIGITALIZAÇÃO": { en: "FIRST SCAN", zh: "首次扫描" },
+  "Últimos 3 dias do filtro; a variação compara somente o último dia com o dia anterior.": { en: "Last 3 available filtered dates; change compares only the last date with the preceding date.", zh: "筛选范围内最近3个有数据的日期；变化仅比较最后一天与前一个日期。" },
+  "Volume previsto: último dia exibido. Variação diária convencional: (atual − anterior) / anterior; sem base de comparação ou denominador zero, —. A fórmula de variação do JMS ainda não foi confirmada.": { en: "Planned volume: last displayed date. Conventional daily change: (current − previous) / previous; no comparison or zero denominator: —. The JMS change formula is not yet confirmed.", zh: "预计量取最后显示日期。常规日变化：(当前−前期)/前期；无对比数据或分母为零时显示—。JMS变化公式尚未确认。" },
+  "Carregando retenção por regional…": { en: "Loading regional retention…", zh: "正在加载区域滞留数据…" },
+  "Não foi possível carregar a retenção por regional.": { en: "Unable to load regional retention.", zh: "无法加载区域滞留数据。" },
+
   "Performance por login": { en: "Performance by login", zh: "各登录来源表现" },
   "Taxa de coleta ponderada pelas quantidades.": { en: "Collection rate weighted by quantities.", zh: "按数量加权计算的揽收率。" },
   "Fonte de dados": { en: "Data source", zh: "数据来源" },

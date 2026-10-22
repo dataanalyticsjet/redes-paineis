@@ -379,3 +379,44 @@ export async function loadCollectionMonitoringV2ComparisonSnapshots(
     failedDates: results.filter((item) => item.failed).map((item) => item.date),
   };
 }
+
+
+export interface CollectionMonitoringV2RetentionRecord extends Record<string, unknown> {
+  data_date: string;
+  publication_id: string;
+  region: string;
+  row_count: number;
+}
+
+export async function loadCollectionMonitoringV2Retention(
+  period: { dateFrom?: string; dateTo?: string },
+  fetcher: Fetcher = apiFetch,
+  signal?: AbortSignal,
+  filters: { region?: string; rm?: string; rmArea?: string; base?: string; origin?: string; rgmRegions?: readonly string[] } = {},
+): Promise<{ aggregates: CollectionMonitoringV2RetentionRecord[] }> {
+  if (!period.dateFrom || !period.dateTo || validDate(period.dateFrom) > validDate(period.dateTo)) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "O período informado é inválido.");
+  }
+  const params = new URLSearchParams(query(period));
+  for (const [field, value] of Object.entries({ region: filters.region, rm: filters.rm, rm_area: filters.rmArea, base: filters.base, origin: filters.origin })) if (value) params.set(field, value);
+  if (filters.rgmRegions !== undefined) {
+    params.set("rgm_filter", "true");
+    for (const region of filters.rgmRegions) params.append("rgm_regions", region);
+  }
+  const result = await json<{ sourceId: string; contractVersion: number; aggregates: CollectionMonitoringV2RetentionRecord[] }>(
+    `/api/v2/collection-monitoring-v2/regional-retention?${params}`, fetcher, signal, COLLECTION_MONITORING_V2_REQUEST_TIMEOUT_MS,
+  );
+  if (result.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || result.contractVersion !== 2 || !Array.isArray(result.aggregates)) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
+  }
+  for (const row of result.aggregates) {
+    const date = validDate(row.data_date);
+    if (date < period.dateFrom || date > period.dateTo || !row.publication_id) throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação da comparação mudou durante o carregamento.");
+    if (typeof row.region !== "string" || !row.region) throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
+    for (const field of ["expected_dropoff", "expected_pickup", "status_received_at_base", "status_dispatched_from_base", "arrived_sorting_center", "row_count"]) {
+      if (row[field] == null || !Number.isSafeInteger(Number(row[field])) || Number(row[field]) < 0) throw new CollectionMonitoringV2LoadError("invalid_data", `A quantidade ${field} é inválida.`);
+    }
+    row.row_count = Number(row.row_count);
+  }
+  return result;
+}

@@ -19,11 +19,11 @@ test("Monitoramento V2 presents the translated seven-field filter row and keeps 
 test("retention tables show the approved provisional formulas and distinguish unavailable comparisons", () => {
   assert.match(component, /"Retenção por regional"/);
   assert.match(component, /"Retenção por RM"/);
-  assert.match(component, /collectionMonitoringV2PercentageVariation\(current\.retentionTotal, previous\.retentionTotal\)/);
+  assert.match(component, /<CollectionMonitoringV2RegionalRetention/);
   assert.match(component, /group\.retainedAtBase/);
   assert.match(component, /group\.dispatchedFromBase/);
   assert.match(component, /group\.arrivedAtCenter/);
-  assert.match(component, /t\("Comparação indisponível"\)/);
+
   assert.match(component, /t\("Sem dados"\)/);
   assert.match(component, /t\("As regras dos indicadores são operacionais provisórias/);
   assert.doesNotMatch(component, /Pendente de homologação/);

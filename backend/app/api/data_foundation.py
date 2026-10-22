@@ -49,6 +49,7 @@ from app.services.data_foundation.repository import (
     validate_job_again,
 )
 from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
+from app.services.collection_monitoring_v2_retention import get_regional_retention_table
 from app.services.collection_monitoring_t4_t5 import (
     MAX_GROUP_PAGE_SIZE,
     MAX_PAGE_SIZE as T4T5_MAX_PAGE_SIZE,
@@ -172,6 +173,32 @@ def _t4t5_filters(
 
 def _unlink_export(path: Path) -> None:
     path.unlink(missing_ok=True)
+
+
+@router.get("/collection-monitoring-v2/regional-retention")
+def collection_monitoring_v2_regional_retention(
+    date_from: date = Query(),
+    date_to: date = Query(),
+    region: str | None = Query(default=None, max_length=191),
+    rm: str | None = Query(default=None, max_length=191),
+    rm_area: str | None = Query(default=None, max_length=191),
+    base: str | None = Query(default=None, max_length=191),
+    origin: str | None = Query(default=None, max_length=191),
+    rgm_filter: bool = Query(default=False),
+    rgm_regions: list[str] | None = Query(default=None),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    try:
+        return get_regional_retention_table(
+            _engine(), identity=viewer.identity, date_from=date_from, date_to=date_to,
+            region=region, rm=rm, rm_area=rm_area, base=base, origin=origin,
+            rgm_filter=rgm_filter, rgm_regions=rgm_regions,
+        )
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 
 
 @router.get("/collection-monitoring-t4-t5/summary")

@@ -8,13 +8,10 @@ import {
   COLLECTION_MONITORING_V2_COLUMNS,
   COLLECTION_MONITORING_V2_HEADERS,
   CollectionMonitoringV2LoadError,
-  collectionMonitoringV2ComparisonDates,
-  loadCollectionMonitoringV2ComparisonSnapshots,
   loadPublishedCollectionMonitoringV2,
 } from "../../lib/data-foundation/collection-monitoring-v2.ts";
 import {
   collectionMonitoringV2FilterOptions,
-  collectionMonitoringV2ComparisonSlots,
   collectionMonitoringV2BaseDetailMatrix,
   collectionMonitoringV2RegionalSummaryMatrix,
   collectionMonitoringV2RmSummaryMatrix,
@@ -24,7 +21,6 @@ import {
   formatCollectionMonitoringV2Value,
   groupCollectionMonitoringV2BaseDetails,
   groupCollectionMonitoringV2Rows,
-  collectionMonitoringV2PercentageVariation,
   collectionMonitoringV2RowsForDate,
   latestCollectionMonitoringV2Snapshot,
   mapCollectionMonitoringV2Record,
@@ -36,6 +32,8 @@ import {
   type CollectionMonitoringV2Row,
   type CollectionMonitoringV2StatusField,
 } from "../../lib/data-foundation/collection-monitoring-v2-dashboard.ts";
+
+import { CollectionMonitoringV2RegionalRetention } from "./collection-monitoring-v2-regional-retention.tsx";
 
 interface Props {
   t: DashboardTranslator;
@@ -90,6 +88,7 @@ async function downloadExcel(
   period: CollectionMonitoringV2Filters,
   baseDetails: readonly CollectionMonitoringV2BaseDetail[],
   t: DashboardTranslator,
+  additionalTables: readonly { name: string; matrix: readonly (readonly ExportCell[])[]; percentageColumns?: readonly number[] }[] = [],
 ): Promise<void> {
   const XLSXModule = await import("xlsx-js-style");
   const XLSX = XLSXModule.default ?? XLSXModule;
@@ -120,6 +119,17 @@ async function downloadExcel(
   }
   worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: COLLECTION_MONITORING_V2_COLUMNS.length - 1 } }) };
   XLSX.utils.book_append_sheet(workbook, worksheet, "Dados");
+  for (const table of additionalTables) {
+    const sheet = XLSX.utils.aoa_to_sheet(table.matrix.map((row) => [...row]));
+    sheet["!cols"] = (table.matrix[0] ?? []).map(() => ({ wch: 22 }));
+    for (let index = 1; index < table.matrix.length; index += 1) {
+      for (const column of table.percentageColumns ?? []) {
+        const cell = sheet[XLSX.utils.encode_cell({ r: index, c: column })];
+        if (cell && typeof cell.v === "number") cell.z = "0.0%";
+      }
+    }
+    XLSX.utils.book_append_sheet(workbook, sheet, table.name);
+  }
   XLSX.writeFile(workbook, `monitoramento-coleta-v2_${period.dateFrom || "inicio"}_${period.dateTo || "fim"}.xlsx`, { compression: true });
 }
 
@@ -127,9 +137,6 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [reload, setReload] = useState(0);
   const [rows, setRows] = useState<CollectionMonitoringV2Row[]>([]);
-  const [comparisonRows, setComparisonRows] = useState<CollectionMonitoringV2Row[]>([]);
-  const [comparisonLoadFailures, setComparisonLoadFailures] = useState<string[]>([]);
-  const [comparisonPendingDates, setComparisonPendingDates] = useState<string[]>([]);
   const [requestedPeriod, setRequestedPeriod] = useState<CollectionMonitoringV2Period | undefined>();
   const [progress, setProgress] = useState({ loaded: 0, total: 0 });
   const [progressScope, setProgressScope] = useState<string | null>(null);
@@ -159,33 +166,14 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       if (!active) return;
       const mapped = result.records.map(mapCollectionMonitoringV2Record);
       setRows(mapped);
-      setComparisonRows([]);
-      setComparisonLoadFailures([]);
       setPublishedAt(result.publishedAt);
       setPublicationCount(result.publicationIds.length);
       setFilters((current) => ({ ...current, dateFrom: result.period.dateFrom, dateTo: result.period.dateTo }));
       setLoadedScope(scopeKey);
       setStatus(mapped.length ? "ready" : "empty");
-      const comparisonDates = collectionMonitoringV2ComparisonDates(result.dates, result.period);
-      setComparisonPendingDates(comparisonDates);
-      if (comparisonDates.length > 0) {
-        void loadCollectionMonitoringV2ComparisonSnapshots(result.dates, result.period, undefined, controller.signal).then((comparison) => {
-          if (!active || controller.signal.aborted) return;
-          setComparisonRows(comparison.records.map(mapCollectionMonitoringV2Record));
-          setComparisonLoadFailures(comparison.failedDates);
-          setComparisonPendingDates([]);
-        }).catch(() => {
-          if (!active || controller.signal.aborted) return;
-          setComparisonLoadFailures(comparisonDates);
-          setComparisonPendingDates([]);
-        });
-      }
     }).catch((cause: unknown) => {
       if (!active || controller.signal.aborted) return;
       setRows([]);
-      setComparisonRows([]);
-      setComparisonLoadFailures([]);
-      setComparisonPendingDates([]);
       setLoadedScope(scopeKey);
       if (cause instanceof CollectionMonitoringV2LoadError && cause.kind === "empty") {
         setStatus("empty");
@@ -205,9 +193,6 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   useEffect(() => subscribeToProtectedApiAuthorizationFailure(() => {
     activeRequest.current?.abort();
     setRows([]);
-    setComparisonRows([]);
-    setComparisonLoadFailures([]);
-    setComparisonPendingDates([]);
     setLoadedScope(scopeKey);
     setStatus("error");
     setError(t("O acesso aos dados mudou. Atualize a autorização para continuar."));
@@ -219,7 +204,15 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   }), [rows, filters.dateFrom, filters.dateTo]);
   const options = useMemo(() => collectionMonitoringV2FilterOptions(periodRows), [periodRows]);
   const filteredRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, filters), [rows, filters]);
-  const comparisonSlots = useMemo(() => collectionMonitoringV2ComparisonSlots(periodRows, comparisonRows), [periodRows, comparisonRows]);
+  const retentionPublicationSignature = useMemo(() => {
+    const dates = new Set([...new Set(filteredRows.map((row) => String(row.data_date).slice(0, 10)))].sort().slice(-3));
+    const counts = new Map<string, number>();
+    for (const row of filteredRows) if (dates.has(String(row.data_date).slice(0, 10))) {
+      const key = `${String(row.data_date).slice(0, 10)}:${row.publication_id}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return JSON.stringify([...counts].map(([key, count]) => `${key}:${count}`).sort());
+  }, [filteredRows]);
   const currentSnapshot = useMemo(() => latestCollectionMonitoringV2Snapshot(periodRows), [periodRows]);
   const currentRows = useMemo(() => collectionMonitoringV2RowsForDate(filteredRows, currentSnapshot.date ?? undefined), [filteredRows, currentSnapshot.date]);
   const metrics = useMemo(() => summarizeCollectionMonitoringV2(currentRows), [currentRows]);
@@ -236,18 +229,6 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     const activePage = Math.min(detailPage, pageCount);
     return { matched, pageCount, activePage, rows: matched.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE) };
   }, [baseDetails, detailPage, detailQuery, language]);
-  const comparisonRowsWithFilters = useMemo(() => filterCollectionMonitoringV2Rows(
-    [...rows, ...comparisonRows],
-    { region: filters.region, rm: filters.rm, rmArea: filters.rmArea, rgm: filters.rgm, base: filters.base, origin: filters.origin },
-  ), [rows, comparisonRows, filters.region, filters.rm, filters.rmArea, filters.rgm, filters.base, filters.origin]);
-  const comparisonGroups = useMemo(() => new Map(comparisonSlots.map((slot) => [
-    slot.key,
-    new Map(groupCollectionMonitoringV2Rows(collectionMonitoringV2RowsForDate(comparisonRowsWithFilters, slot.date), "region").map((group) => [groupIdentity(group, "region"), group])),
-  ])), [comparisonSlots, comparisonRowsWithFilters]);
-  const rmComparisonGroups = useMemo(() => new Map(comparisonSlots.map((slot) => [
-    slot.key,
-    new Map(groupCollectionMonitoringV2Rows(collectionMonitoringV2RowsForDate(comparisonRowsWithFilters, slot.date), "rm").map((group) => [groupIdentity(group, "rm"), group])),
-  ])), [comparisonSlots, comparisonRowsWithFilters]);
   const currentMappedBaseCount = useMemo(() => new Set(currentRows
     .filter((row) => row.mappingConfirmed && row.baseCode !== "—")
     .map((row) => row.baseCode)).size, [currentRows]);
@@ -268,9 +249,6 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     if (key === "dateFrom" || key === "dateTo") {
       activeRequest.current?.abort();
       setRows([]);
-      setComparisonRows([]);
-      setComparisonLoadFailures([]);
-      setComparisonPendingDates([]);
       setLoadedScope(null);
       setStatus("loading");
       setError(null);
@@ -288,9 +266,6 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     if (requestedPeriod) {
       activeRequest.current?.abort();
       setRows([]);
-      setComparisonRows([]);
-      setComparisonLoadFailures([]);
-      setComparisonPendingDates([]);
       setLoadedScope(null);
       setStatus("loading");
       setError(null);
@@ -327,85 +302,29 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     </label>
   );
 
-  const formatComparisonDate = (date: string) => new Intl.DateTimeFormat(dashboardLocale(language), {
-    day: "2-digit",
-    month: "short",
-    timeZone: "UTC",
-  }).format(new Date(`${date}T00:00:00.000Z`));
-  const slot = (key: "d2" | "d1" | "current") => comparisonSlots.find((item) => item.key === key);
-  const slotLabel = (key: "d2" | "d1" | "current") => {
-    const item = slot(key);
-    return item ? formatComparisonDate(item.date) : t("Sem dados");
-  };
-  const comparisonValue = (identity: string, key: "d2" | "d1" | "current", dimension: "region" | "rm") => {
-    const comparisonDate = slot(key)?.date;
-    if (!comparisonDate) return t("Sem dados");
-    if (comparisonLoadFailures.includes(comparisonDate)) return t("Comparação indisponível");
-    if (comparisonPendingDates.includes(comparisonDate)) return t("Carregando comparação");
-    const groups = dimension === "region" ? comparisonGroups : rmComparisonGroups;
-    const group = groups.get(key)?.get(identity);
-    return group ? number(group.retentionTotal) : t("Sem dados");
-  };
-  const variationValue = (identity: string, dimension: "region" | "rm") => {
-    const d1Date = slot("d1")?.date;
-    const currentDate = slot("current")?.date;
-    if (!d1Date || !currentDate) return t("Sem dados");
-    if (comparisonLoadFailures.includes(d1Date) || comparisonLoadFailures.includes(currentDate)) return t("Comparação indisponível");
-    if (comparisonPendingDates.includes(d1Date) || comparisonPendingDates.includes(currentDate)) return t("Carregando comparação");
-    const groups = dimension === "region" ? comparisonGroups : rmComparisonGroups;
-    const previous = groups.get("d1")?.get(identity);
-    const current = groups.get("current")?.get(identity);
-    if (!previous || !current) return t("Sem dados");
-    const variation = collectionMonitoringV2PercentageVariation(current.retentionTotal, previous.retentionTotal);
-    return variation === null ? t("Não calculável") : percent(variation);
-  };
-  const comparisonTable = (
-    title: string,
-    groups: ReturnType<typeof groupCollectionMonitoringV2Rows>,
-    dimension: "region" | "rm",
-  ) => {
-    const orderedGroups = [...groups].sort((left, right) => dimension === "region"
-      ? left.region.localeCompare(right.region, dashboardLocale(language))
-      : left.rmArea.localeCompare(right.rmArea, dashboardLocale(language)) || left.rm.localeCompare(right.rm, dashboardLocale(language)) || left.region.localeCompare(right.region, dashboardLocale(language)));
+  const comparisonTable = (title: string, groups: CollectionMonitoringV2Group[], dimension: "rm") => {
+    const orderedGroups = [...groups].sort((left, right) => left.rmArea.localeCompare(right.rmArea, dashboardLocale(language)) || left.rm.localeCompare(right.rm, dashboardLocale(language)) || left.region.localeCompare(right.region, dashboardLocale(language)));
     return <section className="collection-monitoring-v2-card collection-monitoring-v2-retention-card" key={title}>
       <div className="collection-monitoring-v2-section-heading">
-        <div><h2>{t(title)}</h2><p>{dimension === "region"
-          ? t("D-2 e D-1 usam dias-calendário. Retenção total soma as três etapas e não representa necessariamente encomendas únicas.")
-          : t("Taxas usam volume previsto como denominador provisório. Retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
+        <div><h2>{t(title)}</h2><p>{t("Taxas usam volume previsto como denominador provisório. Retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
         <span>{number(orderedGroups.length)} {t("grupos")}</span>
       </div>
       <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-retention-scroll">
         <table className="collection-monitoring-v2-table collection-monitoring-v2-retention-table">
-          <thead>{dimension === "region" ? <tr>
-            <th>{t("Regional")}</th><th>RGM</th><th>{t("Volume previsto")}</th><th>{t("Retenção total")}</th>
-            <th>{t("Retido na base")}</th><th>{t("Despachado pela base")}</th><th>{t("Chegado ao centro")}</th>
-            {(["d2", "d1", "current"] as const).map((key) => <th key={key}><span>{t(key === "d2" ? "D-2" : key === "d1" ? "D-1" : "Atual")}</span><small>{slotLabel(key)}</small></th>)}
-            <th><span>{t("Variação")}</span><small>{t("D-1 até Atual")}</small></th>
-          </tr> : <tr>
+          <thead><tr>
             <th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Volume previsto")}</th>
             <th>{t("Retenção total")}</th><th>{t("Taxa de retenção")}</th>
             <th>{t("Retido na base")}</th><th>{t("Taxa")}</th>
             <th>{t("Despachado pela base")}</th><th>{t("Taxa")}</th>
             <th>{t("Chegado ao centro")}</th><th>{t("Taxa")}</th>
-          </tr>}</thead>
-          <tbody>{orderedGroups.map((group) => {
-            const identity = groupIdentity(group, dimension);
-            return <tr key={`${identity}:${group.label}`}>
-              {dimension === "region" ? <>
-                <td>{group.region}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
-                <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{number(group.retainedAtBase)}</td>
-                <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{number(group.arrivedAtCenter)}</td>
-                {(["d2", "d1", "current"] as const).map((key) => <td key={`${identity}-${key}`} className="number-cell">{comparisonValue(identity, key, "region")}</td>)}
-                <td className="number-cell">{variationValue(identity, "region")}</td>
-              </> : <>
-                <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
-                <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{percent(group.retentionRate)}</td>
-                <td className="number-cell">{number(group.retainedAtBase)}</td><td className="number-cell">{percent(group.retainedAtBaseRate)}</td>
-                <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{percent(group.dispatchedFromBaseRate)}</td>
-                <td className="number-cell">{number(group.arrivedAtCenter)}</td><td className="number-cell">{percent(group.arrivedAtCenterRate)}</td>
-              </>}
-            </tr>;
-          })}</tbody>
+          </tr></thead>
+          <tbody>{orderedGroups.map((group) => <tr key={`${groupIdentity(group, dimension)}:${group.label}`}>
+            <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
+            <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{percent(group.retentionRate)}</td>
+            <td className="number-cell">{number(group.retainedAtBase)}</td><td className="number-cell">{percent(group.retainedAtBaseRate)}</td>
+            <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{percent(group.dispatchedFromBaseRate)}</td>
+            <td className="number-cell">{number(group.arrivedAtCenter)}</td><td className="number-cell">{percent(group.arrivedAtCenterRate)}</td>
+          </tr>)}</tbody>
         </table>
         {orderedGroups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum grupo encontrado para os filtros selecionados.")}</p> : null}
       </div>
@@ -470,7 +389,8 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const periodSelector = <div className="collection-monitoring-v2-filter-grid">{dateFilters}</div>;
   if (status === "loading" || loadedScope !== scopeKey) return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" /><div><p>{t("Carregando publicação do Monitoramento de Coleta…")}</p>{progressScope === scopeKey && progress.total > 0 ? <p>{t("Carregando {loaded} de {total} registros do período…", { loaded: number(progress.loaded), total: number(progress.total) })}</p> : null}{periodSelector}</div></section>;
   if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : t("Aguardando primeira importação.")}</p>{periodSelector}</section>;
-  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setComparisonRows([]); setComparisonLoadFailures([]); setComparisonPendingDates([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
+
+  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
 
   const mappedRows = rows.filter((row) => row.mappingConfirmed);
   const mappedRegionCount = new Set(mappedRows.map((row) => row.region).filter((region) => region !== "Sem regional")).size;
@@ -521,14 +441,26 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       </details>
       <p className="collection-monitoring-v2-mapping-note"><ShieldCheck size={15} /> {t("Regional e responsáveis vêm somente do DoomsDay publicado; linhas sem vínculo permanecem nos totais nacionais autorizados como Sem regional.")}</p>
     </section>
+    <CollectionMonitoringV2RegionalRetention t={t} language={language} filters={filters} scopeKey={scopeKey} expectedPublicationSignature={retentionPublicationSignature} rgmRegions={filters.rgm ? [...new Set(periodRows.filter((row) => row.rgm === filters.rgm).map((row) => row.region))] : undefined}
+      onExport={(matrix) => void downloadExcel(filteredRows, filters, baseDetails, t, [
+        { name: "Retenção por regional", matrix, percentageColumns: [0, 1, 2, 3].map((index) => 3 + (index + 1) * ((matrix[0].length - 3) / 4) - 1) },
+        { name: "Monitoramento por regional", matrix: regionalSummaryMatrix, percentageColumns: [6, 7] },
+        { name: "Monitoramento por RM", matrix: rmSummaryMatrix, percentageColumns: [7, 8] },
+        { name: "Retenção por RM", matrix: [
+          ["Região do RM", "RM", "RGM", "Volume previsto", "Retenção total", "Taxa de retenção", "Retido na base", "Taxa", "Despachado pela base", "Taxa", "Chegado ao centro", "Taxa"].map((label) => t(label)),
+          ...byRm.map((group) => [group.rmArea, group.rm, group.rgm, group.planned, group.retentionTotal, group.retentionRate, group.retainedAtBase, group.retainedAtBaseRate, group.dispatchedFromBase, group.dispatchedFromBaseRate, group.arrivedAtCenter, group.arrivedAtCenterRate]),
+        ], percentageColumns: [5, 7, 9, 11] },
+        { name: "Total por regional e status", matrix: [
+          ["Regional", "Retido na base", "Despachado pela base", "Chegado ao centro", "Retenção total"].map((label) => t(label)),
+          ...regionalStatusGroups.map((group) => [group.region, group.retainedAtBase, group.dispatchedFromBase, group.arrivedAtCenter, group.retentionTotal]),
+        ] },
+      ])} />
     <p className="collection-monitoring-v2-formula-note" role="note">{t("As regras dos indicadores são operacionais provisórias e ainda não estão homologadas pelo JMS. A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p>
     <section className="collection-monitoring-v2-kpis" aria-label={t("Indicadores principais")}>
       {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra operacional provisória")}</small></article>)}
     </section>
     <p className="collection-monitoring-v2-snapshot-note" role="status">{t("Snapshot de referência dos indicadores: {date}.", { date: formatShortDate(currentSnapshot.date ?? undefined) })}</p>
-    {comparisonLoadFailures.length > 0 ? <p className="collection-monitoring-v2-comparison-error" role="status">{t("Não foi possível carregar as comparações de {dates}.", { dates: comparisonLoadFailures.map(formatShortDate).join(", ") })}</p> : null}
-    <section className="collection-monitoring-v2-retention-grid" aria-label={t("Comparação de retenção")} data-comparison-dates={comparisonSlots.map((item) => item.date).join(",")}>
-      {comparisonTable("Retenção por regional", byRegion, "region")}
+    <section className="collection-monitoring-v2-retention-grid" aria-label={t("Comparação de retenção")}>
       {comparisonTable("Retenção por RM", byRm, "rm")}
     </section>
     {monitoringTable("Monitoramento por regional", "region", byRegion, regionalSummaryMatrix, downloadRegionalSummary)}
