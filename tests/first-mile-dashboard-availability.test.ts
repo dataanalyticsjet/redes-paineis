@@ -14,7 +14,7 @@ test("First Mile lists only dashboards connected to official Data Foundation sou
 
   assert.deepEqual(
     cards.map(({ id }) => id),
-    ["monitoramento", "monitoramento-t4-t5", "taxa", "sellers", "movimentacao", "bipagem"],
+    ["monitoramento", "monitoramento-t4-t5", "taxa", "movimentacao", "bipagem"],
   );
   assert.deepEqual(Object.values(DASHBOARD_V2_SOURCE_BY_PANEL), [
     "collection_monitoring",
@@ -24,6 +24,16 @@ test("First Mile lists only dashboards connected to official Data Foundation sou
     "no_movement",
     "pdd_collection_failure",
   ]);
+});
+
+test("priority sellers is hidden from the First Mile menu while its legacy route remains available", async () => {
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const legacyCard = dashboardCards.find(({ id }) => id === "sellers");
+
+  assert.equal(legacyCard?.menuVisible, false);
+  assert.ok(!dashboardCardsForCategory("first-mile").some(({ id }) => id === "sellers"));
+  assert.match(source, /view === "sellers" \? \(/);
+  assert.match(source, /setView\("sellers"\)/);
 });
 
 test("hiding unconnected First Mile cards does not change categories or global routes", () => {

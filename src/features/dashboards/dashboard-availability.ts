@@ -17,6 +17,7 @@ export function dashboardHasV2Source(panelId: DashboardPanel): boolean {
 export function dashboardCardsForCategory(category: DashboardCategory) {
   return dashboardCards.filter((card) =>
     card.category === category &&
+    card.menuVisible !== false &&
     (category !== "first-mile" || dashboardHasV2Source(card.id)),
   );
 }

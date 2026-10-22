@@ -29,12 +29,12 @@ export const dashboardCategories: { id: DashboardCategory; label: string }[] = [
   { id: "last-mile", label: "Last Mile" },
 ];
 
-export const dashboardCards: { id: DashboardPanel; title: string; description: string; icon: typeof PackageCheck; tone: string; category: DashboardCategory }[] = [
+export const dashboardCards: { id: DashboardPanel; title: string; description: string; icon: typeof PackageCheck; tone: string; category: DashboardCategory; menuVisible?: boolean }[] = [
   { id: "monitoramento", title: "Monitoramento de coleta", description: "Pedidos, status e períodos.", icon: PackageCheck, tone: "red", category: "first-mile" },
   { id: "monitoramento-t4-t5", title: "Monitoramento de Coleta T4 e T5", description: "Volumes e status por regional, PDD, cliente, loja e motorista.", icon: Activity, tone: "gray", category: "first-mile" },
   { id: "taxa", title: "Taxa de coleta", description: "Desempenho e tentativas.", icon: Target, tone: "gray", category: "first-mile" },
   { id: "epop", title: "Cobertura EPOP", description: "Comprovantes por regional e base.", icon: BadgeCheck, tone: "red", category: "first-mile" },
-  { id: "sellers", title: "Monitoramento de sellers prioritários J&T", description: "Acompanhamento de sellers.", icon: ShieldCheck, tone: "gray", category: "first-mile" },
+  { id: "sellers", title: "Monitoramento de sellers prioritários J&T", description: "Acompanhamento de sellers.", icon: ShieldCheck, tone: "gray", category: "first-mile", menuVisible: false },
   { id: "movimentacao", title: "Sem movimentação", description: "Pedidos por aging e origem.", icon: ChartNoAxesCombined, tone: "red", category: "first-mile" },
   { id: "bipagem", title: "Falha na coleta PDD", description: "Digitalização e falhas por equipe.", icon: ClipboardList, tone: "gray", category: "first-mile" },
   { id: "damage", title: "Extravio", description: "Qualidade, motivos e arbitragem.", icon: CircleAlert, tone: "red", category: "first-mile" },
