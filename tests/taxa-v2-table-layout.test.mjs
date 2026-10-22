@@ -13,7 +13,7 @@ test("Taxa V3 detail table follows the compact J&T layout with scoped sizing", (
   assert.match(styles, /\.taxa-v2-detail-card \.taxa-v3-detail-table\s*\{[^}]*min-width:\s*2920px/s);
   assert.match(styles, /\.taxa-v2-detail-card \.taxa-v2-detail-table thead th\s*\{[^}]*height:\s*50px;[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
   assert.match(styles, /\.taxa-v2-detail-card \.taxa-v3-detail-table th:nth-child\(22\),[\s\S]*?\.taxa-v2-detail-card \.taxa-v3-detail-table td:nth-child\(22\)\s*\{[^}]*width:\s*144px/s);
-  assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-summary-table thead th\s*\{[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
+  assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-summary-table thead th(?:,\s*\.dashboard-main-taxa-v2 \.taxa-v2-detail-table thead th)?\s*\{[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
   assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-filter-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
   assert.ok(dashboard.includes('view === "taxa" && isAuthorizedDashboardViewer ? "dashboard-main dashboard-main-taxa-v2"'));
   assert.ok(dashboard.includes("taxa-v2-export-button"));
@@ -33,4 +33,11 @@ test("Taxa V3 renders the 22 official columns while preserving the historical V2
   assert.equal(new Set(v3Columns).size, 22);
   assert.ok(dashboard.includes("COLLECTION_RATE_V3_COLUMNS.map((field) => <th key={field}>"));
   assert.ok(dashboard.includes("COLLECTION_RATE_V3_COLUMNS.map((field) => <td key={field}>"));
+});
+
+
+test("Taxa detail shares the regional red header and rounded scroll container without compressing 22 columns", () => {
+  assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-summary-table thead th,\s*\.dashboard-main-taxa-v2 \.taxa-v2-detail-table thead th\s*\{[^}]*position:\s*sticky;[^}]*color:\s*#fff;[^}]*background:\s*var\(--table-header\);[^}]*font-size:\s*11\.5px;[^}]*font-weight:\s*600/s);
+  assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-summary-table-wrap,\s*\.dashboard-main-taxa-v2 \.taxa-v2-detail-table-wrap\s*\{[^}]*overflow:\s*auto;[^}]*border:\s*1px solid var\(--table-grid\);[^}]*border-radius:\s*12px/s);
+  assert.match(styles, /\.dashboard-main-taxa-v2 \.taxa-v2-detail-card \.taxa-v3-detail-table thead th\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere/s);
 });

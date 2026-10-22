@@ -430,7 +430,7 @@ test("monthly chart reuses the validated ratio-of-sums formulas without changing
 test("Taxa presentation puts regional table, unchanged daily chart, monthly comparison and login in order", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
-  const positions = ['data-testid="taxa-v2-kpi-grid"', 'data-testid="taxa-v2-regional-summary"', 'data-testid="taxa-v2-daily-chart"', '<CollectionRateV3MonthlyChart points=', 'data-testid="taxa-v2-origin-summary"', 'data-testid="taxa-v2-rm-summary"', 'data-testid="taxa-v2-monthly-summary"'].map((marker) => {
+  const positions = ['data-testid="taxa-v2-kpi-grid"', 'data-testid="taxa-v2-regional-summary"', 'data-testid="taxa-v2-daily-chart"', '<CollectionRateV3MonthlyChart points=', 'data-testid="taxa-v2-origin-summary"', 'data-testid="taxa-v2-rm-summary"', 't("Dados detalhados — 22 colunas oficiais")'].map((marker) => {
     assert.equal(source.split(marker).length - 1, 1, marker + " remains unique");
     return source.indexOf(marker);
   });
@@ -467,4 +467,23 @@ test("monthly chart renders real points, both series, translated periods and emp
   const empty = renderToStaticMarkup(createElement(CollectionRateV3MonthlyChart, { ...props, points: [] }));
   assert.match(empty, /Sem datas publicadas no período/);
   assert.doesNotMatch(empty, /<svg/);
+});
+
+
+test("Taxa removes only the history table and keeps official detail as the last section", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /taxa-v2-monthly-summary|taxa-v2-monthly-card/);
+  assert.equal(source.split("<CollectionRateV3MonthlyChart points=").length - 1, 1);
+  const detail = source.indexOf('<section className="chart-card bipagem-table-card taxa-v2-detail-card">');
+  const end = source.indexOf(') : collectionRateV2State.status === "empty"', detail);
+  assert.ok(detail > 0 && end > detail);
+  const tail = source.slice(source.indexOf("</section>", detail) + "</section>".length, end);
+  assert.doesNotMatch(tail, /<section|quality-note|<article/);
+  const table = source.slice(detail, end);
+  assert.match(table, /downloadRowsAsExcel\(taxaV2SearchedRows, COLLECTION_RATE_V3_COLUMNS\.map/);
+  assert.match(table, /COLLECTION_RATE_V3_COLUMNS\.map\(\(field\) => <th key=\{field\}/);
+  assert.match(table, /taxaV2VisibleRows\.map/);
+  assert.match(table, /setTaxaV2TableQuery\(event.target.value\); setTaxaV2Page\(1\)/);
+  assert.match(table, /taxaV2PageCount/);
 });

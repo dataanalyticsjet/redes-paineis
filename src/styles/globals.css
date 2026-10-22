@@ -5504,13 +5504,14 @@ tbody tr:hover td {
 }
 
 .dashboard-main-taxa-v2 .taxa-v2-summary-grid > .chart-card,
-.dashboard-main-taxa-v2 .taxa-v2-monthly-card,
 .dashboard-main-taxa-v2 .taxa-v2-detail-card {
   min-height: 0;
 }
 
-.dashboard-main-taxa-v2 .taxa-v2-summary-table-wrap {
-  max-height: 430px;
+.dashboard-main-taxa-v2 .taxa-v2-summary-table-wrap { max-height: 430px; }
+
+.dashboard-main-taxa-v2 .taxa-v2-summary-table-wrap,
+.dashboard-main-taxa-v2 .taxa-v2-detail-table-wrap {
   overflow: auto;
   border: 1px solid var(--table-grid);
   border-radius: 12px;
@@ -5542,7 +5543,8 @@ tbody tr:hover td {
   text-align: center;
 }
 
-.dashboard-main-taxa-v2 .taxa-v2-summary-table thead th {
+.dashboard-main-taxa-v2 .taxa-v2-summary-table thead th,
+.dashboard-main-taxa-v2 .taxa-v2-detail-table thead th {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -9952,3 +9954,11 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 .dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading { margin-bottom: 16px; }
 .dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading > div:first-child,
 .dashboard-main-taxa-v2 .taxa-v3-comparison-card .card-heading > div:first-child .card-eyebrow { text-align: left; }
+
+.dashboard-main-taxa-v2 .taxa-v2-detail-card .taxa-v3-detail-table thead th {
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}

@@ -125,7 +125,6 @@ import {
   mapCollectionRateV3Record,
   summarizeCollectionRateV3Cards,
   summarizeCollectionRateV3Daily,
-  summarizeCollectionRateV3Monthly,
   collectionRateV3MonthlyChartPoints,
   collectionRateV3ProgressWidth,
   summarizeCollectionRateV3Origins,
@@ -5617,7 +5616,6 @@ export function DashboardApp() {
   const taxaV2ByRmArea = useMemo(() => groupCollectionRateV3Rows(taxaV2FilteredRows, "rmArea"), [taxaV2FilteredRows]);
   const taxaV2Daily = useMemo(() => summarizeCollectionRateV3Daily(taxaV2FilteredRows), [taxaV2FilteredRows]);
   const taxaV2MonthlyChart = useMemo(() => collectionRateV3MonthlyChartPoints(taxaV2FilteredRows), [taxaV2FilteredRows]);
-  const taxaV2Monthly = useMemo(() => summarizeCollectionRateV3Monthly(taxaV2FilteredRows), [taxaV2FilteredRows]);
   const taxaV2ByOrigin = useMemo(() => summarizeCollectionRateV3Origins(taxaV2FilteredRows), [taxaV2FilteredRows]);
   const taxaV2Dates = useMemo(() => [...new Set(taxaV2FilteredRows.map((row) => String(row.data_date)))].sort(), [taxaV2FilteredRows]);
   const taxaV2SearchedRows = useMemo(() => {
@@ -9199,10 +9197,8 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     </article>
                   </section>
 
-                  <section className="chart-card taxa-v2-monthly-card">
-                    <div className="card-heading"><div><span className="card-eyebrow">{t("HISTÓRICO PUBLICADO")}</span><h2>{t("Taxa de coleta × taxa com tentativa")}</h2><p>{t("Somente meses com linhas publicadas. A série de tentativa não é calculada até a validação da fórmula.")}</p></div></div>
-                    <div className="table-wrap"><table className="dashboard-data-table taxa-v2-monthly-table" data-testid="taxa-v2-monthly-summary"><thead><tr><th>{t("Mês")}</th><th>{t("Pedidos")}</th><th>{t("Previsto a coletar")}</th><th>{t("Taxa de coleta")}</th><th>{t("Taxa de coleta no prazo")}</th><th>{t("Taxa com tentativa")}</th></tr></thead><tbody>{taxaV2Monthly.map((month) => <tr key={month.month}><th>{month.month}</th><td>{formatNumber(month.totalOrders)}</td><td>{formatNumber(month.planned)}</td><td>{formatTaxaRate(month.collectionRate)}</td><td>{formatTaxaRate(month.onTimeRate)}</td><td><strong className="empty">{t("Pendente de validação")}</strong></td></tr>)}</tbody></table></div>
-                  </section>
+                  {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência única no DoomsDay permanecem nos totais gerais e sem atribuição organizacional.")}</div> : null}
+                  <div className="quality-note" role="status">{t("As tabelas analíticas de taxa com tentativa permanecem pendentes de validação.")}</div>
 
                   <section className="chart-card bipagem-table-card taxa-v2-detail-card">
                     <div className="card-heading table-card-heading taxa-v2-detail-heading">
@@ -9212,8 +9208,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap pdd-v2-detail-table-wrap taxa-v2-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table taxa-v2-detail-table taxa-v3-detail-table"><thead><tr>{COLLECTION_RATE_V3_COLUMNS.map((field) => <th key={field}>{t(COLLECTION_RATE_V3_HEADERS[field])}</th>)}</tr></thead><tbody>{taxaV2VisibleRows.map((row) => <tr key={`${row.publication_id}-${row.source_row_no}`}>{COLLECTION_RATE_V3_COLUMNS.map((field) => <td key={field}>{formatCollectionRateV3Cell(row[field], field, dashboardLocale(activeDashboardLanguage()))}</td>)}</tr>)}</tbody></table>{taxaV2SearchedRows.length === 0 ? <EmptyChart message={t("Não há registros correspondentes aos filtros.")} /> : null}</div>
                     <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(taxaV2SearchedRows.length) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.max(1, current - 1))} disabled={taxaV2ActivePage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(taxaV2ActivePage), total: formatNumber(taxaV2PageCount) })}</span><button type="button" className="reset-button" onClick={() => setTaxaV2Page((current) => Math.min(taxaV2PageCount, current + 1))} disabled={taxaV2ActivePage >= taxaV2PageCount}>{t("Próxima")}</button></div>
                   </section>
-                  {taxaV2FilteredRows.some((row) => row.effective_region === "Sem regional") ? <div className="quality-note" role="status">{t("Registros sem correspondência única no DoomsDay permanecem nos totais gerais e sem atribuição organizacional.")}</div> : null}
-                  <div className="quality-note" role="status">{t("As tabelas analíticas de taxa com tentativa permanecem pendentes de validação.")}</div>
                 </>
               ) : collectionRateV2State.status === "empty" ? (
                 <div className="quality-note" role="status">{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</div>
