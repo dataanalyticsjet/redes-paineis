@@ -307,6 +307,11 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
     assert matrix["totals"]["records"] == 3
     assert matrix["totals"]["unmappedRecords"] == 1
     assert matrix["totals"]["statuses"] == dict(zip(STATUS_COLUMNS, [15, 30, 45, 60, 75, 90, 105]))
+    assert matrix["totals"]["processingVolume"] == 405
+    assert matrix["totals"]["awaitingCollectionVolume"] == 15
+    assert matrix["totals"]["totalVolume"] == 420
+    assert matrix["totals"]["processingRatePercent"] == pytest.approx(405 / 420 * 100)
+    assert matrix["totals"]["awaitingRatePercent"] == pytest.approx(15 / 420 * 100)
     assert matrix == _get_dashboard_summary_with_row_mapping(
         engine, identity=MATRIX_USER, filters=T4T5Filters(),
         date_from=date(2026, 10, 19), date_to=date(2026, 10, 20),
@@ -318,6 +323,10 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
     )
     assert filtered["totals"]["records"] == 1
     assert filtered["totals"]["statuses"] == dict(zip(STATUS_COLUMNS, [10, 20, 30, 40, 50, 60, 70]))
+    assert filtered["totals"]["processingVolume"] == 270
+    assert filtered["totals"]["awaitingCollectionVolume"] == 10
+    assert filtered["totals"]["totalVolume"] == 280
+    assert filtered["totals"]["processingRatePercent"] == pytest.approx(270 / 280 * 100)
 
     regional = get_dashboard_summary(
         engine, identity=REGIONAL_ADMIN, filters=T4T5Filters(),
@@ -363,6 +372,50 @@ def test_summary_filters_grouping_and_snapshot_selection_preserve_rows_and_statu
             identity={"platform_role": "ADMIN", "organizational_scope": "matrix", "role": "regional", "effective_regions": ["SPE"]},
             filters=T4T5Filters(), date_from=None, date_to=None,
         )
+
+
+def test_summary_indicators_match_official_2026_10_20_sample_values():
+    engine, contract, table = _create_database()
+    _insert_publication(engine, contract, table, day=20, rows=[{
+        "source_base_name": "PDD SPE",
+        "seller_id": "S-201020",
+        "awaiting_collection": 12_961,
+        "received_at_dropoff": 6_532,
+        "collected": 17_285,
+        "received": 0,
+        "received_at_base": 32_066,
+        "in_base_dispatch_flow": 286_155,
+        "arrived_at_sc": 1_574_514,
+    }])
+
+    summary = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+    )
+    totals = summary["totals"]
+    assert totals["processingVolume"] == 1_916_552
+    assert totals["awaitingCollectionVolume"] == 12_961
+    assert totals["totalVolume"] == 1_929_513
+    assert totals["processingRatePercent"] == pytest.approx(99.3283, abs=0.0001)
+    assert totals["awaitingRatePercent"] == pytest.approx(0.6717, abs=0.0001)
+
+
+def test_summary_indicator_rates_are_zero_when_volume_denominator_is_zero():
+    engine, contract, table = _create_database()
+    _insert_publication(engine, contract, table, day=20, rows=[{
+        "source_base_name": "PDD SPE",
+        "seller_id": "S-ZERO",
+        **dict.fromkeys(STATUS_COLUMNS, 0),
+    }])
+
+    summary = get_dashboard_summary(
+        engine, identity=MATRIX_USER, filters=T4T5Filters(),
+        date_from=date(2026, 10, 20), date_to=date(2026, 10, 20),
+    )
+    totals = summary["totals"]
+    assert totals["totalVolume"] == 0
+    assert totals["processingRatePercent"] == 0
+    assert totals["awaitingRatePercent"] == 0
 
 
 def test_matrix_summary_resolves_distinct_pdd_keys_and_matches_row_level_reference():

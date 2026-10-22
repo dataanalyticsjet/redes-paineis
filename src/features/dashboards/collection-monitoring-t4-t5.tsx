@@ -61,6 +61,11 @@ type T4T5Totals = {
   pdds: number;
   stores: number;
   unmappedRecords: number;
+  processingVolume: number;
+  awaitingCollectionVolume: number;
+  totalVolume: number;
+  processingRatePercent: number;
+  awaitingRatePercent: number;
   statuses: Record<(typeof STATUS_FIELDS)[number], number>;
 };
 type T4T5Summary = {
@@ -89,6 +94,12 @@ interface Props {
 function formatInteger(value: unknown, language: DashboardLanguage): string {
   const number = Number(value ?? 0);
   return new Intl.NumberFormat(dashboardLocale(language), { maximumFractionDigits: 0 }).format(Number.isFinite(number) ? number : 0);
+}
+
+function formatPercent(value: unknown, language: DashboardLanguage): string {
+  const number = Number(value ?? 0);
+  const safeNumber = Number.isFinite(number) ? number : 0;
+  return new Intl.NumberFormat(dashboardLocale(language), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(safeNumber) + "%";
 }
 
 function formatDate(value: unknown, language: DashboardLanguage): string {
@@ -651,6 +662,27 @@ export function CollectionMonitoringT4T5Dashboard({ t, language, scopeKey }: Pro
 
     {status === "ready" && totals ? <>
       {totals.unmappedRecords > 0 ? <div className="collection-monitoring-t4-t5-note">{t("{count} registros permanecem Sem regional por falta de vínculo DoomsDay; eles só entram em escopos autorizados para dados nacionais.", { count: number(totals.unmappedRecords) })}</div> : null}
+      <section className="collection-monitoring-t4-t5-summary-kpis" aria-label={t("Resumo de processamento")}>
+        <article className="collection-monitoring-t4-t5-kpi collection-monitoring-t4-t5-summary-kpi">
+          <span>{t("Processamento")}</span>
+          <strong>{formatPercent(totals.processingRatePercent, language)}</strong>
+          <small>{t("Volume em processamento")}: {number(totals.processingVolume)}</small>
+          <small>{t("{processed} processados de {total}", {
+            processed: number(totals.processingVolume),
+            total: number(totals.totalVolume),
+          })}</small>
+          <i><Activity size={18} /></i>
+        </article>
+        <article className="collection-monitoring-t4-t5-kpi collection-monitoring-t4-t5-summary-kpi">
+          <span>{t("Aguardando coleta")}</span>
+          <strong>{number(totals.awaitingCollectionVolume)}</strong>
+          <small>{t("{percentage} do volume total", {
+            percentage: formatPercent(totals.awaitingRatePercent, language),
+          })}</small>
+          <small>{t("Volume total")}: {number(totals.totalVolume)}</small>
+          <i><AlertCircle size={18} /></i>
+        </article>
+      </section>
       <section className="collection-monitoring-t4-t5-kpis">
         {STATUS_FIELDS.map((field, index) => <article className="collection-monitoring-t4-t5-kpi" key={field}>
           <span>{t(STATUS_LABELS[field])}</span><strong>{number(totals.statuses[field])}</strong>

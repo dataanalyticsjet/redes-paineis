@@ -340,13 +340,24 @@ def _summary_result(connection: Connection, row: Any) -> dict[str, object]:
     metadata = _snapshot_metadata(connection, snapshot_date)
     if metadata is None:
         raise DataFoundationError("published_snapshot_metadata_inconsistent", 503)
+    statuses = {field: int(row[field] or 0) for field in STATUS_COLUMNS}
+    awaiting = statuses["awaiting_collection"]
+    processing = sum(
+        value for field, value in statuses.items() if field != "awaiting_collection"
+    )
+    total_volume = processing + awaiting
     totals = {
         "records": int(row["record_count"]),
         "regions": int(row["region_count"]),
         "pdds": int(row["pdd_count"]),
         "stores": int(row["store_count"]),
         "unmappedRecords": int(row["unmapped_record_count"] or 0),
-        "statuses": {field: int(row[field] or 0) for field in STATUS_COLUMNS},
+        "statuses": statuses,
+        "processingVolume": processing,
+        "awaitingCollectionVolume": awaiting,
+        "totalVolume": total_volume,
+        "processingRatePercent": processing * 100 / total_volume if total_volume else 0.0,
+        "awaitingRatePercent": awaiting * 100 / total_volume if total_volume else 0.0,
     }
     return {
         "sourceId": SOURCE_ID,

@@ -45,7 +45,7 @@ test("T4/T5 dashboard starts with the latest published date and queries server s
   assert.doesNotMatch(component, /function changeRecordPage\(page: number\) \{[^}]*setSummary\(null\)/);
 });
 
-test("T4/T5 cards show independent source status sums and no inferred rates", async () => {
+test("T4/T5 shows the approved processing summary and preserves independent status cards", async () => {
   const component = await readFile(new URL("../src/features/dashboards/collection-monitoring-t4-t5.tsx", import.meta.url), "utf8");
 
   for (const field of [
@@ -54,9 +54,18 @@ test("T4/T5 cards show independent source status sums and no inferred rates", as
   ]) {
     assert.ok(component.includes(field), `status field ${field} is missing`);
   }
+  assert.match(component, /totals\.processingRatePercent/);
+  assert.match(component, /totals\.processingVolume/);
+  assert.match(component, /totals\.awaitingCollectionVolume/);
+  assert.match(component, /totals\.totalVolume/);
   assert.match(component, /Soma independente do campo JMS/);
   assert.match(component, /As contagens por status são independentes e não representam pedidos únicos/);
-  assert.doesNotMatch(component, /taxaDeColeta|collectionRate|totalPedidosUnicos/);
+  assert.doesNotMatch(component, /collectionRate|totalPedidosUnicos/);
+
+  for (const source of ["Processamento", "Aguardando coleta", "Volume em processamento", "{percentage} do volume total"]) {
+    assert.notEqual(translateDashboardText("en", source, { percentage: "1.00%" }), source);
+    assert.notEqual(translateDashboardText("zh", source, { percentage: "1.00%" }), source);
+  }
 });
 
 test("T4/T5 retains the full source export and shows data state without invented values", async () => {
