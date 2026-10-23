@@ -58,6 +58,11 @@ from app.services.data_foundation.network_directory_activation import (
 )
 from app.services.collection_monitoring_v2_retention import get_regional_retention_table
 from app.services.feishu_publication_notifications import send_publication_notice
+from app.services.feishu_excel_delivery import (
+    MAX_FILE_BYTES as FEISHU_EXCEL_MAX_FILE_BYTES,
+    FeishuExcelDeliveryError,
+    send_test_group_excel,
+)
 from app.services.collection_monitoring_t4_t5 import (
     MAX_GROUP_PAGE_SIZE,
     MAX_PAGE_SIZE as T4T5_MAX_PAGE_SIZE,
@@ -1116,3 +1121,41 @@ def export_data_source(
             "X-Export-Limit": str(limit),
         },
     )
+
+
+@router.post("/feishu/excel-test-delivery")
+async def feishu_excel_test_delivery(
+    request: Request,
+    source_id: str = Form(..., min_length=1, max_length=64),
+    publication_id: str = Form(..., min_length=36, max_length=36),
+    file: UploadFile = File(...),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    """Explicit, admin-only action for one publication-matched Excel to the fixed test group."""
+    try:
+        settings = get_settings()
+        if not settings.feishu_excel_test_delivery_enabled:
+            raise HTTPException(status_code=503, detail="feishu_excel_delivery_disabled")
+        _same_origin(request)
+        file_name = _safe_upload_name(file.filename)
+        content = await file.read(FEISHU_EXCEL_MAX_FILE_BYTES + 1)
+        if not content:
+            raise HTTPException(status_code=400, detail="xlsx_file_empty")
+        if len(content) > FEISHU_EXCEL_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="xlsx_file_too_large")
+        return await run_in_threadpool(
+            send_test_group_excel,
+            _engine(),
+            source_id=source_id,
+            publication_id=publication_id,
+            file_name=file_name,
+            content=content,
+            actor_user_id=admin.user.id,
+            settings=settings,
+        )
+    except FeishuExcelDeliveryError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    finally:
+        await file.close()
