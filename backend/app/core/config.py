@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     feishu_oauth_enabled: bool = False
     feishu_oauth_app_id: str | None = None
     feishu_oauth_app_secret: str | None = None
+    feishu_publication_notifications_enabled: bool = False
     feishu_oauth_authorize_url: AnyHttpUrl = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
     feishu_oauth_token_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
     feishu_oauth_userinfo_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v1/user_info"

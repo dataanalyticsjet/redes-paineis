@@ -57,6 +57,7 @@ from app.services.data_foundation.network_directory_activation import (
     rollback_network_directory_candidate,
 )
 from app.services.collection_monitoring_v2_retention import get_regional_retention_table
+from app.services.feishu_publication_notifications import send_publication_notice
 from app.services.collection_monitoring_t4_t5 import (
     MAX_GROUP_PAGE_SIZE,
     MAX_PAGE_SIZE as T4T5_MAX_PAGE_SIZE,
@@ -962,6 +963,23 @@ def publish_import(
         raise _error(error) from None
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if (
+        get_settings().feishu_publication_notifications_enabled
+        and not publication.get("reused")
+        and status.get("sourceId") in {
+            "collection_rate",
+            "pdd_collection_failure",
+            "no_movement",
+        }
+    ):
+        background_tasks.add_task(
+            send_publication_notice,
+            _engine(),
+            publication_id=str(publication["publicationId"]),
+            source_id=str(status["sourceId"]),
+            version=int(publication["version"]),
+            actor_user_id=admin.user.id,
+        )
     return publication
 
 
