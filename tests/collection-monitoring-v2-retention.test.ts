@@ -4,21 +4,23 @@ import { mapCollectionMonitoringV2Record } from "../src/lib/data-foundation/coll
 import { loadCollectionMonitoringV2Retention, type CollectionMonitoringV2Record } from "../src/lib/data-foundation/collection-monitoring-v2.ts";
 import { regionalRetentionModel, regionalRetentionMatrix } from "../src/lib/data-foundation/collection-monitoring-v2-retention.ts";
 
-function row(date: string, region: string | null, planned: number, received: number, dispatched: number, arrived: number, origin = "JMS") {
-  return mapCollectionMonitoringV2Record({ data_date: date, publication_id: "pub", source_row_no: 1, reported_origin_region: "IGNORED", source_base_name: "PDD", order_origin: origin, mapping_resolution: region ? "NAME_APPROVED" : "UNMAPPED", resolved_base_code: region ? region + "001" : null, effective_base_code: region ? region + "001" : null, effective_mapping_resolution: region ? "NAME_APPROVED" : "UNMAPPED", mapped_region: region, expected_dropoff: planned, expected_pickup: 0, status_received_at_base: received, status_dispatched_from_base: dispatched, arrived_sorting_center: arrived, arrived_sc: 900000 } as CollectionMonitoringV2Record);
+function row(date: string, region: string | null, planned: number, received: number, dispatched: number, arrived: number, origin = "JMS", collected = 0, transitGeneric = 0, transitCenter = 0, transitDistribution = 0) {
+  return mapCollectionMonitoringV2Record({ data_date: date, publication_id: "pub", source_row_no: 1, reported_origin_region: "IGNORED", source_base_name: "PDD", order_origin: origin, mapping_resolution: region ? "NAME_APPROVED" : "UNMAPPED", resolved_base_code: region ? region + "001" : null, effective_base_code: region ? region + "001" : null, effective_mapping_resolution: region ? "NAME_APPROVED" : "UNMAPPED", mapped_region: region, expected_dropoff: planned, expected_pickup: 0, status_collected: collected, status_received_at_base: received, status_dispatched_from_base: dispatched, status_in_transit_from_base: transitGeneric, in_transit_to_center: transitCenter, in_transit_to_distribution: transitDistribution, arrived_sorting_center: arrived, arrived_sc: 900000 } as CollectionMonitoringV2Record);
 }
 
 test("three daily national totals reconcile official workbook; Q is distinct from T and snapshots are not summed", () => {
-  const rows = [row("2026-10-20", "SPE", 1999087, 5238, 974, 8520), row("2026-10-21", "SPE", 1784090, 12760, 3781, 19315), row("2026-10-22", "SPE", 1795899, 35029, 4946, 16773)];
+  const rows = [row("2026-10-20", "SPE", 1999087, 5238, 974, 8520, "JMS", 100, 1, 2, 3), row("2026-10-21", "SPE", 1784090, 12760, 3781, 19315, "JMS", 200, 2, 3, 4), row("2026-10-22", "SPE", 1795899, 35029, 4946, 16773, "JMS", 300, 4, 5, 6)];
   const model = regionalRetentionModel(rows, {dateFrom:"2026-10-20",dateTo:"2026-10-22"});
-  assert.deepEqual(model.total.values.retentionTotal, [14732,35856,56748]);
-  assert.deepEqual(model.total.values.arrivedAtCenter, [8520,19315,16773]);
+  assert.deepEqual(model.total.values.retention, [5238,12760,35029]);
+  assert.deepEqual(model.total.values.inTransitToBase, [6,9,15]);
+  assert.deepEqual(model.total.values.dispatchedFromBase, [974,3781,4946]);
+  assert.deepEqual(model.total.values.collected, [100,200,300]);
   assert.equal(model.total.planned,1795899);
-  assert.equal(model.total.variations.retentionTotal,(56748-35856)/35856);
+  assert.equal(model.total.variations.retention,(35029-12760)/12760);
   assert.equal(model.rows[0].rgm,"@李鑫亮 XINLIANG LI（Oliver）");
   const matrix=regionalRetentionMatrix(model);
   assert.equal(matrix[0].length,19);
-  assert.deepEqual(matrix.at(-1)?.slice(0,7),["Total geral","—",1795899,14732,35856,56748,(56748-35856)/35856]);
+  assert.deepEqual(matrix.at(-1)?.slice(0,7),["Total geral","—",1795899,5238,12760,35029,(35029-12760)/12760]);
 });
 
 test("latest three available filtered dates; missing region/day differs from zero and division by zero is unavailable", () => {
@@ -26,12 +28,12 @@ test("latest three available filtered dates; missing region/day differs from zer
   const model=regionalRetentionModel(rows,{dateFrom:"2026-10-18",dateTo:"2026-10-22"});
   assert.deepEqual(model.dates,["2026-10-18","2026-10-20","2026-10-22"]);
   assert.equal(model.rows.at(-1)?.region,"Sem regional");
-  assert.deepEqual(model.rows.find(r=>r.region==="CE")?.values.retentionTotal,[5,0,0]);
-  assert.equal(model.rows.find(r=>r.region==="CE")?.variations.retentionTotal,null);
-  assert.deepEqual(model.rows.find(r=>r.region==="HQ")?.values.retentionTotal,[null,1,null]);
+  assert.deepEqual(model.rows.find(r=>r.region==="CE")?.values.retention,[5,0,0]);
+  assert.equal(model.rows.find(r=>r.region==="CE")?.variations.retention,null);
+  assert.deepEqual(model.rows.find(r=>r.region==="HQ")?.values.retention,[null,1,null]);
   assert.equal(model.rows.find(r=>r.region==="HQ")?.rgm,"Sem RGM");
   const one=regionalRetentionModel(rows,{region:"CE",dateFrom:"2026-10-22"});
-  assert.equal(one.rows.length,1);assert.equal(one.dates.length,1);assert.equal(regionalRetentionMatrix(one)[0].length,11);assert.equal(one.total.variations.retentionTotal,null);
+  assert.equal(one.rows.length,1);assert.equal(one.dates.length,1);assert.equal(regionalRetentionMatrix(one)[0].length,11);assert.equal(one.total.variations.retention,null);
   assert.deepEqual(regionalRetentionModel(rows,{origin:"absent"}).rows,[]);
   assert.equal(regionalRetentionModel(rows,{region:"CE",base:"absent"}).total.planned,null);
 });
@@ -39,8 +41,8 @@ test("latest three available filtered dates; missing region/day differs from zer
 test("regional totals close across all four measures under combined filters without dropping unmapped records", () => {
   const rows=[row("2026-10-22","SPE",100,1,2,3),row("2026-10-22","CE",50,4,5,6),row("2026-10-22",null,10,7,8,9),row("2026-10-22","CE",999,999,999,999,"OTHER")];
   const model=regionalRetentionModel(rows,{origin:"JMS",dateFrom:"2026-10-22",dateTo:"2026-10-22"});
-  assert.equal(model.total.planned,160);assert.equal(model.total.values.retentionTotal[0],45);
-  for(const key of ["retainedAtBase","dispatchedFromBase","arrivedAtCenter","retentionTotal"] as const) assert.equal(model.total.values[key][0],model.rows.reduce((sum,r)=>sum+(r.values[key][0]??0),0));
+  assert.equal(model.total.planned,160);assert.equal(model.total.values.retention[0],12);
+  for(const key of ["retention","dispatchedFromBase","inTransitToBase","collected"] as const) assert.equal(model.total.values[key][0],model.rows.reduce((sum,r)=>sum+(r.values[key][0]??0),0));
   assert.equal(regionalRetentionModel(rows,{origin:"JMS",region:"CE"}).total.planned,50);
 });
 
@@ -104,16 +106,18 @@ test("all-table Excel retains the raw 23-column sheet and signed numeric retenti
   const raw=XLSX.utils.sheet_to_json(workbook.Sheets.Dados,{header:1});
   assert.equal(raw[0].length,23);assert.equal(raw.length,3);assert.deepEqual(workbook.SheetNames,["Resumo por base","Dados","Retenção por regional"]);
   const retained=workbook.Sheets["Retenção por regional"];
-  assert.equal(retained.F3.v,(3-9)/9);assert.equal(retained.F3.z,"0.0%");
-  assert.equal(retained.C3.v,10);assert.equal(retained.E3.v,3);
+  assert.equal(retained.F3.v,(2-4)/4);assert.equal(retained.F3.z,"0.0%");
+  assert.equal(retained.C3.v,10);assert.equal(retained.E3.v,2);
 });
 
 test("aggregate requests forward restrictive dimension filters, preserve counts and honor pre-cancellation", async () => {
   let path="";
-  const response={sourceId:"collection_monitoring",contractVersion:2,aggregates:[{data_date:"2026-10-22",publication_id:"pub",region:"SPE",row_count:"2",expected_dropoff:100,expected_pickup:0,status_received_at_base:2,status_dispatched_from_base:3,arrived_sorting_center:4}]};
+  const response={sourceId:"collection_monitoring",contractVersion:2,aggregates:[{data_date:"2026-10-22",publication_id:"pub",region:"SPE",row_count:"2",expected_dropoff:100,expected_pickup:0,pending_dropoff:0,pending_pickup:0,status_collected:20,status_received_at_base:2,status_dispatched_from_base:3,status_in_transit_from_base:4,in_transit_to_center:5,in_transit_to_distribution:6}]};
   const result=await loadCollectionMonitoringV2Retention({dateFrom:"2026-10-22",dateTo:"2026-10-22"},async(url)=>{path=url;return new Response(JSON.stringify(response));},undefined,{region:"SPE",rm:"RM One",base:"Mapped base",origin:"JMS",rgmRegions:["SPE"]});
   const query=new URL(path,"http://localhost").searchParams;
   assert.equal(query.get("region"),"SPE");assert.equal(query.get("rm"),"RM One");assert.equal(query.get("base"),"Mapped base");assert.equal(query.get("origin"),"JMS");assert.equal(query.get("rgm_filter"),"true");assert.deepEqual(query.getAll("rgm_regions"),["SPE"]);assert.equal(result.aggregates[0].row_count,2);
+  assert.equal(result.aggregates[0].status_collected,20);
+  assert.equal(result.aggregates[0].status_in_transit_from_base + result.aggregates[0].in_transit_to_center + result.aggregates[0].in_transit_to_distribution,15);
   const controller=new AbortController();controller.abort();
   await assert.rejects(loadCollectionMonitoringV2Retention({dateFrom:"2026-10-22",dateTo:"2026-10-22"},async()=>{throw new Error("Fetcher must not run");},controller.signal),/aborted/);
 });

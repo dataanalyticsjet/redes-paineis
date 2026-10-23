@@ -386,6 +386,16 @@ export interface CollectionMonitoringV2RetentionRecord extends Record<string, un
   publication_id: string;
   region: string;
   row_count: number;
+  expected_dropoff: number;
+  expected_pickup: number;
+  pending_dropoff: number;
+  pending_pickup: number;
+  status_collected: number;
+  status_received_at_base: number;
+  status_dispatched_from_base: number;
+  status_in_transit_from_base: number;
+  in_transit_to_center: number;
+  in_transit_to_distribution: number;
 }
 
 export async function loadCollectionMonitoringV2Retention(
@@ -413,10 +423,10 @@ export async function loadCollectionMonitoringV2Retention(
     const date = validDate(row.data_date);
     if (date < period.dateFrom || date > period.dateTo || !row.publication_id) throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação da comparação mudou durante o carregamento.");
     if (typeof row.region !== "string" || !row.region) throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
-    for (const field of ["expected_dropoff", "expected_pickup", "status_received_at_base", "status_dispatched_from_base", "arrived_sorting_center", "row_count"]) {
+    for (const field of ["expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup", "status_collected", "status_received_at_base", "status_dispatched_from_base", "status_in_transit_from_base", "in_transit_to_center", "in_transit_to_distribution", "row_count"]) {
       if (row[field] == null || !Number.isSafeInteger(Number(row[field])) || Number(row[field]) < 0) throw new CollectionMonitoringV2LoadError("invalid_data", `A quantidade ${field} é inválida.`);
+      row[field] = Number(row[field]);
     }
-    row.row_count = Number(row.row_count);
   }
   return result;
 }

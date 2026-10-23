@@ -74,7 +74,10 @@ def test_active_version_only_aborted_and_superseded_facts_excluded_and_no_page_l
     assert 'FROM mapping_keys AS fact' in query and 'FROM keyed_facts GROUP BY' in query
     assert 'SELECT DISTINCT fact.source_base_name_key' in query
     assert 'LIMIT' not in query
-    assert len(statements) == 2  # map guard + one aggregated query, no regional/day N+1
+    # The mapping guard inspects metadata in SQLite; there must still be exactly
+    # one data aggregation and no per-region/day fact queries.
+    assert sum('WITH candidate_facts AS' in sql for sql in statements) == 1
+    assert sum('FROM base_mapping_current' in sql for sql in statements) <= 1
     with engine.begin() as conn:
         conn.exec_driver_sql("UPDATE source_publications SET publication_state='PUBLISHED' WHERE version_no=999")
     result = get_regional_retention(engine, identity=ADMIN_MATRIX, date_from=date(2026,10,22), date_to=date(2026,10,22))
@@ -134,6 +137,30 @@ def test_duplicate_fact_rows_are_weighted_once_and_all_exact_keys_remain_distinc
     result=get_regional_retention(engine,identity=ADMIN_MATRIX,date_from=date(2026,10,22),date_to=date(2026,10,22))['aggregates']
     assert len(result)==2 and sum(row['row_count'] for row in result)==3
     assert sorted(result,key=str) == baseline(engine, ADMIN_MATRIX,22,22)
+
+
+def test_aggregate_includes_all_official_card_and_transit_source_columns():
+    engine, contract, table = _create_engine()
+    _insert_day(engine, contract, table, day=22, rows=[(1, True)])
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            UPDATE `{table}`
+            SET expected_dropoff=20, expected_pickup=30, pending_dropoff=3, pending_pickup=4,
+                status_collected=12, status_received_at_base=5, status_dispatched_from_base=6,
+                status_in_transit_from_base=7, in_transit_to_center=8, in_transit_to_distribution=9,
+                arrived_sorting_center=1000, distribution_in_transit=2000
+            WHERE source_row_no=1
+        """))
+    result = get_regional_retention(
+        engine, identity=ADMIN_MATRIX, date_from=date(2026, 10, 22), date_to=date(2026, 10, 22),
+    )['aggregates']
+    assert len(result) == 1
+    row = result[0]
+    assert {field: row[field] for field in RETENTION_FIELDS} == {
+        'expected_dropoff': 20, 'expected_pickup': 30, 'pending_dropoff': 3, 'pending_pickup': 4,
+        'status_collected': 12, 'status_received_at_base': 5, 'status_dispatched_from_base': 6,
+        'status_in_transit_from_base': 7, 'in_transit_to_center': 8, 'in_transit_to_distribution': 9,
+    }
 
 
 def test_table_response_finishes_filters_and_latest_three_dates_on_backend():

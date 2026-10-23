@@ -16,16 +16,17 @@ test("Monitoramento V2 presents the translated seven-field filter row and keeps 
   assert.doesNotMatch(component, /预估揽收|待揽收|揽收率|待揽收率/);
 });
 
-test("retention tables show the approved provisional formulas and distinguish unavailable comparisons", () => {
+test("retention tables use the official source indicators and distinguish unavailable comparisons", () => {
   assert.match(component, /"Retenção por regional"/);
   assert.match(component, /"Retenção por RM"/);
   assert.match(component, /<CollectionMonitoringV2RegionalRetention/);
-  assert.match(component, /group\.retainedAtBase/);
+  assert.match(component, /group\.retention/);
   assert.match(component, /group\.dispatchedFromBase/);
-  assert.match(component, /group\.arrivedAtCenter/);
+  assert.match(component, /group\.inTransitToBase/);
+  assert.match(component, /group\.collected/);
 
   assert.match(component, /t\("Sem dados"\)/);
-  assert.match(component, /t\("As regras dos indicadores são operacionais provisórias/);
+  assert.match(component, /t\("Indicadores calculados pelas colunas oficiais desta fonte/);
   assert.doesNotMatch(component, /Pendente de homologação/);
 });
 

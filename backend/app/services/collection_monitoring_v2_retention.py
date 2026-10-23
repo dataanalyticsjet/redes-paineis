@@ -12,8 +12,9 @@ from app.services.data_foundation.repository import DataFoundationError
 
 
 RETENTION_FIELDS = (
-    "expected_dropoff", "expected_pickup", "status_received_at_base",
-    "status_dispatched_from_base", "arrived_sorting_center",
+    "expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup",
+    "status_collected", "status_received_at_base", "status_dispatched_from_base",
+    "status_in_transit_from_base", "in_transit_to_center", "in_transit_to_distribution",
 )
 
 

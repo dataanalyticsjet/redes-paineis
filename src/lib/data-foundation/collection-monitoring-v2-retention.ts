@@ -1,12 +1,8 @@
 import { officialRgmForRegion, UNASSIGNED_RGM } from "../responsibility.ts";
+import { COLLECTION_MONITORING_V2_STATUS_FIELDS } from "./collection-monitoring-v2-dashboard.ts";
 import { collectionMonitoringV2PercentageVariation, filterCollectionMonitoringV2Rows, groupCollectionMonitoringV2Rows, type CollectionMonitoringV2Filters, type CollectionMonitoringV2Row } from "./collection-monitoring-v2-dashboard.ts";
 
-export const RETENTION_MEASURES = [
-  { key: "retentionTotal", label: "Retenção total" },
-  { key: "retainedAtBase", label: "Retido na base" },
-  { key: "dispatchedFromBase", label: "Despachado pela base" },
-  { key: "arrivedAtCenter", label: "Chegado ao centro" },
-] as const;
+export const RETENTION_MEASURES = COLLECTION_MONITORING_V2_STATUS_FIELDS.map(({ field, label }) => ({ key: field, label }));
 type Measure = typeof RETENTION_MEASURES[number]["key"];
 export interface RegionalRetentionRow {
   region: string;
@@ -36,7 +32,7 @@ export function regionalRetentionModel(rows: readonly CollectionMonitoringV2Row[
   const result = regions.map((region) => build(region)).sort((a, b) => {
     if (a.region === "Sem regional") return 1;
     if (b.region === "Sem regional") return -1;
-    return (b.values.retentionTotal.at(-1) ?? -1) - (a.values.retentionTotal.at(-1) ?? -1) || a.region.localeCompare(b.region, "pt-BR");
+    return (b.values.retention.at(-1) ?? -1) - (a.values.retention.at(-1) ?? -1) || a.region.localeCompare(b.region, "pt-BR");
   });
   return { dates, rows: result, total: build("Total geral", true) };
 }

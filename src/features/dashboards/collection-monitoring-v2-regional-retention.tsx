@@ -43,7 +43,7 @@ export function CollectionMonitoringV2RegionalRetentionTable({ t, language, mode
       </table>
     </div>
     {model.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum grupo encontrado para os filtros selecionados.")}</p> : null}
-    <p className="cm-v2-retention-method">{t("A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p>
+    <p className="cm-v2-retention-method">{t("Os indicadores seguem as fórmulas definidas para as colunas oficiais; sua soma não representa necessariamente encomendas únicas.")}</p>
     <p className="cm-v2-retention-method">{t("Volume previsto: último dia exibido. Variação diária convencional: (atual − anterior) / anterior; sem base de comparação ou denominador zero, —. A fórmula de variação do JMS ainda não foi confirmada.")}</p>
   </section>;
 }

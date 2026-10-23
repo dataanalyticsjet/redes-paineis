@@ -32,7 +32,7 @@ test("PA DC and SC retain volumes but never inflate canonical operational base c
     expected_dropoff:10,expected_pickup:0,pending_dropoff:1,pending_pickup:0,status_received_at_base:2,status_dispatched_from_base:3,arrived_sorting_center:4,
   } as CollectionMonitoringV2Record));
   const groups=groupCollectionMonitoringV2Rows(rows,"region");
-  assert.equal(groups[0].planned,50);assert.equal(groups[0].retentionTotal,45);assert.equal(groups[0].baseCount,2);
+  assert.equal(groups[0].planned,50);assert.equal(groups[0].retention,10);assert.equal(groups[0].baseCount,2);
   assert.equal(isOperationalMappedBase({}),true);assert.equal(isOperationalMappedBase({mapped_unit_type:"PA"}),false);
 });
 test("cached data is reloaded after a mapping revision even with the same publication",async()=>{

@@ -308,24 +308,24 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     const orderedGroups = [...groups].sort((left, right) => left.rmArea.localeCompare(right.rmArea, dashboardLocale(language)) || left.rm.localeCompare(right.rm, dashboardLocale(language)) || left.region.localeCompare(right.region, dashboardLocale(language)));
     return <section className="collection-monitoring-v2-card collection-monitoring-v2-retention-card" key={title}>
       <div className="collection-monitoring-v2-section-heading">
-        <div><h2>{t(title)}</h2><p>{t("Taxas usam volume previsto como denominador provisório. Retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
+        <div><h2>{t(title)}</h2><p>{t("As taxas usam volume previsto como denominador; cada indicador segue as colunas oficiais definidas para esta fonte.")}</p></div>
         <span>{number(orderedGroups.length)} {t("grupos")}</span>
       </div>
       <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-retention-scroll">
         <table className="collection-monitoring-v2-table collection-monitoring-v2-retention-table">
           <thead><tr>
             <th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Volume previsto")}</th>
-            <th>{t("Retenção total")}</th><th>{t("Taxa de retenção")}</th>
-            <th>{t("Retido na base")}</th><th>{t("Taxa")}</th>
+            <th>{t("Retenção")}</th><th>{t("Taxa de retenção")}</th>
             <th>{t("Despachado pela base")}</th><th>{t("Taxa")}</th>
-            <th>{t("Chegado ao centro")}</th><th>{t("Taxa")}</th>
+            <th>{t("Em trânsito para a base")}</th><th>{t("Taxa")}</th>
+            <th>{t("Coletado")}</th><th>{t("Taxa")}</th>
           </tr></thead>
           <tbody>{orderedGroups.map((group) => <tr key={`${groupIdentity(group, dimension)}:${group.label}`}>
             <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.planned)}</td>
-            <td className="number-cell">{number(group.retentionTotal)}</td><td className="number-cell">{percent(group.retentionRate)}</td>
-            <td className="number-cell">{number(group.retainedAtBase)}</td><td className="number-cell">{percent(group.retainedAtBaseRate)}</td>
+            <td className="number-cell">{number(group.retention)}</td><td className="number-cell">{percent(group.retentionRate)}</td>
             <td className="number-cell">{number(group.dispatchedFromBase)}</td><td className="number-cell">{percent(group.dispatchedFromBaseRate)}</td>
-            <td className="number-cell">{number(group.arrivedAtCenter)}</td><td className="number-cell">{percent(group.arrivedAtCenterRate)}</td>
+            <td className="number-cell">{number(group.inTransitToBase)}</td><td className="number-cell">{percent(group.inTransitToBaseRate)}</td>
+            <td className="number-cell">{number(group.collected)}</td><td className="number-cell">{percent(group.collectionRate)}</td>
           </tr>)}</tbody>
         </table>
         {orderedGroups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum grupo encontrado para os filtros selecionados.")}</p> : null}
@@ -348,9 +348,10 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     [7, 8],
   );
   const statusColors: Record<CollectionMonitoringV2StatusField, string> = {
-    status_received_at_base: "#d71920",
-    status_dispatched_from_base: "#f28e2b",
-    arrived_sorting_center: "#61758a",
+    retention: "#d71920",
+    dispatchedFromBase: "#f28e2b",
+    inTransitToBase: "#61758a",
+    collected: "#2e9b57",
   };
   const statusBaseCount = regionalStatusGroups.reduce((sum, group) => sum + group.basesWithMovement, 0);
 
@@ -449,17 +450,17 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
         { name: "Monitoramento por regional", matrix: regionalSummaryMatrix, percentageColumns: [6, 7] },
         { name: "Monitoramento por RM", matrix: rmSummaryMatrix, percentageColumns: [7, 8] },
         { name: "Retenção por RM", matrix: [
-          ["Região do RM", "RM", "RGM", "Volume previsto", "Retenção total", "Taxa de retenção", "Retido na base", "Taxa", "Despachado pela base", "Taxa", "Chegado ao centro", "Taxa"].map((label) => t(label)),
-          ...byRm.map((group) => [group.rmArea, group.rm, group.rgm, group.planned, group.retentionTotal, group.retentionRate, group.retainedAtBase, group.retainedAtBaseRate, group.dispatchedFromBase, group.dispatchedFromBaseRate, group.arrivedAtCenter, group.arrivedAtCenterRate]),
+          ["Região do RM", "RM", "RGM", "Volume previsto", "Retenção", "Taxa de retenção", "Despachado pela base", "Taxa", "Em trânsito para a base", "Taxa", "Coletado", "Taxa"].map((label) => t(label)),
+          ...byRm.map((group) => [group.rmArea, group.rm, group.rgm, group.planned, group.retention, group.retentionRate, group.dispatchedFromBase, group.dispatchedFromBaseRate, group.inTransitToBase, group.inTransitToBaseRate, group.collected, group.collectionRate]),
         ], percentageColumns: [5, 7, 9, 11] },
         { name: "Total por regional e status", matrix: [
-          ["Regional", "Retido na base", "Despachado pela base", "Chegado ao centro", "Retenção total"].map((label) => t(label)),
-          ...regionalStatusGroups.map((group) => [group.region, group.retainedAtBase, group.dispatchedFromBase, group.arrivedAtCenter, group.retentionTotal]),
+          ["Regional", "Retenção", "Despachado pela base", "Em trânsito para a base", "Coletado"].map((label) => t(label)),
+          ...regionalStatusGroups.map((group) => [group.region, group.retention, group.dispatchedFromBase, group.inTransitToBase, group.collected]),
         ] },
       ])} />
-    <p className="collection-monitoring-v2-formula-note" role="note">{t("As regras dos indicadores são operacionais provisórias e ainda não estão homologadas pelo JMS. A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p>
+    <p className="collection-monitoring-v2-formula-note" role="note">{t("Indicadores calculados pelas colunas oficiais desta fonte. Em trânsito para a base soma os status de trânsito definidos; a soma dos indicadores não representa necessariamente encomendas únicas.")}</p>
     <section className="collection-monitoring-v2-kpis" aria-label={t("Indicadores principais")}>
-      {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra operacional provisória")}</small></article>)}
+      {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra baseada nas colunas oficiais da fonte")}</small></article>)}
     </section>
     <p className="collection-monitoring-v2-snapshot-note" role="status">{t("Snapshot de referência dos indicadores: {date}.", { date: formatShortDate(currentSnapshot.date ?? undefined) })}</p>
     <section className="collection-monitoring-v2-retention-grid" aria-label={t("Comparação de retenção")}>
@@ -469,23 +470,23 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     {monitoringTable("Monitoramento por RM", "rm", byRm, rmSummaryMatrix, downloadRmSummary)}
     <section className="collection-monitoring-v2-card collection-monitoring-v2-status-summary" aria-label={t("Total por regional e status")}>
       <div className="collection-monitoring-v2-section-heading">
-        <div><h2><BarChart3 size={17} /> {t("Total por regional e status")}</h2><p>{t("A retenção total soma etapas e não representa necessariamente encomendas únicas.")}</p></div>
-        <div className="collection-monitoring-v2-status-total"><span>{t("Bases com movimento")}</span><strong>{number(statusBaseCount)}</strong><small>{t("Retenção total")}: {number(metrics.retentionTotal)}</small></div>
+        <div><h2><BarChart3 size={17} /> {t("Total por regional e status")}</h2><p>{t("As métricas são indicadores operacionais e sua soma não representa necessariamente encomendas únicas.")}</p></div>
+        <div className="collection-monitoring-v2-status-total"><span>{t("Bases com movimento")}</span><strong>{number(statusBaseCount)}</strong><small>{t("Retenção")}: {number(metrics.retention)}</small></div>
       </div>
-      <div className="collection-monitoring-v2-status-legend" aria-label={t("Componentes de retenção")}>
-        {COLLECTION_MONITORING_V2_STATUS_FIELDS.map((field) => <span key={field}><i style={{ backgroundColor: statusColors[field] }} />{t(COLLECTION_MONITORING_V2_HEADERS[field])}</span>)}
+      <div className="collection-monitoring-v2-status-legend" aria-label={t("Indicadores operacionais")}>
+        {COLLECTION_MONITORING_V2_STATUS_FIELDS.map(({ field, label }) => <span key={field}><i style={{ backgroundColor: statusColors[field] }} />{t(label)}</span>)}
       </div>
       <div className="collection-monitoring-v2-status-list">
         {regionalStatusGroups.map((group) => <article className="collection-monitoring-v2-status-row" key={group.region}>
           <div className="collection-monitoring-v2-status-region"><strong>{group.region}</strong><span>{t("{count} base(s) com movimento", { count: number(group.basesWithMovement) })}</span></div>
-          <div className="collection-monitoring-v2-status-value"><strong>{number(group.retentionTotal)}</strong><small>{t("Retenção total")}</small></div>
-          <div className="collection-monitoring-v2-status-track" aria-label={`${group.region}: ${number(group.retentionTotal)}`}>
+          <div className="collection-monitoring-v2-status-value"><strong>{number(group.retention)}</strong><small>{t("Retenção")}</small></div>
+          <div className="collection-monitoring-v2-status-track" aria-label={`${group.region}: ${number(group.componentTotal)}`}>
             <div style={{ width: `${maxRegionalStatusTotal ? (group.componentTotal / maxRegionalStatusTotal) * 100 : 0}%` }}>
-              {group.components.map((component) => <span key={component.field} style={{ width: `${group.componentTotal ? (component.value / group.componentTotal) * 100 : 0}%`, backgroundColor: statusColors[component.field] }} title={`${t(COLLECTION_MONITORING_V2_HEADERS[component.field])}: ${number(component.value)}`} />)}
+              {group.components.map((component) => <span key={component.field} style={{ width: `${group.componentTotal ? (component.value / group.componentTotal) * 100 : 0}%`, backgroundColor: statusColors[component.field] }} title={`${t(component.label)}: ${number(component.value)}`} />)}
             </div>
           </div>
           <div className="collection-monitoring-v2-status-values">
-            {group.components.map((component) => <span key={component.field}><i style={{ backgroundColor: statusColors[component.field] }} />{t(COLLECTION_MONITORING_V2_HEADERS[component.field])}: {number(component.value)}</span>)}
+            {group.components.map((component) => <span key={component.field}><i style={{ backgroundColor: statusColors[component.field] }} />{t(component.label)}: {number(component.value)}</span>)}
           </div>
         </article>)}
         {regionalStatusGroups.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Não há regionais com movimento para os filtros selecionados.")}</p> : null}
@@ -496,11 +497,11 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       <div className="collection-monitoring-v2-toolbar"><label><span>{t("Pesquisar")}</span><input type="search" value={detailQuery} onChange={(event) => { setDetailQuery(event.target.value); setDetailPage(1); }} placeholder={t("Buscar base, regional, RM, RGM, origem ou período")} /></label><span>{number(visibleBaseDetails.matched.length)} {t("registros filtrados")}</span></div>
       <div className="collection-monitoring-v2-table-scroll collection-monitoring-v2-base-summary-scroll">
         <table className="collection-monitoring-v2-table collection-monitoring-v2-base-summary-table">
-          <thead><tr>{["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Total"].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+          <thead><tr>{["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Retenção"].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
           <tbody>{visibleBaseDetails.rows.map((row, index) => <tr key={`${index}:${row.period}:${row.region}:${row.base}:${row.origin}:${row.rmArea}:${row.rm}:${row.rgm}`}>
             <td className="date-cell">{formatShortDate(row.period)}</td><td>{row.region}</td><td>{row.base}</td><td>{row.origin}</td>
             <td><span>{row.rm}</span>{row.rmArea !== "Sem região do RM" ? <small className="collection-monitoring-v2-rm-area">{row.rmArea}</small> : null}</td><td>{row.rgm}</td>
-            <td className="number-cell">{number(row.planned)}</td><td className="number-cell">{number(row.awaiting)}</td><td className="number-cell">{number(row.collected)}</td><td className="number-cell">{number(row.total)}</td>
+            <td className="number-cell">{number(row.planned)}</td><td className="number-cell">{number(row.awaiting)}</td><td className="number-cell">{number(row.collected)}</td><td className="number-cell">{number(row.retention)}</td>
           </tr>)}</tbody>
         </table>
         {visibleBaseDetails.rows.length === 0 ? <p className="collection-monitoring-v2-empty">{t("Nenhum registro encontrado para os filtros selecionados.")}</p> : null}

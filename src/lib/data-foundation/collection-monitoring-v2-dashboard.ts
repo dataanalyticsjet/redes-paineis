@@ -30,15 +30,21 @@ export interface CollectionMonitoringV2Metrics {
   collected: number;
   collectionRate: number | null;
   awaitingRate: number | null;
-  retainedAtBase: number;
+  retention: number;
   dispatchedFromBase: number;
-  arrivedAtCenter: number;
-  retentionTotal: number;
+  inTransitToBase: number;
   retentionRate: number | null;
-  retainedAtBaseRate: number | null;
   dispatchedFromBaseRate: number | null;
-  arrivedAtCenterRate: number | null;
+  inTransitToBaseRate: number | null;
 }
+
+export const COLLECTION_MONITORING_V2_STATUS_FIELDS = [
+  { field: "retention", label: "Retenção" },
+  { field: "dispatchedFromBase", label: "Despachado pela base" },
+  { field: "inTransitToBase", label: "Em trânsito para a base" },
+  { field: "collected", label: "Coletado" },
+] as const;
+export type CollectionMonitoringV2StatusField = typeof COLLECTION_MONITORING_V2_STATUS_FIELDS[number]["field"];
 
 export interface CollectionMonitoringV2Group extends CollectionMonitoringV2Metrics {
   label: string;
@@ -60,16 +66,12 @@ export interface CollectionMonitoringV2BaseDetail {
   planned: number;
   awaiting: number;
   collected: number;
-  total: number;
+  retention: number;
 }
-
-export type CollectionMonitoringV2StatusField =
-  | "status_received_at_base"
-  | "status_dispatched_from_base"
-  | "arrived_sorting_center";
 
 export interface CollectionMonitoringV2StatusComponent {
   field: CollectionMonitoringV2StatusField;
+  label: string;
   value: number;
 }
 
@@ -135,11 +137,10 @@ export function filterCollectionMonitoringV2Rows(
 export function summarizeCollectionMonitoringV2(rows: readonly CollectionMonitoringV2Row[]): CollectionMonitoringV2Metrics {
   const planned = rows.reduce((sum, row) => sum + toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup), 0);
   const awaiting = rows.reduce((sum, row) => sum + toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup), 0);
-  const collected = planned - awaiting;
-  const retainedAtBase = rows.reduce((sum, row) => sum + toQuantity(row.status_received_at_base), 0);
+  const collected = rows.reduce((sum, row) => sum + toQuantity(row.status_collected), 0);
+  const retention = rows.reduce((sum, row) => sum + toQuantity(row.status_received_at_base), 0);
   const dispatchedFromBase = rows.reduce((sum, row) => sum + toQuantity(row.status_dispatched_from_base), 0);
-  const arrivedAtCenter = rows.reduce((sum, row) => sum + toQuantity(row.arrived_sorting_center), 0);
-  const retentionTotal = retainedAtBase + dispatchedFromBase + arrivedAtCenter;
+  const inTransitToBase = rows.reduce((sum, row) => sum + toQuantity(row.status_in_transit_from_base) + toQuantity(row.in_transit_to_center) + toQuantity(row.in_transit_to_distribution), 0);
   const rate = (value: number) => planned > 0 ? value / planned : null;
   return {
     planned,
@@ -147,14 +148,12 @@ export function summarizeCollectionMonitoringV2(rows: readonly CollectionMonitor
     collected,
     collectionRate: rate(collected),
     awaitingRate: rate(awaiting),
-    retainedAtBase,
+    retention,
     dispatchedFromBase,
-    arrivedAtCenter,
-    retentionTotal,
-    retentionRate: rate(retentionTotal),
-    retainedAtBaseRate: rate(retainedAtBase),
+    inTransitToBase,
+    retentionRate: rate(retention),
     dispatchedFromBaseRate: rate(dispatchedFromBase),
-    arrivedAtCenterRate: rate(arrivedAtCenter),
+    inTransitToBaseRate: rate(inTransitToBase),
   };
 }
 
@@ -232,17 +231,18 @@ export function groupCollectionMonitoringV2Rows(
         label: dimension === "region" ? row.region : dimension === "rm" ? row.rm : row.base,
         region: row.region, rmArea: row.rmArea, rm: row.rm, rgm: row.rgm,
         planned: 0, awaiting: 0, collected: 0, collectionRate: null, awaitingRate: null,
-        retainedAtBase: 0, dispatchedFromBase: 0, arrivedAtCenter: 0, retentionTotal: 0,
-        retentionRate: null, retainedAtBaseRate: null, dispatchedFromBaseRate: null, arrivedAtCenterRate: null,
+        retention: 0, dispatchedFromBase: 0, inTransitToBase: 0,
+        retentionRate: null, dispatchedFromBaseRate: null, inTransitToBaseRate: null,
         baseCount: 0,
       };
       groups.set(key, group);
     }
     group.planned += toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup);
     group.awaiting += toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup);
-    group.retainedAtBase += toQuantity(row.status_received_at_base);
+    group.collected += toQuantity(row.status_collected);
+    group.retention += toQuantity(row.status_received_at_base);
     group.dispatchedFromBase += toQuantity(row.status_dispatched_from_base);
-    group.arrivedAtCenter += toQuantity(row.arrived_sorting_center);
+    group.inTransitToBase += toQuantity(row.status_in_transit_from_base) + toQuantity(row.in_transit_to_center) + toQuantity(row.in_transit_to_distribution);
     if (row.mappingConfirmed && row.baseCode !== "—" && isOperationalMappedBase(row)) {
       const groupBases = bases.get(key) ?? new Set<string>();
       groupBases.add(row.baseCode);
@@ -250,14 +250,11 @@ export function groupCollectionMonitoringV2Rows(
     }
   }
   for (const [key, group] of groups) {
-    group.collected = group.planned - group.awaiting;
-    group.retentionTotal = group.retainedAtBase + group.dispatchedFromBase + group.arrivedAtCenter;
     group.collectionRate = group.planned > 0 ? group.collected / group.planned : null;
     group.awaitingRate = group.planned > 0 ? group.awaiting / group.planned : null;
-    group.retentionRate = group.planned > 0 ? group.retentionTotal / group.planned : null;
-    group.retainedAtBaseRate = group.planned > 0 ? group.retainedAtBase / group.planned : null;
+    group.retentionRate = group.planned > 0 ? group.retention / group.planned : null;
     group.dispatchedFromBaseRate = group.planned > 0 ? group.dispatchedFromBase / group.planned : null;
-    group.arrivedAtCenterRate = group.planned > 0 ? group.arrivedAtCenter / group.planned : null;
+    group.inTransitToBaseRate = group.planned > 0 ? group.inTransitToBase / group.planned : null;
     group.baseCount = bases.get(key)?.size ?? 0;
   }
   return [...groups.values()].sort((left, right) => right.planned - left.planned || left.label.localeCompare(right.label, "pt-BR"));
@@ -311,24 +308,17 @@ export function groupCollectionMonitoringV2BaseDetails(
       planned: 0,
       awaiting: 0,
       collected: 0,
-      total: 0,
+      retention: 0,
     };
     group.planned += toQuantity(row.expected_dropoff) + toQuantity(row.expected_pickup);
     group.awaiting += toQuantity(row.pending_dropoff) + toQuantity(row.pending_pickup);
-    group.total += toQuantity(row.status_received_at_base) +
-      toQuantity(row.status_dispatched_from_base) + toQuantity(row.arrived_sorting_center);
+    group.collected += toQuantity(row.status_collected);
+    group.retention += toQuantity(row.status_received_at_base);
     groups.set(identity, group);
   }
   return [...groups.values()]
-    .map((group) => ({ ...group, collected: group.planned - group.awaiting }))
-    .sort((left, right) => right.total - left.total || right.period.localeCompare(left.period) || left.base.localeCompare(right.base, "pt-BR"));
+    .sort((left, right) => right.retention - left.retention || right.period.localeCompare(left.period) || left.base.localeCompare(right.base, "pt-BR"));
 }
-
-export const COLLECTION_MONITORING_V2_STATUS_FIELDS: readonly CollectionMonitoringV2StatusField[] = [
-  "status_received_at_base",
-  "status_dispatched_from_base",
-  "arrived_sorting_center",
-];
 
 export function collectionMonitoringV2RegionalStatusGroups(
   rows: readonly CollectionMonitoringV2Row[],
@@ -342,12 +332,13 @@ export function collectionMonitoringV2RegionalStatusGroups(
 
   return groupCollectionMonitoringV2Rows(rows, "region").map((group) => {
     const regionRows = rowsByRegion.get(group.region) ?? [];
-    const components = COLLECTION_MONITORING_V2_STATUS_FIELDS.map((field) => ({
+    const components = COLLECTION_MONITORING_V2_STATUS_FIELDS.map(({ field, label }) => ({
       field,
-      value: regionRows.reduce((sum, row) => sum + toQuantity(row[field]), 0),
+      label,
+      value: regionRows.reduce((sum, row) => sum + statusMetricValue(row, field), 0),
     })).filter((component) => component.value > 0);
     const basesWithMovement = new Set(regionRows.flatMap((row) => {
-      const hasMovement = COLLECTION_MONITORING_V2_STATUS_FIELDS.some((field) => toQuantity(row[field]) > 0);
+      const hasMovement = COLLECTION_MONITORING_V2_STATUS_FIELDS.some(({ field }) => statusMetricValue(row, field) > 0);
       if (!hasMovement) return [];
       if (row.mappingConfirmed && row.baseCode !== "—" && isOperationalMappedBase(row)) return [`code:${row.baseCode}`];
       const rawName = toText(row.source_base_name).toLocaleLowerCase("pt-BR");
@@ -359,12 +350,19 @@ export function collectionMonitoringV2RegionalStatusGroups(
     .sort((left, right) => right.componentTotal - left.componentTotal || left.region.localeCompare(right.region, "pt-BR"));
 }
 
+function statusMetricValue(row: CollectionMonitoringV2Row, field: CollectionMonitoringV2StatusField): number {
+  if (field === "retention") return toQuantity(row.status_received_at_base);
+  if (field === "dispatchedFromBase") return toQuantity(row.status_dispatched_from_base);
+  if (field === "inTransitToBase") return toQuantity(row.status_in_transit_from_base) + toQuantity(row.in_transit_to_center) + toQuantity(row.in_transit_to_distribution);
+  return toQuantity(row.status_collected);
+}
+
 export function collectionMonitoringV2BaseDetailMatrix(
   rows: readonly CollectionMonitoringV2BaseDetail[],
   translate: (label: string) => string = (label) => label,
 ): (string | number)[][] {
   return [
-    ["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Total"].map(translate),
+    ["Período", "Regional", "Base", "Origem do pedido", "RM", "RGM", "Previsto a coletar", "Aguardando coleta", "Coletado", "Retenção"].map(translate),
     ...rows.map((row) => [
       row.period,
       row.region,
@@ -375,7 +373,7 @@ export function collectionMonitoringV2BaseDetailMatrix(
       row.planned,
       row.awaiting,
       row.collected,
-      row.total,
+      row.retention,
     ]),
   ];
 }

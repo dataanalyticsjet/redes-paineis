@@ -57,7 +57,7 @@ test("Monitoramento V2 mantém as 23 colunas oficiais na ordem da exportação",
   ]);
 });
 
-test("four candidate indicators reproduce the supplied JMS sample without aggregating status snapshots", () => {
+test("cards use the official collected status and do not derive it from planned minus awaiting", () => {
   const rows = Array.from({ length: 72 }, (_, index) => mapCollectionMonitoringV2Record(rawRecord({
     source_row_no: index + 2,
     reported_origin_region: `JMS region ${index % 9}`,
@@ -65,14 +65,14 @@ test("four candidate indicators reproduce the supplied JMS sample without aggreg
     expected_pickup: 364 + (index === 0 ? 28 : 0),
     pending_dropoff: 0,
     pending_pickup: 0,
-    status_collected: 99_999,
+    status_collected: 300,
   })));
   const metrics = summarizeCollectionMonitoringV2(rows);
   assert.equal(rows.length, 72);
   assert.equal(metrics.planned, 27_109);
   assert.equal(metrics.awaiting, 0);
-  assert.equal(metrics.collected, 27_109);
-  assert.equal(metrics.collectionRate, 1);
+  assert.equal(metrics.collected, 21_600);
+  assert.equal(metrics.collectionRate, 21_600 / 27_109);
   assert.equal(metrics.awaitingRate, 0);
   assert.equal(rows[0].region, "Sem regional");
   assert.equal(metrics.planned, 873 + 26_236);
@@ -146,7 +146,7 @@ test("comparison values keep numeric zero distinct from missing data and pending
   assert.deepEqual(collectionMonitoringV2ComparisonValue(null), { kind: "missing" });
 });
 
-test("approved provisional card and retention formulas match the 19 October workbook totals", () => {
+test("official card and operational fields read the corresponding V2 source columns", () => {
   const row = mapCollectionMonitoringV2Record(rawRecord({
     data_date: "2026-10-19",
     source_row_no: 2,
@@ -162,12 +162,11 @@ test("approved provisional card and retention formulas match the 19 October work
   const metrics = summarizeCollectionMonitoringV2([row]);
   assert.equal(metrics.planned, 2_516_962);
   assert.equal(metrics.awaiting, 39_245);
-  assert.equal(metrics.collected, 2_477_717);
-  assert.ok(Math.abs((metrics.collectionRate ?? 0) - 0.98440779) < 0.00000001);
-  assert.equal(metrics.retainedAtBase, 64_212);
+  assert.equal(metrics.collected, 999_999);
+  assert.equal(metrics.collectionRate, 999_999 / 2_516_962);
+  assert.equal(metrics.retention, 64_212);
   assert.equal(metrics.dispatchedFromBase, 24_286);
-  assert.equal(metrics.arrivedAtCenter, 54_330);
-  assert.equal(metrics.retentionTotal, 142_828);
+  assert.equal(metrics.inTransitToBase, 0);
 });
 
 test("current indicators use the latest snapshot in the selected period, not sums across dates", () => {
@@ -203,7 +202,7 @@ test("regional and RM grouping reconciles all rows and keeps same-name RMs separ
   const rms = groupCollectionMonitoringV2Rows(rows, "rm");
   assert.equal(regions.length, 3);
   assert.equal(regions.reduce((sum, group) => sum + group.planned, 0), total.planned);
-  assert.equal(regions.reduce((sum, group) => sum + group.retentionTotal, 0), total.retentionTotal);
+  assert.equal(regions.reduce((sum, group) => sum + group.retention, 0), total.retention);
   assert.equal(regions.find((group) => group.region === "Sem regional")?.planned, 5);
   assert.equal(rms.filter((group) => group.rm === "Alex").length, 2);
   assert.equal(rms.reduce((sum, group) => sum + group.awaiting, 0), total.awaiting);
@@ -249,14 +248,12 @@ test("approved collection formula reconciles cards, regional/RM tables, base det
   assert.equal(selected.length, 3);
   assert.equal(metrics.planned, 3_328_879);
   assert.equal(metrics.awaiting, 48_904);
-  assert.equal(metrics.collected, 3_279_975);
-  assert.equal(selected.reduce((sum, row) => sum + Number(row.status_collected), 0), 3_594_897);
+  assert.equal(metrics.collected, 3_594_897);
 
   for (const groups of [regions, rms]) {
     assert.equal(groups.reduce((sum, group) => sum + group.planned, 0), metrics.planned);
     assert.equal(groups.reduce((sum, group) => sum + group.awaiting, 0), metrics.awaiting);
     assert.equal(groups.reduce((sum, group) => sum + group.collected, 0), metrics.collected);
-    assert.ok(groups.every((group) => group.collected === group.planned - group.awaiting));
   }
   assert.equal(regions.find((group) => group.region === "Sem regional")?.planned, 328_879);
 
@@ -267,7 +264,8 @@ test("approved collection formula reconciles cards, regional/RM tables, base det
   assert.deepEqual(detailExport.slice(1).reduce<number[]>((totals, row) => [
     totals[0] + Number(row[6]), totals[1] + Number(row[7]), totals[2] + Number(row[8]),
   ], [0, 0, 0]), [metrics.planned, metrics.awaiting, metrics.collected]);
-  assert.ok(details.every((row) => row.collected === row.planned - row.awaiting));
+  assert.equal(details.reduce((sum, row) => sum + row.collected, 0), metrics.collected);
+  assert.equal(details.reduce((sum, row) => sum + row.retention, 0), metrics.retention);
 
   const narrowed = filterCollectionMonitoringV2Rows(selected, {
     region: "CE", rm: "Ana", base: "CE Base oficial", origin: "Marketplace",
@@ -288,20 +286,20 @@ test("approved collection formula reconciles cards, regional/RM tables, base det
     [narrowedDetail[0]?.planned, narrowedDetail[0]?.awaiting, narrowedDetail[0]?.collected],
     [narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected],
   );
-  assert.deepEqual([narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected], [1_000_000, 10_000, 990_000]);
+  assert.deepEqual([narrowedMetrics.planned, narrowedMetrics.awaiting, narrowedMetrics.collected], [1_000_000, 10_000, 1_200_000]);
 });
 
 test("base detail summary keeps daily snapshots separate and exports ten numeric columns", () => {
   const rows = [
     mapCollectionMonitoringV2Record(rawRecord({
       source_row_no: 2, source_base_name: "CE base", order_origin: "Marketplace", expected_dropoff: 20,
-      pending_dropoff: 2, status_received_at_base: 3, resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      pending_dropoff: 2, status_collected: 15, status_received_at_base: 3, resolved_base_code: "CE-1", effective_base_code: "CE-1",
       mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
       mapped_rm_area: "RM Norte", mapped_rm: "Alex",
     })),
     mapCollectionMonitoringV2Record(rawRecord({
       source_row_no: 3, source_base_name: "CE base", order_origin: "Marketplace", expected_dropoff: 5,
-      pending_dropoff: 1, status_dispatched_from_base: 4, resolved_base_code: "CE-1", effective_base_code: "CE-1",
+      pending_dropoff: 1, status_collected: 7, status_dispatched_from_base: 4, resolved_base_code: "CE-1", effective_base_code: "CE-1",
       mapping_resolution: "NAME_APPROVED", effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
       mapped_rm_area: "RM Norte", mapped_rm: "Alex",
     })),
@@ -322,22 +320,23 @@ test("base detail summary keeps daily snapshots separate and exports ten numeric
   assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.planned, 25);
   assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.awaiting, 3);
   assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.collected, 22);
-  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.total, 7);
+  assert.equal(summary.find((item) => item.period === "2026-10-18" && item.region === "CE")?.retention, 3);
   assert.equal(summary.find((item) => item.region === "Sem regional")?.base, "Unmapped base");
 
   const matrix = collectionMonitoringV2BaseDetailMatrix(summary, (label) => label);
   assert.equal(matrix[0]?.length, 10);
   assert.equal(matrix[1]?.length, 10);
   assert.equal(matrix.find((line) => line[0] === "2026-10-18" && line[1] === "CE")?.[6], 25);
-  assert.equal(matrix.find((line) => line[0] === "2026-10-18" && line[1] === "CE")?.[9], 7);
+  assert.equal(matrix.find((line) => line[0] === "2026-10-18" && line[1] === "CE")?.[9], 3);
 });
 
-test("regional movement summary uses only the three approved provisional retention fields", () => {
+test("regional movement summary uses the four defined indicators and exact transit components", () => {
   const rows = [
     mapCollectionMonitoringV2Record(rawRecord({
       source_row_no: 2, source_base_name: "CE base", expected_dropoff: 100,
       status_received_at_base: 10, status_dispatched_from_base: 5, arrived_sorting_center: 5,
-      status_in_transit_from_base: 1_000, arrived_sc: 2_000,
+      status_collected: 20, status_in_transit_from_base: 1_000, in_transit_to_center: 2_000,
+      in_transit_to_distribution: 3_000, arrived_sc: 2_000,
       resolved_base_code: "CE-1", effective_base_code: "CE-1", mapping_resolution: "NAME_APPROVED",
       effective_mapping_resolution: "NAME_APPROVED", mapped_region: "CE",
     })),
@@ -347,23 +346,23 @@ test("regional movement summary uses only the three approved provisional retenti
     })),
     mapCollectionMonitoringV2Record(rawRecord({
       source_row_no: 4, source_base_name: "No retention movement", expected_dropoff: 500,
-      status_in_transit_from_base: 400, arrived_sc: 300,
+      status_in_transit_from_base: 400, in_transit_to_center: 200, in_transit_to_distribution: 100, arrived_sc: 300,
       resolved_base_code: "MG-1", effective_base_code: "MG-1", mapping_resolution: "NAME_APPROVED",
       effective_mapping_resolution: "NAME_APPROVED", mapped_region: "MG",
     })),
   ];
 
   const groups = collectionMonitoringV2RegionalStatusGroups(rows);
-  assert.deepEqual(groups.map((group) => group.region), ["CE", "Sem regional"]);
+  assert.deepEqual(groups.map((group) => group.region), ["CE", "MG", "Sem regional"]);
   assert.deepEqual(groups[0]?.components.map((item) => item.field), [
-    "status_received_at_base", "status_dispatched_from_base", "arrived_sorting_center",
+    "retention", "dispatchedFromBase", "inTransitToBase", "collected",
   ]);
-  assert.equal(groups[0]?.componentTotal, 20);
+  assert.equal(groups[0]?.componentTotal, 6_035);
   assert.equal(groups[0]?.basesWithMovement, 1);
-  assert.equal(groups[1]?.region, "Sem regional");
-  assert.equal(groups[1]?.componentTotal, 4);
-  assert.equal(groups[1]?.basesWithMovement, 1);
-  assert.equal(groups.some((group) => group.region === "MG"), false);
+  assert.equal(groups[2]?.region, "Sem regional");
+  assert.equal(groups[2]?.componentTotal, 4);
+  assert.equal(groups[2]?.basesWithMovement, 1);
+  assert.equal(groups.find((group) => group.region === "MG")?.inTransitToBase, 700);
 });
 
 test("percentage variation requires a nonzero prior snapshot and treats zero as a value", () => {
