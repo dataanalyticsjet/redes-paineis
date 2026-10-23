@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -65,6 +66,8 @@ test("usa as 15 colunas do Bot 02 e não substitui quantidade pela taxa original
   ];
 
   assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS.length, 15);
+  assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS[10], "orders_unscanned_at_collection");
+  assert.equal(PDD_COLLECTION_FAILURE_V2_HEADERS[10], "Qtd pedidos não bipados na coleta");
   const summary = summarizePddCollectionFailureV2(rows);
   assert.equal(summary.totalOrders, 400);
   assert.equal(summary.ordersUnscannedAtReceipt, 40);
@@ -72,7 +75,7 @@ test("usa as 15 colunas do Bot 02 e não substitui quantidade pela taxa original
   assert.equal(summary.collectionFailureRate, 0.25);
 });
 
-test("card, tabelas e resumo de exportação somam a coluna oficial de não bipados no recebimento", () => {
+test("a coluna K soma pedidos não bipados na coleta e mantém recebimento como métrica independente", () => {
   const rows = [
     record(2, {
       total_orders: 100,
@@ -84,18 +87,53 @@ test("card, tabelas e resumo de exportação somam a coluna oficial de não bipa
       orders_unscanned_at_receipt: 35,
       orders_unscanned_at_collection: 8,
     }),
+    record(4, {
+      total_orders: 50,
+      orders_unscanned_at_receipt: 5,
+      orders_unscanned_at_collection: 2,
+      source_base_code: "00456",
+      source_base_name: "Base Beta",
+      effective_base_code: "00456",
+      effective_base_name: "Base Beta",
+      effective_region: "SR",
+      effective_rm_area: "SR-RS",
+      effective_rm: "RM Beta",
+      effective_rgm: "RGM SR",
+    }),
   ];
   const analysis = analyzePddCollectionFailureV2(rows);
 
   assert.equal(PDD_COLLECTION_FAILURE_V2_COLUMNS[8], "orders_unscanned_at_receipt");
   assert.equal(PDD_COLLECTION_FAILURE_V2_HEADERS[8], "Qtd pedidos não bipados no recebimento da coleta");
-  assert.equal(analysis.summary.ordersUnscannedAtReceipt, 55);
-  assert.equal(analysis.summary.ordersUnscannedAtCollection, 11);
-  assert.equal(analysis.regionalSummary[0]?.ordersUnscannedAtReceipt, 55);
-  assert.equal(analysis.rmSummary[0]?.ordersUnscannedAtReceipt, 55);
-  assert.equal(analysis.baseSummary[0]?.ordersUnscannedAtReceipt, 55);
-  assert.equal(analysis.summary.collectionFailureRate, 11 / 400);
-  assert.deepEqual(analysis.filteredRecords.map((row) => row.orders_unscanned_at_receipt), [20, 35]);
+  assert.equal(analysis.summary.ordersUnscannedAtReceipt, 60);
+  assert.equal(analysis.summary.ordersUnscannedAtCollection, 13);
+  assert.deepEqual(analysis.regionalSummary.map((row) => row.ordersUnscannedAtCollection).sort((a, b) => a - b), [2, 11]);
+  assert.deepEqual(analysis.rmSummary.map((row) => row.ordersUnscannedAtCollection).sort((a, b) => a - b), [2, 11]);
+  assert.deepEqual(analysis.baseSummary.map((row) => row.ordersUnscannedAtCollection).sort((a, b) => a - b), [2, 11]);
+  assert.equal(analysis.regionalSummary.reduce((sum, row) => sum + row.ordersUnscannedAtCollection, 0), analysis.summary.ordersUnscannedAtCollection);
+  assert.equal(analysis.rmSummary.reduce((sum, row) => sum + row.ordersUnscannedAtCollection, 0), analysis.summary.ordersUnscannedAtCollection);
+  assert.equal(analysis.baseSummary.reduce((sum, row) => sum + row.ordersUnscannedAtCollection, 0), analysis.summary.ordersUnscannedAtCollection);
+  assert.equal(analysis.regionalSummary.reduce((sum, row) => sum + row.ordersUnscannedAtReceipt, 0), analysis.summary.ordersUnscannedAtReceipt);
+  assert.equal(analysis.rmSummary.reduce((sum, row) => sum + row.ordersUnscannedAtReceipt, 0), analysis.summary.ordersUnscannedAtReceipt);
+  assert.equal(analysis.baseSummary.reduce((sum, row) => sum + row.ordersUnscannedAtReceipt, 0), analysis.summary.ordersUnscannedAtReceipt);
+  assert.equal(analysis.summary.collectionFailureRate, 13 / 450);
+  assert.deepEqual(analysis.filteredRecords.map((row) => row.orders_unscanned_at_receipt), [20, 35, 5]);
+  assert.deepEqual(analysis.filteredRecords.map((row) => row.orders_unscanned_at_collection), [3, 8, 2]);
+});
+
+test("card, regional/RM/base tables and summarized exports display the column K metric consistently", async () => {
+  const source = await readFile(new URL("../src/features/dashboards/dashboard-app.tsx", import.meta.url), "utf8");
+  const componentStart = source.indexOf("function PddCollectionFailureV2Dashboard(");
+  const componentEnd = source.indexOf("const PDD_COLLECTION_FAILURE_V2_HEADERS_BY_FIELD", componentStart);
+  const component = source.slice(componentStart, componentEnd);
+
+  assert.match(component, /label={t\("Pedidos não bipados"\)} value={hasData \? formatCompact\(summary\.ordersUnscannedAtCollection\) : "—"} detail={t\("Soma da coluna oficial de pedidos não bipados na coleta no período"\)}/);
+  assert.equal((component.match(/t\("Pedidos não bipados"\)/g) ?? []).length, 7);
+  assert.equal((component.match(/row\.ordersUnscannedAtCollection/g) ?? []).length, 6);
+  assert.match(component, /const totals = \[summary\.totalOrders, summary\.ordersUnscannedAtReceipt, summary\.ordersUnscannedAtCollection, summary\.collectionFailureRate\]/);
+  assert.match(source, /orders_unscanned_at_collection: "Qtd pedidos não bipados na coleta"/);
+  assert.equal((component.match(/t\("Não bipados no recebimento"\)/g) ?? []).length, 6);
+  assert.match(component, /summary\.ordersUnscannedAtReceipt/);
 });
 
 test("exige um dia operacional único antes de calcular indicadores e tabelas", () => {

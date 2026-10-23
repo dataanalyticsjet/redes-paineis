@@ -1048,6 +1048,7 @@ const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "Pedidos e valor por regional — período selecionado": { en: "Orders and value by region — selected period", zh: "按区域统计订单和金额 — 所选周期" },
   "Pedidos não bipados": { en: "Orders not scanned", zh: "未扫描订单" },
   "Pedidos não bipados ÷ total de pedidos": { en: "Orders not scanned ÷ total orders", zh: "未扫描订单 ÷ 订单总数" },
+  "Soma da coluna oficial de pedidos não bipados na coleta no período": { en: "Sum of the official orders-not-scanned-at-collection field for the selected period", zh: "所选周期内揽收未扫描订单官方字段总和" },
   "Pergunte sobre os indicadores…": { en: "Ask about operational metrics…", zh: "询问运营指标…" },
   "Personalizar esta sessão": { en: "Customize this session", zh: "自定义本次会话" },
   "Primeira digitalização por regional": { en: "First scan by region", zh: "按区域查看首次扫描" },
