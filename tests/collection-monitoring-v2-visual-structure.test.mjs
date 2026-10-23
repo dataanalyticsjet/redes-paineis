@@ -26,7 +26,7 @@ test("retention tables use the official source indicators and distinguish unavai
   assert.match(component, /group\.collected/);
 
   assert.match(component, /t\("Sem dados"\)/);
-  assert.match(component, /t\("Indicadores calculados pelas colunas oficiais desta fonte/);
+  assert.match(component, /t\("Fórmula aprovada dos cards: previsto = L \+ O \+ P \+ T; aguardando = O \+ P; coletado auxiliar = L \+ T/);
   assert.doesNotMatch(component, /Pendente de homologação/);
 });
 

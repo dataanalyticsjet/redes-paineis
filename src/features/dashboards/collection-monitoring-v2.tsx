@@ -372,12 +372,12 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
         <tbody>{groups.map((group) => <tr key={dimension === "region" ? group.region : groupIdentity(group, "rm")}>
           {dimension === "region" ? <>
             <td>{group.region}</td><td>{group.rgm}</td><td className="number-cell">{number(group.baseCount)}</td>
-            <td className="number-cell">{number(group.planned)}</td><td className="number-cell">{number(group.awaiting)}</td><td className="number-cell">{number(group.collected)}</td>
-            <td className="number-cell">{percent(group.collectionRate)}</td><td className="number-cell">{percent(group.awaitingRate)}</td>
+            <td className="number-cell">{number(group.operationalPlanned)}</td><td className="number-cell">{number(group.operationalAwaiting)}</td><td className="number-cell">{number(group.operationalCollected)}</td>
+            <td className="number-cell">{percent(group.operationalCollectionRate)}</td><td className="number-cell">{percent(group.operationalAwaitingRate)}</td>
           </> : <>
             <td>{group.rmArea}</td><td>{group.rm}</td><td>{group.rgm}</td><td className="number-cell">{number(group.baseCount)}</td>
-            <td className="number-cell">{number(group.planned)}</td><td className="number-cell">{number(group.awaiting)}</td><td className="number-cell">{number(group.collected)}</td>
-            <td className="number-cell">{percent(group.collectionRate)}</td><td className="number-cell">{percent(group.awaitingRate)}</td>
+            <td className="number-cell">{number(group.operationalPlanned)}</td><td className="number-cell">{number(group.operationalAwaiting)}</td><td className="number-cell">{number(group.operationalCollected)}</td>
+            <td className="number-cell">{percent(group.operationalCollectionRate)}</td><td className="number-cell">{percent(group.operationalAwaitingRate)}</td>
           </>}
         </tr>)}</tbody>
         <tfoot><tr>
@@ -458,7 +458,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
           ...regionalStatusGroups.map((group) => [group.region, group.retention, group.dispatchedFromBase, group.inTransitToBase, group.collected]),
         ] },
       ])} />
-    <p className="collection-monitoring-v2-formula-note" role="note">{t("Indicadores calculados pelas colunas oficiais desta fonte. Em trânsito para a base soma os status de trânsito definidos; a soma dos indicadores não representa necessariamente encomendas únicas.")}</p>
+    <p className="collection-monitoring-v2-formula-note" role="note">{t("Fórmula aprovada dos cards: previsto = L + O + P + T; aguardando = O + P; coletado auxiliar = L + T. É um agrupamento de estados de recebimento e trânsito pós-coleta, sem afirmar equivalência com os nomes originais do JMS. As métricas de retenção mantêm seus campos e cálculos próprios.")}</p>
     <section className="collection-monitoring-v2-kpis" aria-label={t("Indicadores principais")}>
       {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra baseada nas colunas oficiais da fonte")}</small></article>)}
     </section>
