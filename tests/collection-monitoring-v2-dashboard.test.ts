@@ -92,19 +92,15 @@ test("contract positions for the approved operational card fields remain officia
   assert.equal(COLLECTION_MONITORING_V2_COLUMNS[19], "arrived_sc");
 });
 
-test("dashboard cards and operational tables are wired to the approved metric model", async () => {
+test("dashboard keeps the four approved card values dynamic after legacy operational sections are removed", async () => {
   const source = await readFile(new URL("../src/features/dashboards/collection-monitoring-v2.tsx", import.meta.url), "utf8");
   assert.match(source, /title: "Previsto a coletar", value: number\(metrics\.planned\)/);
   assert.match(source, /title: "Aguardando coleta", value: number\(metrics\.awaiting\)/);
   assert.match(source, /title: "Taxa de coleta", value: percent\(metrics\.collectionRate\)/);
   assert.match(source, /title: "Taxa de pedidos aguardando coleta", value: percent\(metrics\.awaitingRate\)/);
-  assert.equal((source.match(/group\.operationalPlanned/g) ?? []).length, 2);
-  assert.equal((source.match(/group\.operationalAwaiting(?!Rate)/g) ?? []).length, 2);
-  assert.equal((source.match(/group\.operationalCollected/g) ?? []).length, 2);
-  assert.equal((source.match(/group\.operationalCollectionRate/g) ?? []).length, 2);
-  assert.equal((source.match(/group\.operationalAwaitingRate/g) ?? []).length, 2);
-  assert.match(source, /group\.planned[\s\S]*?group\.retention/);
-  assert.match(source, /Fórmula aprovada dos cards: previsto = L \+ O \+ P \+ T; aguardando = O \+ P; coletado auxiliar = L \+ T/);
+  assert.match(source, /summarizeCollectionMonitoringV2\(currentRows\)/);
+  assert.match(source, /<CollectionMonitoringV2RetentionTables/);
+  assert.doesNotMatch(source, /Monitoramento por regional|Monitoramento por RM|Total por regional e status|Dados por base/);
 });
 
 test("only a confirmed unique DoomsDay mapping supplies organizational dimensions", () => {

@@ -15,6 +15,7 @@ RETENTION_FIELDS = (
     "expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup",
     "status_collected", "status_received_at_base", "status_dispatched_from_base",
     "status_in_transit_from_base", "in_transit_to_center", "in_transit_to_distribution",
+    "arrived_sorting_center", "arrived_sc",
 )
 
 
@@ -115,6 +116,7 @@ def get_regional_retention_table(
         return re.sub(whitespace, " ", str(value or "")).strip(" ")
     result = _get_authorized_retention_aggregates(engine, identity=identity, date_from=date_from, date_to=date_to)
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    grouped_by_rm: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for row in result["aggregates"]:
         confirmed = row["effective_mapping_resolution"] == "NAME_APPROVED" and bool(display(row["effective_base_code"]))
         mapped_region = (display(row["mapped_region"]) or "Sem regional") if confirmed else "Sem regional"
@@ -134,6 +136,19 @@ def get_regional_retention_table(
         item["row_count"] += row["row_count"]
         for field in RETENTION_FIELDS:
             item[field] += row[field]
+        rm_key = (day, dimensions["rm_area"], dimensions["rm"], mapped_region)
+        rm_item = grouped_by_rm.setdefault(rm_key, {
+            "data_date": day, "rm_area": dimensions["rm_area"], "rm": dimensions["rm"],
+            "region": mapped_region, "publication_id": row["publication_id"], "row_count": 0,
+            **dict.fromkeys(RETENTION_FIELDS, 0),
+        })
+        rm_item["row_count"] += row["row_count"]
+        for field in RETENTION_FIELDS:
+            rm_item[field] += row[field]
     dates = sorted({day for day, _region in grouped})[-3:]
+    latest_date = dates[-1] if dates else None
+    selected_rm = [item for key, item in sorted(grouped_by_rm.items()) if key[0] == latest_date]
     return {"sourceId": "collection_monitoring", "contractVersion": 2,
-            "aggregates": [item for (day, _region), item in sorted(grouped.items()) if day in dates]}
+            "dates": dates,
+            "aggregates": [item for (day, _region), item in sorted(grouped.items()) if day in dates],
+            "rmAggregates": selected_rm}

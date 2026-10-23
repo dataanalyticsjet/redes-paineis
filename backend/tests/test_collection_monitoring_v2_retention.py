@@ -112,7 +112,7 @@ def test_endpoint_uses_only_authenticated_backend_scope_and_anonymous_access_is_
     seen=[]
     def fake(_engine, **kwargs):
         seen.append(kwargs['identity'])
-        return {'sourceId':'collection_monitoring','contractVersion':2,'aggregates':[]}
+        return {'sourceId':'collection_monitoring','contractVersion':2,'dates':[],'aggregates':[],'rmAggregates':[]}
     monkeypatch.setattr('app.api.data_foundation.get_regional_retention_table', fake)
     with TestClient(app) as client:
         assert client.get('/api/v2/collection-monitoring-v2/regional-retention?date_from=2026-10-20&date_to=2026-10-22').status_code == 401
@@ -148,7 +148,7 @@ def test_aggregate_includes_all_official_card_and_transit_source_columns():
             SET expected_dropoff=20, expected_pickup=30, pending_dropoff=3, pending_pickup=4,
                 status_collected=12, status_received_at_base=5, status_dispatched_from_base=6,
                 status_in_transit_from_base=7, in_transit_to_center=8, in_transit_to_distribution=9,
-                arrived_sorting_center=1000, distribution_in_transit=2000
+                arrived_sorting_center=11, arrived_sc=1000, distribution_in_transit=2000
             WHERE source_row_no=1
         """))
     result = get_regional_retention(
@@ -160,6 +160,7 @@ def test_aggregate_includes_all_official_card_and_transit_source_columns():
         'expected_dropoff': 20, 'expected_pickup': 30, 'pending_dropoff': 3, 'pending_pickup': 4,
         'status_collected': 12, 'status_received_at_base': 5, 'status_dispatched_from_base': 6,
         'status_in_transit_from_base': 7, 'in_transit_to_center': 8, 'in_transit_to_distribution': 9,
+        'arrived_sorting_center': 11, 'arrived_sc': 1000,
     }
 
 
@@ -169,18 +170,36 @@ def test_table_response_finishes_filters_and_latest_three_dates_on_backend():
     for day in (18, 20, 21, 22):
         _insert_day(engine, contract, table, day=day, rows=[(1, True), (2, False), (3, True)])
     arguments=dict(engine=engine,identity=ADMIN_MATRIX,date_from=date(2026,10,18),date_to=date(2026,10,22))
-    result=get_regional_retention_table(**arguments)['aggregates']
+    response=get_regional_retention_table(**arguments)
+    result=response['aggregates']
+    rm_result=response['rmAggregates']
+    assert response['dates'] == ['2026-10-20','2026-10-21','2026-10-22']
     assert sorted({r['data_date'] for r in result}) == ['2026-10-20','2026-10-21','2026-10-22']
     assert len(result)==6 and sum(r['row_count'] for r in result)==9
+    assert {r['data_date'] for r in rm_result} == {'2026-10-22'}
+    assert sum(r['row_count'] for r in rm_result) == 3
+    assert all({'rm_area', 'rm', 'region', 'arrived_sorting_center', 'arrived_sc'} <= r.keys() for r in rm_result)
+    latest_regional = [r for r in result if r['data_date'] == '2026-10-22']
+    for field in RETENTION_FIELDS:
+        assert sum(r[field] for r in latest_regional) == sum(r[field] for r in rm_result)
     assert all('source_base_name' not in r and 'mapped_rm' not in r for r in result)
-    filtered=get_regional_retention_table(**arguments,region='SPE',rm='RM One',rm_area='SPE',base='Mapped base',origin='order_origin-1',rgm_filter=True,rgm_regions=['SPE'])['aggregates']
+    filtered_response=get_regional_retention_table(**arguments,region='SPE',rm='RM One',rm_area='SPE',base='Mapped base',origin='order_origin-1',rgm_filter=True,rgm_regions=['SPE'])
+    filtered=filtered_response['aggregates']
     assert len(filtered)==3
     assert all(r['expected_dropoff']==1 and r['row_count']==1 and r['region']=='SPE' for r in filtered)
+    assert sum(r['row_count'] for r in filtered_response['rmAggregates']) == 1
+    assert filtered_response['dates'] == ['2026-10-20','2026-10-21','2026-10-22']
     assert get_regional_retention_table(**arguments,rgm_filter=True,rgm_regions=[])['aggregates']==[]
     assert get_regional_retention_table(**arguments,region='CE')['aggregates']==[]
     arguments['identity']=ADMIN_REGIONAL
-    assert all(r['region']=='SPE' for r in get_regional_retention_table(**arguments)['aggregates'])
+    regional_result=get_regional_retention_table(**arguments)
+    assert all(r['region']=='SPE' for r in regional_result['aggregates'])
+    assert all(r['region']=='SPE' for r in regional_result['rmAggregates'])
     assert get_regional_retention_table(**arguments,region='Sem regional')['aggregates']==[]
+    arguments['identity']=BASE
+    base_result=get_regional_retention_table(**arguments)
+    assert sum(r['row_count'] for r in base_result['aggregates']) == 6
+    assert sum(r['row_count'] for r in base_result['rmAggregates']) == 2
 
 
 def test_backend_display_filters_match_existing_javascript_whitespace_semantics():

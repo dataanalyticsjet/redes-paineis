@@ -396,6 +396,13 @@ export interface CollectionMonitoringV2RetentionRecord extends Record<string, un
   status_in_transit_from_base: number;
   in_transit_to_center: number;
   in_transit_to_distribution: number;
+  arrived_sorting_center: number;
+  arrived_sc: number;
+}
+
+export interface CollectionMonitoringV2RmRetentionRecord extends CollectionMonitoringV2RetentionRecord {
+  rm_area: string;
+  rm: string;
 }
 
 export async function loadCollectionMonitoringV2Retention(
@@ -403,7 +410,7 @@ export async function loadCollectionMonitoringV2Retention(
   fetcher: Fetcher = apiFetch,
   signal?: AbortSignal,
   filters: { region?: string; rm?: string; rmArea?: string; base?: string; origin?: string; rgmRegions?: readonly string[] } = {},
-): Promise<{ aggregates: CollectionMonitoringV2RetentionRecord[] }> {
+): Promise<{ dates: string[]; aggregates: CollectionMonitoringV2RetentionRecord[]; rmAggregates: CollectionMonitoringV2RmRetentionRecord[] }> {
   if (!period.dateFrom || !period.dateTo || validDate(period.dateFrom) > validDate(period.dateTo)) {
     throw new CollectionMonitoringV2LoadError("invalid_data", "O período informado é inválido.");
   }
@@ -413,17 +420,30 @@ export async function loadCollectionMonitoringV2Retention(
     params.set("rgm_filter", "true");
     for (const region of filters.rgmRegions) params.append("rgm_regions", region);
   }
-  const result = await json<{ sourceId: string; contractVersion: number; aggregates: CollectionMonitoringV2RetentionRecord[] }>(
+  const result = await json<{ sourceId: string; contractVersion: number; dates: string[]; aggregates: CollectionMonitoringV2RetentionRecord[]; rmAggregates: CollectionMonitoringV2RmRetentionRecord[] }>(
     `/api/v2/collection-monitoring-v2/regional-retention?${params}`, fetcher, signal, COLLECTION_MONITORING_V2_REQUEST_TIMEOUT_MS,
   );
-  if (result.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || result.contractVersion !== 2 || !Array.isArray(result.aggregates)) {
+  if (result.sourceId !== COLLECTION_MONITORING_V2_SOURCE_ID || result.contractVersion !== 2 || !Array.isArray(result.dates) || !Array.isArray(result.aggregates) || !Array.isArray(result.rmAggregates)) {
     throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
+  }
+  result.dates = result.dates.map(validDate);
+  if (result.dates.length > 3 || result.dates.some((date, index) => date < period.dateFrom! || date > period.dateTo! || (index > 0 && date <= result.dates[index - 1]))) {
+    throw new CollectionMonitoringV2LoadError("invalid_data", "As datas da tabela de retenção são inválidas.");
   }
   for (const row of result.aggregates) {
     const date = validDate(row.data_date);
-    if (date < period.dateFrom || date > period.dateTo || !row.publication_id) throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação da comparação mudou durante o carregamento.");
+    if (date < period.dateFrom || date > period.dateTo || !result.dates.includes(date) || !row.publication_id) throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação da comparação mudou durante o carregamento.");
     if (typeof row.region !== "string" || !row.region) throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou outra fonte de dados.");
-    for (const field of ["expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup", "status_collected", "status_received_at_base", "status_dispatched_from_base", "status_in_transit_from_base", "in_transit_to_center", "in_transit_to_distribution", "row_count"]) {
+    for (const field of ["expected_dropoff", "expected_pickup", "pending_dropoff", "pending_pickup", "status_collected", "status_received_at_base", "status_dispatched_from_base", "status_in_transit_from_base", "in_transit_to_center", "in_transit_to_distribution", "arrived_sorting_center", "arrived_sc", "row_count"]) {
+      if (row[field] == null || !Number.isSafeInteger(Number(row[field])) || Number(row[field]) < 0) throw new CollectionMonitoringV2LoadError("invalid_data", `A quantidade ${field} é inválida.`);
+      row[field] = Number(row[field]);
+    }
+  }
+  for (const row of result.rmAggregates) {
+    if (!row.rm_area || !row.rm || !row.region || !row.publication_id || validDate(row.data_date) !== result.dates.at(-1)) {
+      throw new CollectionMonitoringV2LoadError("invalid_data", "A API retornou um agrupamento de RM inválido.");
+    }
+    for (const field of ["expected_dropoff", "expected_pickup", "status_received_at_base", "status_dispatched_from_base", "in_transit_to_center", "in_transit_to_distribution", "arrived_sorting_center", "arrived_sc", "row_count"]) {
       if (row[field] == null || !Number.isSafeInteger(Number(row[field])) || Number(row[field]) < 0) throw new CollectionMonitoringV2LoadError("invalid_data", `A quantidade ${field} é inválida.`);
       row[field] = Number(row[field]);
     }
