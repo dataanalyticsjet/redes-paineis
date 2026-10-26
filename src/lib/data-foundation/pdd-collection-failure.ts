@@ -210,6 +210,7 @@ export async function loadPublishedPddCollectionFailure(
   period: PddCollectionFailureV2Period,
   fetcher: ApiFetch = apiFetch,
   signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number, stage: "records" | "validation") => void,
 ): Promise<PublishedPddCollectionFailureData> {
   const dateFrom = normalizeDate(period.dateFrom);
   const dateTo = normalizeDate(period.dateTo);
@@ -244,6 +245,7 @@ export async function loadPublishedPddCollectionFailure(
   const expectedCount = [...expectedByDate.values()].reduce((sum, count) => sum + count, 0);
   const records: PddCollectionFailureV2Record[] = [];
   const seenRows = new Set<string>();
+  onProgress?.(0, expectedCount, "records");
   for (let offset = 0; offset < expectedCount; offset += PDD_COLLECTION_FAILURE_V2_PAGE_SIZE) {
     const limit = Math.min(PDD_COLLECTION_FAILURE_V2_PAGE_SIZE, expectedCount - offset);
     const query = new URLSearchParams({ contract_version: "2", date_from: dateFrom, date_to: dateTo, limit: String(limit), offset: String(offset) });
@@ -271,6 +273,7 @@ export async function loadPublishedPddCollectionFailure(
       seenRows.add(identity);
       records.push(record);
     }
+    onProgress?.(records.length, expectedCount, "records");
   }
 
   if (records.length !== expectedCount) {
@@ -287,6 +290,7 @@ export async function loadPublishedPddCollectionFailure(
     throw new PddCollectionFailureV2LoadError("inconsistent", "As contagens por data não conferem com os registros recebidos.");
   }
 
+  onProgress?.(0, 0, "validation");
   const [afterPublications, afterDates] = await Promise.all([
     requestJson<PublicationsResponse>(`${base}/publications?contract_version=2&limit=1&offset=0`, fetcher, signal),
     requestJson<DatesResponse>(datesPath, fetcher, signal),

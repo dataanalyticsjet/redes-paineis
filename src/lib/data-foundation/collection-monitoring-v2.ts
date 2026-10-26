@@ -102,7 +102,7 @@ export class CollectionMonitoringV2LoadError extends Error {
 type Fetcher = (path: string, init?: RequestInit) => Promise<Response>;
 export interface CollectionMonitoringV2LoadOptions {
   requestTimeoutMs?: number;
-  onProgress?: (loadedRows: number, totalRows: number) => void;
+  onProgress?: (loadedRows: number, totalRows: number, stage: "records" | "validation") => void;
 }
 interface DatesResponse { sourceId: string; dates: CollectionMonitoringV2Date[]; hasPublishedPublication: boolean; }
 interface RecordsPage { sourceId: string; records: CollectionMonitoringV2Record[]; total: number; limit: number; offset: number; }
@@ -298,7 +298,7 @@ export async function loadPublishedCollectionMonitoringV2(
   const dates = hasPeriod ? availableDates : availableDates.filter((item) => item.date === latestAvailableDate);
   const expectedDates = dates.filter((item) => item.date >= dateFrom && item.date <= dateTo);
   const expectedCount = expectedDates.reduce((sum, item) => sum + item.rowCount, 0);
-  options.onProgress?.(0, expectedCount);
+  options.onProgress?.(0, expectedCount, "records");
   const records: CollectionMonitoringV2Record[] = [];
   const identities = new Set<string>();
   let expectedOffset = 0;
@@ -321,13 +321,14 @@ export async function loadPublishedCollectionMonitoringV2(
       records.push(row);
     }
     expectedOffset += page.records.length;
-    options.onProgress?.(expectedOffset, expectedCount);
+    options.onProgress?.(expectedOffset, expectedCount, "records");
     if (expectedOffset >= page.total) break;
     if (page.records.length === 0) throw new CollectionMonitoringV2LoadError("inconsistent", "A consulta terminou antes de carregar todas as linhas.");
   }
   if (reportedTotal !== expectedCount || records.length !== expectedCount) {
     throw new CollectionMonitoringV2LoadError("inconsistent", "A quantidade de linhas não corresponde às partições diárias publicadas.");
   }
+  options.onProgress?.(0, 0, "validation");
   const confirmed = await json<DatesResponse>(`${base}/dates?${query({ dateFrom, dateTo })}`, fetcher, signal, timeoutMs);
   if (signature(confirmed.dates) !== signature(expectedDates)) {
     throw new CollectionMonitoringV2LoadError("inconsistent", "A publicação foi alterada durante o carregamento. Tente novamente.");

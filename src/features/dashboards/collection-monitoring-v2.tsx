@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, Clock3, Filter, Layers3, Percent, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, Clock3, Filter, Layers3, Percent, ShieldCheck } from "lucide-react";
 import { subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
 import { dashboardLocale, type DashboardLanguage, type DashboardTranslator } from "../../lib/i18n";
 import {
@@ -20,6 +20,7 @@ import {
 } from "../../lib/data-foundation/collection-monitoring-v2-dashboard.ts";
 
 import { CollectionMonitoringV2RetentionTables } from "./collection-monitoring-v2-regional-retention.tsx";
+import { DashboardLoadingSkeleton } from "./dashboard-loading-skeleton.tsx";
 
 interface Props {
   t: DashboardTranslator;
@@ -72,7 +73,8 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const [reload, setReload] = useState(0);
   const [rows, setRows] = useState<CollectionMonitoringV2Row[]>([]);
   const [requestedPeriod, setRequestedPeriod] = useState<CollectionMonitoringV2Period | undefined>();
-  const [progress, setProgress] = useState({ loaded: 0, total: 0 });
+  const [loadedPeriod, setLoadedPeriod] = useState<CollectionMonitoringV2Period | null>(null);
+  const [progress, setProgress] = useState({ loaded: 0, total: 0, stage: "records" as "records" | "validation" });
   const [progressScope, setProgressScope] = useState<string | null>(null);
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,23 +86,23 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     let active = true;
     activeRequest.current = controller;
     void loadPublishedCollectionMonitoringV2(requestedPeriod, undefined, controller.signal, {
-      onProgress: (loaded, total) => {
+      onProgress: (loaded, total, stage) => {
         if (active) {
           setProgressScope(scopeKey);
-          setProgress({ loaded, total });
+          setProgress({ loaded, total, stage });
         }
       },
     }).then((result) => {
       if (!active) return;
       const mapped = result.records.map(mapCollectionMonitoringV2Record);
       setRows(mapped);
+      setLoadedPeriod(result.period);
       setFilters((current) => ({ ...current, dateFrom: result.period.dateFrom, dateTo: result.period.dateTo }));
       setLoadedScope(scopeKey);
       setStatus(mapped.length ? "ready" : "empty");
     }).catch((cause: unknown) => {
       if (!active || controller.signal.aborted) return;
-      setRows([]);
-      setLoadedScope(scopeKey);
+      setLoadedScope((current) => current === scopeKey ? current : scopeKey);
       if (cause instanceof CollectionMonitoringV2LoadError && cause.kind === "empty") {
         setStatus("empty");
         setError(cause.message);
@@ -119,17 +121,23 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   useEffect(() => subscribeToProtectedApiAuthorizationFailure(() => {
     activeRequest.current?.abort();
     setRows([]);
+    setLoadedPeriod(null);
     setLoadedScope(scopeKey);
     setStatus("error");
     setError(t("O acesso aos dados mudou. Atualize a autorização para continuar."));
   }), [scopeKey, t]);
 
+  const hasPreviousRows = loadedScope === scopeKey && rows.length > 0;
+  const showingPreviousRows = hasPreviousRows && (status === "loading" || status === "error");
+  const appliedFilters = useMemo(() => showingPreviousRows
+    ? { ...filters, dateFrom: loadedPeriod?.dateFrom, dateTo: loadedPeriod?.dateTo }
+    : filters, [filters, loadedPeriod, showingPreviousRows]);
   const periodRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, {
-    dateFrom: filters.dateFrom,
-    dateTo: filters.dateTo,
-  }), [rows, filters.dateFrom, filters.dateTo]);
+    dateFrom: appliedFilters.dateFrom,
+    dateTo: appliedFilters.dateTo,
+  }), [rows, appliedFilters.dateFrom, appliedFilters.dateTo]);
   const options = useMemo(() => collectionMonitoringV2FilterOptions(periodRows), [periodRows]);
-  const filteredRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, filters), [rows, filters]);
+  const filteredRows = useMemo(() => filterCollectionMonitoringV2Rows(rows, appliedFilters), [rows, appliedFilters]);
   const retentionPublicationSignature = useMemo(() => {
     const dates = new Set([...new Set(filteredRows.map((row) => String(row.data_date).slice(0, 10)))].sort().slice(-3));
     const counts = new Map<string, number>();
@@ -147,11 +155,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
     setFilters(next);
     if (key === "dateFrom" || key === "dateTo") {
       activeRequest.current?.abort();
-      setRows([]);
-      setLoadedScope(null);
       setStatus("loading");
       setError(null);
-      setProgress({ loaded: 0, total: 0 });
+      setProgress({ loaded: 0, total: 0, stage: "records" });
       setProgressScope(null);
       setRequestedPeriod({ dateFrom: next.dateFrom, dateTo: next.dateTo });
     }
@@ -160,11 +166,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   function clearFilters() {
     if (requestedPeriod) {
       activeRequest.current?.abort();
-      setRows([]);
-      setLoadedScope(null);
       setStatus("loading");
       setError(null);
-      setProgress({ loaded: 0, total: 0 });
+      setProgress({ loaded: 0, total: 0, stage: "records" });
       setProgressScope(null);
       setRequestedPeriod(undefined);
       setFilters({});
@@ -198,10 +202,9 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   );
 
   const periodSelector = <div className="collection-monitoring-v2-filter-grid">{dateFilters}</div>;
-  if (status === "loading" || loadedScope !== scopeKey) return <section className="collection-monitoring-v2-state" role="status"><RefreshCw size={18} className="collection-monitoring-v2-spinner" /><div><p>{t("Carregando publicação do Monitoramento de Coleta…")}</p>{progressScope === scopeKey && progress.total > 0 ? <p>{t("Carregando {loaded} de {total} registros do período…", { loaded: number(progress.loaded), total: number(progress.total) })}</p> : null}{periodSelector}</div></section>;
+  if (status === "error" && !hasPreviousRows) return <div><DashboardLoadingSkeleton t={t} message="Carregando publicação do Monitoramento de Coleta…" error={error} onRetry={() => { activeRequest.current?.abort(); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0, stage: "records" }); setProgressScope(null); setReload((value) => value + 1); }} />{periodSelector}</div>;
+  if (status === "loading" && !hasPreviousRows || loadedScope !== scopeKey) return <DashboardLoadingSkeleton t={t} message={progressScope === scopeKey && progress.stage === "validation" ? "Validando a consistência da publicação…" : progressScope === scopeKey && progress.total > 0 ? "Carregando registros publicados…" : "Carregando publicação do Monitoramento de Coleta…"} progress={progressScope === scopeKey ? progress : null} />;
   if (status === "empty") return <section className="collection-monitoring-v2-state"><Activity size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : t("Aguardando primeira importação.")}</p>{periodSelector}</section>;
-
-  if (status === "error") return <section className="collection-monitoring-v2-state error" role="alert"><AlertCircle size={20} /><h1>{t("Monitoramento de Coleta")}</h1><p>{error ? t(error) : null}</p>{periodSelector}<button type="button" onClick={() => { activeRequest.current?.abort(); setRows([]); setLoadedScope(null); setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0 }); setProgressScope(null); setReload((value) => value + 1); }}>{t("Tentar novamente")}</button></section>;
 
   const kpis = [
     { title: "Previsto a coletar", value: number(metrics.planned), Icon: Layers3 },
@@ -211,6 +214,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   ];
 
   return <div className="collection-monitoring-v2" data-testid="collection-monitoring-v2-dashboard">
+    {showingPreviousRows ? <DashboardLoadingSkeleton compact t={t} message={status === "error" ? "A atualização falhou" : "Atualizando os dados do dashboard…"} previousDataLabel={`${loadedPeriod?.dateFrom ?? ""}${loadedPeriod?.dateTo && loadedPeriod.dateTo !== loadedPeriod.dateFrom ? ` a ${loadedPeriod.dateTo}` : ""}`} error={status === "error" ? error : null} onRetry={status === "error" ? () => { setStatus("loading"); setError(null); setProgress({ loaded: 0, total: 0, stage: "records" }); setProgressScope(null); setReload((value) => value + 1); } : undefined} progress={progressScope === scopeKey ? progress : null} /> : null}
     <section className="collection-monitoring-v2-filters collection-monitoring-v2-card" aria-label={t("Filtros operacionais")}>
       <div className="collection-monitoring-v2-section-heading"><h2><Filter size={17} /> {t("Filtros operacionais")}</h2><button type="button" className="reset-button" onClick={clearFilters}>{t("Limpar filtros")}</button></div>
       <div className="collection-monitoring-v2-filter-grid collection-monitoring-v2-main-filter-grid">
@@ -235,7 +239,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
       <p className="collection-monitoring-v2-mapping-note"><ShieldCheck size={15} /> {t("Regional e responsáveis vêm somente do DoomsDay publicado; linhas sem vínculo permanecem nos totais nacionais autorizados como Sem regional.")}</p>
     </section>
     <CollectionMonitoringV2RetentionTables t={t} language={language} filters={filters} scopeKey={scopeKey} expectedPublicationSignature={retentionPublicationSignature} rgmRegions={filters.rgm ? [...new Set(periodRows.filter((row) => row.rgm === filters.rgm).map((row) => row.region))] : undefined}
-      onExport={(regional, rm) => void downloadRetentionWorkbook(regional, rm, filters)} />
+      onExport={(regional, rm) => { if (status === "ready") void downloadRetentionWorkbook(regional, rm, filters); }} exportDisabled={status !== "ready"} />
     <section className="collection-monitoring-v2-kpis" aria-label={t("Indicadores principais")}>
       {kpis.map(({ title, value, Icon }) => <article className="collection-monitoring-v2-kpi" key={title} data-testid="collection-monitoring-v2-kpi"><div className="collection-monitoring-v2-kpi-heading"><span>{t(title)}</span><Icon size={19} aria-hidden="true" /></div><strong>{value}</strong><small>{t("Regra baseada nas colunas oficiais da fonte")}</small></article>)}
     </section>

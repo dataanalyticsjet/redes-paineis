@@ -208,3 +208,12 @@ test("um snapshot V2 válido com zero linhas continua sendo a fonte vigente", as
   assert.equal(snapshot.rowCount, 0);
   assert.equal(snapshot.publicationId, PUBLICATION_ID);
 });
+
+test("reporta progresso usando a contagem real das páginas validadas", async () => {
+  const { fetcher } = makeFetcher(Array.from({ length: 501 }, (_, index) => noMovementRecord(index + 2)));
+  const progress: Array<[number, number, string]> = [];
+  const snapshot = await loadCurrentNoMovementSnapshot(fetcher, undefined, (loaded, total, stage) => progress.push([loaded, total, stage]));
+
+  assert.equal(snapshot.rowCount, 501);
+  assert.deepEqual(progress, [[0, 501, "records"], [250, 501, "records"], [500, 501, "records"], [501, 501, "records"], [0, 0, "validation"]]);
+});

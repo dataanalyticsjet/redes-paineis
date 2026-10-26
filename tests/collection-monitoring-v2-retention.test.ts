@@ -125,7 +125,10 @@ test("regional and RM table renderers preserve their approved columns and groupe
   const { renderToStaticMarkup } = await import("react-dom/server");
   const componentUrl = new URL("../src/features/dashboards/collection-monitoring-v2-regional-retention.tsx", import.meta.url);
   const require = createRequire(import.meta.url);
-  const source = await readFile(componentUrl, "utf8");
+  const source = (await readFile(componentUrl, "utf8")).replace(
+    'import { DashboardLoadingSkeleton } from "./dashboard-loading-skeleton.tsx";',
+    "const DashboardLoadingSkeleton = () => null;",
+  );
   const output = transpileModule(source, { compilerOptions: { jsx: JsxEmit.ReactJSX, module: ModuleKind.ESNext, target: ScriptTarget.ES2022 } }).outputText.replace(/from "([^"]+)"/g, (_all, specifier: string) => {
     const target = specifier.startsWith(".") ? new URL(specifier + (/\.tsx?$/.test(specifier) ? "" : ".ts"), componentUrl).href : pathToFileURL(require.resolve(specifier)).href;
     return `from ${JSON.stringify(target)}`;

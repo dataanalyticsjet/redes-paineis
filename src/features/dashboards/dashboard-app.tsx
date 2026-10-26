@@ -156,6 +156,7 @@ import { readResponsibilityWorkbookResponse } from "../../lib/responsibility-loa
 import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitoring";
 import { CollectionMonitoringV2Dashboard } from "./collection-monitoring-v2";
 import { CollectionMonitoringT4T5Dashboard } from "./collection-monitoring-t4-t5";
+import { DashboardLoadingSkeleton } from "./dashboard-loading-skeleton";
 import {
   canReadDashboardV2Data,
   canReadMonitoringV2,
@@ -2574,7 +2575,10 @@ interface PddCollectionFailureV2DashboardProps {
   publicationIds: string[];
   updatedAt: string | null;
   publishedAt: string | null;
+  dataPeriod: PddCollectionFailureV2Period | null;
+  progress: { loaded: number; total: number; stage?: "records" | "validation" };
   onPeriodChange: (period: PddCollectionFailureV2Period) => void;
+  onRetry: () => void;
   t: DashboardTranslator;
 }
 
@@ -2602,7 +2606,10 @@ function PddCollectionFailureV2Dashboard({
   publicationIds,
   updatedAt,
   publishedAt,
+  dataPeriod,
+  progress,
   onPeriodChange,
+  onRetry,
   t,
 }: PddCollectionFailureV2DashboardProps) {
   const [selectedRegions, setSelectedRegions] = useState<Set<string> | null>(null);
@@ -2639,7 +2646,9 @@ function PddCollectionFailureV2Dashboard({
     (activeDetailPage - 1) * PDD_FAILURE_DETAIL_PAGE_SIZE,
     activeDetailPage * PDD_FAILURE_DETAIL_PAGE_SIZE,
   );
-  const hasData = status === "ready" && records.length > 0;
+  const hasData = records.length > 0;
+  const canExport = status === "ready" && hasData;
+  const hasPreviousData = hasData && (status === "loading" || status === "error");
   const emptyMessage = status === "loading" || status === "idle"
     ? t("Carregando…")
     : status === "error"
@@ -2678,7 +2687,7 @@ function PddCollectionFailureV2Dashboard({
   };
 
   const downloadWorkbook = async () => {
-    if (!hasData) return;
+    if (!canExport) return;
     const XLSXModule = await import("xlsx");
     const workbook = XLSXModule.utils.book_new();
     const addSheet = (
@@ -2727,8 +2736,15 @@ function PddCollectionFailureV2Dashboard({
       ? error ? t("Aguardando primeira importação") : t("Sem dados publicados para o período selecionado.")
       : status === "loading" || status === "idle" ? t("Consultando publicação vigente…") : "";
 
+  if ((status === "loading" || status === "idle") && !hasData) {
+    return <DashboardLoadingSkeleton t={t} message={progress.stage === "validation" ? "Validando a consistência da publicação…" : progress.total > 0 ? "Carregando registros publicados…" : "Consultando publicação vigente…"} progress={progress} />;
+  }
+
   return (
     <div data-testid="pdd-collection-failure-v2-dashboard" data-v2-source="pdd_collection_failure" data-v2-status={status} data-v2-period-start={period.dateFrom} data-v2-period-end={period.dateTo} data-v2-record-count={receivedCount} data-v2-column-count={PDD_COLLECTION_FAILURE_V2_COLUMNS.length}>
+      {hasPreviousData ? <DashboardLoadingSkeleton compact t={t} message={status === "error" ? "A atualização falhou" : "Atualizando os dados do dashboard…"}
+        previousDataLabel={dataPeriod ? `${dataPeriod.dateFrom} a ${dataPeriod.dateTo}` : null} error={status === "error" ? error : null}
+        onRetry={status === "error" ? onRetry : undefined} progress={progress.total > 0 ? progress : null} /> : null}
       <section className="dashboard-intro">
         <div>
           <div className="eyebrow"><CircleAlert size={15} /> {t("QUALIDADE DA COLETA")}</div>
@@ -2744,7 +2760,7 @@ function PddCollectionFailureV2Dashboard({
         </div>
       </section>
 
-      {statusMessage ? <div className={`inline-alert${status === "error" ? " error" : ""}`} role={status === "error" ? "alert" : "status"} aria-live="polite"><CircleAlert size={18} /><span>{statusMessage}</span></div> : null}
+      {statusMessage && !hasPreviousData ? <div className={`inline-alert${status === "error" ? " error" : ""}`} role={status === "error" ? "alert" : "status"} aria-live="polite"><CircleAlert size={18} /><span>{statusMessage}</span>{status === "error" ? <button type="button" onClick={onRetry}>{t("Tentar novamente")}</button> : null}</div> : null}
 
       <section className="filters-card bipagem-filters-card pdd-v2-filters-card" aria-labelledby="pdd-v2-filters-heading">
         <div className="filters-card-top">
@@ -2778,7 +2794,7 @@ function PddCollectionFailureV2Dashboard({
 
       <section className="chart-card bipagem-table-card bipagem-detail-card" aria-labelledby="pdd-v2-base-heading"><div className="card-heading table-card-heading"><div><span className="card-eyebrow">{t("BASE")}</span><h2 id="pdd-v2-base-heading">{t("Falha na coleta PDD por base, RM e RGM")}</h2></div></div><div className="dashboard-table-wrap bipagem-table-wrap"><table className="dashboard-data-table bipagem-summary-table"><thead><tr><th>{t("Regional")}</th><th>{t("Base")}</th><th>{t("Código da base")}</th><th>{t("Região do RM")}</th><th>RM</th><th>RGM</th><th>{t("Total de pedidos")}</th><th>{t("Não bipados no recebimento")}</th><th>{t("Pedidos não bipados")}</th><th>{t("Falha na Coleta PDD")}</th></tr></thead><tbody>{baseSummary.map((row) => <tr key={row.key}><td><span className="regional-chip">{t(row.region)}</span></td><td>{row.base}</td><td>{row.baseCode}</td><td>{t(row.rmArea)}</td><td>{t(row.rm)}</td><td>{t(row.rgm)}</td><td>{formatNumber(row.totalOrders)}</td><td>{formatNumber(row.ordersUnscannedAtReceipt)}</td><td>{formatNumber(row.ordersUnscannedAtCollection)}</td><td>{formatRate(row.collectionFailureRate)}</td></tr>)}</tbody></table>{!hasData || baseSummary.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div></section>
 
-      <section className="chart-card bipagem-table-card bipagem-detail-card pdd-v2-detail-card" aria-labelledby="pdd-v2-data-heading"><div className="card-heading table-card-heading pdd-v2-detail-heading"><div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2 id="pdd-v2-data-heading">{t("Dados por base — 15 colunas oficiais")}</h2><p>{t("Código original, regional informada e valores do Bot 02 são preservados para conferência.")}</p></div><div className="table-tools bipagem-comparison-tools pdd-v2-detail-tools"><button type="button" className="table-download-button pdd-v2-export-button" onClick={() => void downloadWorkbook()} disabled={!hasData}><FileSpreadsheet size={16} /> {t("Baixar Excel")}</button><label className="table-search"><Search size={16} /><input value={tableQuery} onChange={(event) => { setTableQuery(event.target.value); setPage(1); }} placeholder={t("Buscar base, regional ou RM")} /></label></div></div>
+      <section className="chart-card bipagem-table-card bipagem-detail-card pdd-v2-detail-card" aria-labelledby="pdd-v2-data-heading"><div className="card-heading table-card-heading pdd-v2-detail-heading"><div><span className="card-eyebrow">{t("DETALHAMENTO")}</span><h2 id="pdd-v2-data-heading">{t("Dados por base — 15 colunas oficiais")}</h2><p>{t("Código original, regional informada e valores do Bot 02 são preservados para conferência.")}</p></div><div className="table-tools bipagem-comparison-tools pdd-v2-detail-tools"><button type="button" className="table-download-button pdd-v2-export-button" onClick={() => void downloadWorkbook()} disabled={!canExport}><FileSpreadsheet size={16} /> {t("Baixar Excel")}</button><label className="table-search"><Search size={16} /><input value={tableQuery} onChange={(event) => { setTableQuery(event.target.value); setPage(1); }} placeholder={t("Buscar base, regional ou RM")} /></label></div></div>
         <div className="dashboard-table-wrap bipagem-table-wrap bipagem-detail-table-wrap pdd-v2-detail-table-wrap"><table className="dashboard-data-table bipagem-detail-table pdd-v2-detail-table"><thead><tr>{PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => <th key={field}>{t(PDD_COLLECTION_FAILURE_V2_HEADERS_BY_FIELD[field])}</th>)}</tr></thead><tbody>{visibleDetailRecords.map((record) => <tr key={`${record.publication_id}-${record.source_row_no}`}>{PDD_COLLECTION_FAILURE_V2_FIELDS.map((field) => <td key={field}>{formatCell(record, field)}</td>)}</tr>)}</tbody></table>{!hasData || searchedRecords.length === 0 ? <EmptyChart message={emptyMessage} /> : null}</div>
         <div className="table-pagination"><span>{t("{count} linhas", { count: formatNumber(searchedRecords.length) })}</span><button type="button" className="reset-button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={activeDetailPage <= 1}>{t("Anterior")}</button><span>{t("Página {current} de {total}", { current: formatNumber(activeDetailPage), total: formatNumber(detailPageCount) })}</span><button type="button" className="reset-button" onClick={() => setPage((current) => Math.min(detailPageCount, current + 1))} disabled={activeDetailPage >= detailPageCount}>{t("Próxima")}</button></div>
       </section>
@@ -2985,14 +3001,19 @@ export function DashboardApp() {
   const [noMovementV2State, setNoMovementV2State] = useState(() => ({
     status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
     records: [] as NoMovementV2Record[],
+    progress: { loaded: 0, total: 0, stage: "records" as "records" | "validation" },
     receivedCount: 0,
     columnCount: NO_MOVEMENT_V2_COLUMNS.length,
     publicationId: null as string | null,
     updatedAt: null as string | null,
     collectionDate: null as string | null,
     publishedAt: null as string | null,
+    identityKey: null as string | null,
     error: null as string | null,
   }));
+  const noMovementV2StateRef = useRef(noMovementV2State);
+  useEffect(() => { noMovementV2StateRef.current = noMovementV2State; }, [noMovementV2State]);
+  const [noMovementRetryCount, setNoMovementRetryCount] = useState(0);
   const [movementTableQuery, setMovementTableQuery] = useState("");
   const [movementPage, setMovementPage] = useState(1);
   const [sellerReferenceLoaded, setSellerReferenceLoaded] = useState<SellerReferenceData | null>(null);
@@ -3056,16 +3077,22 @@ export function DashboardApp() {
     return {
       status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
       period: { dateFrom: yesterday, dateTo: yesterday },
+      dataPeriod: null as PddCollectionFailureV2Period | null,
       records: [] as PddCollectionFailureV2Record[],
+      progress: { loaded: 0, total: 0, stage: "records" as "records" | "validation" },
       receivedCount: 0,
       columnCount: PDD_COLLECTION_FAILURE_V2_COLUMNS.length,
       publicationId: null as string | null,
       publicationIds: [] as string[],
       updatedAt: null as string | null,
       publishedAt: null as string | null,
+      identityKey: null as string | null,
       error: null as string | null,
     };
   });
+  const pddCollectionFailureV2StateRef = useRef(pddCollectionFailureV2State);
+  useEffect(() => { pddCollectionFailureV2StateRef.current = pddCollectionFailureV2State; }, [pddCollectionFailureV2State]);
+  const [pddCollectionFailureRetryCount, setPddCollectionFailureRetryCount] = useState(0);
   const [bipagemTableQuery, setBipagemTableQuery] = useState("");
   const [damageLoaded, setDamageLoaded] = useState<DamageData | null>(null);
   const [damageSelectedRegions, setDamageSelectedRegions] = useState<Set<string>>(new Set());
@@ -3088,6 +3115,7 @@ export function DashboardApp() {
   const isAuthorizedDashboardViewer = canReadDashboardV2Data(viewerIdentity);
   const [mappingEpoch, setMappingEpoch] = useState(0);
   const dashboardCacheIdentity = `${dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity)}:map:${mappingEpoch}`;
+  const pddDataAuthorized = pddCollectionFailureV2State.identityKey === dashboardCacheIdentity;
   const regionalAccessPendingMessage = viewerIdentity?.region_resolution_status === "SYNC_FAILED"
     ? t("Não foi possível confirmar sua regional no Feishu. Seus dados estão temporariamente indisponíveis. Aguarde uma nova sincronização ou solicite liberação ao administrador.")
     : t("Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.");
@@ -4220,18 +4248,20 @@ export function DashboardApp() {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void (async () => {
-        applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
         setNoMovementV2State((current) => ({
           ...current,
           status: "loading",
-          records: [],
-          receivedCount: 0,
-          publicationId: null,
-          updatedAt: null,
-          collectionDate: null,
-          publishedAt: null,
+          records: current.identityKey === dashboardCacheIdentity ? current.records : [],
+          progress: { loaded: 0, total: 0, stage: "records" },
+          receivedCount: current.identityKey === dashboardCacheIdentity ? current.receivedCount : 0,
+          publicationId: current.identityKey === dashboardCacheIdentity ? current.publicationId : null,
+          updatedAt: current.identityKey === dashboardCacheIdentity ? current.updatedAt : null,
+          collectionDate: current.identityKey === dashboardCacheIdentity ? current.collectionDate : null,
+          publishedAt: current.identityKey === dashboardCacheIdentity ? current.publishedAt : null,
+          identityKey: dashboardCacheIdentity,
           error: null,
         }));
+        if (noMovementV2StateRef.current.identityKey !== dashboardCacheIdentity) applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
 
         const authorizationHeaders = new Headers();
         if (viewerAuthorization !== FEISHU_COOKIE_SESSION) {
@@ -4249,7 +4279,9 @@ export function DashboardApp() {
               contractVersion: 2,
               fetcher: cacheFetcher,
             }, signal),
-            load: (signal) => loadCurrentNoMovementSnapshot(cacheFetcher, signal),
+            load: (signal) => loadCurrentNoMovementSnapshot(cacheFetcher, signal, (loaded, total, stage) => {
+              if (active) setNoMovementV2State((current) => ({ ...current, progress: { loaded, total, stage } }));
+            }),
           }, controller.signal);
           if (!active || controller.signal.aborted) return;
           applyMovementLoadedData(buildNoMovementV2LoadedData(snapshot));
@@ -4257,12 +4289,14 @@ export function DashboardApp() {
             ...current,
             status: snapshot.rowCount === 0 ? "empty" : "ready",
             records: snapshot.records,
+            progress: { loaded: snapshot.rowCount, total: snapshot.rowCount, stage: "records" },
             receivedCount: snapshot.rowCount,
             columnCount: snapshot.columnCount,
             publicationId: snapshot.publicationId,
             updatedAt: snapshot.updatedAt,
             collectionDate: snapshot.collectionDate,
             publishedAt: snapshot.publishedAt,
+            identityKey: dashboardCacheIdentity,
             error: null,
           }));
         } catch (cause) {
@@ -4271,16 +4305,19 @@ export function DashboardApp() {
             ? cause
             : new NoMovementV2LoadError("invalid_data", "Não foi possível validar a publicação da Data Foundation V2.");
           const awaitingV2Publication = loadError.kind === "empty" || loadError.kind === "incompatible";
-          applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
+          const sameIdentity = noMovementV2StateRef.current.identityKey === dashboardCacheIdentity;
+          if (!sameIdentity || awaitingV2Publication) applyMovementLoadedData(buildEmptyNoMovementV2LoadedData());
           setNoMovementV2State((current) => ({
             ...current,
             status: awaitingV2Publication ? "empty" : "error",
-            records: [],
-            receivedCount: 0,
-            publicationId: null,
-            updatedAt: null,
-            collectionDate: null,
-            publishedAt: null,
+            records: !awaitingV2Publication && sameIdentity ? current.records : [],
+            receivedCount: !awaitingV2Publication && sameIdentity ? current.receivedCount : 0,
+            publicationId: !awaitingV2Publication && sameIdentity ? current.publicationId : null,
+            updatedAt: !awaitingV2Publication && sameIdentity ? current.updatedAt : null,
+            collectionDate: !awaitingV2Publication && sameIdentity ? current.collectionDate : null,
+            publishedAt: !awaitingV2Publication && sameIdentity ? current.publishedAt : null,
+            progress: current.progress,
+            identityKey: dashboardCacheIdentity,
             error: awaitingV2Publication ? null : loadError.message,
           }));
         }
@@ -4292,7 +4329,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [applyMovementLoadedData, currentDashboardManifestReady, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, view, viewerAuthorization]);
+  }, [applyMovementLoadedData, currentDashboardManifestReady, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, noMovementRetryCount, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "bipagem") return undefined;
@@ -4309,12 +4346,15 @@ export function DashboardApp() {
         setPddCollectionFailureV2State((current) => ({
           ...current,
           status: "loading",
-          records: [],
-          receivedCount: 0,
-          publicationId: null,
-          publicationIds: [],
-          updatedAt: null,
-          publishedAt: null,
+          records: current.identityKey === dashboardCacheIdentity ? current.records : [],
+          receivedCount: current.identityKey === dashboardCacheIdentity ? current.receivedCount : 0,
+          publicationId: current.identityKey === dashboardCacheIdentity ? current.publicationId : null,
+          publicationIds: current.identityKey === dashboardCacheIdentity ? current.publicationIds : [],
+          updatedAt: current.identityKey === dashboardCacheIdentity ? current.updatedAt : null,
+          publishedAt: current.identityKey === dashboardCacheIdentity ? current.publishedAt : null,
+          dataPeriod: current.identityKey === dashboardCacheIdentity ? current.dataPeriod : null,
+          identityKey: dashboardCacheIdentity,
+          progress: { loaded: 0, total: 0, stage: "records" },
           error: null,
         }));
         const validDateRange = Boolean(dateFrom && dateTo && dateFrom <= dateTo);
@@ -4348,20 +4388,25 @@ export function DashboardApp() {
               publicationToken: currentDashboardPublicationToken,
               fetcher: cacheFetcher,
             }, signal),
-            load: (signal) => loadPublishedPddCollectionFailure({ dateFrom, dateTo }, cacheFetcher, signal),
+            load: (signal) => loadPublishedPddCollectionFailure({ dateFrom, dateTo }, cacheFetcher, signal, (loaded, total, stage) => {
+              if (active) setPddCollectionFailureV2State((current) => ({ ...current, progress: { loaded, total, stage } }));
+            }),
           }, controller.signal);
           if (!active) return;
           setPddCollectionFailureV2State((current) => ({
             ...current,
             status: published.rowCount === 0 ? "empty" : "ready",
             period: published.period,
+            dataPeriod: published.period,
             records: published.records,
+            progress: { loaded: published.rowCount, total: published.rowCount, stage: "records" },
             receivedCount: published.rowCount,
             columnCount: published.columnCount,
             publicationId: published.publicationId,
             publicationIds: published.publicationIds,
             updatedAt: published.updatedAt,
             publishedAt: published.publishedAt,
+            identityKey: dashboardCacheIdentity,
             error: null,
           }));
         } catch (cause) {
@@ -4369,15 +4414,18 @@ export function DashboardApp() {
           const loadError = cause instanceof PddCollectionFailureV2LoadError
             ? cause
             : new PddCollectionFailureV2LoadError("invalid_data", "Não foi possível preparar os dados publicados da Data Foundation V2.");
+          const sameIdentity = pddCollectionFailureV2StateRef.current.identityKey === dashboardCacheIdentity;
           setPddCollectionFailureV2State((current) => ({
             ...current,
             status: loadError.kind === "empty" ? "empty" : "error",
-            records: [],
-            receivedCount: 0,
-            publicationId: null,
-            publicationIds: [],
-            updatedAt: null,
-            publishedAt: null,
+            records: loadError.kind !== "empty" && sameIdentity ? current.records : [],
+            receivedCount: loadError.kind !== "empty" && sameIdentity ? current.receivedCount : 0,
+            publicationId: loadError.kind !== "empty" && sameIdentity ? current.publicationId : null,
+            publicationIds: loadError.kind !== "empty" && sameIdentity ? current.publicationIds : [],
+            updatedAt: loadError.kind !== "empty" && sameIdentity ? current.updatedAt : null,
+            publishedAt: loadError.kind !== "empty" && sameIdentity ? current.publishedAt : null,
+            dataPeriod: loadError.kind !== "empty" && sameIdentity ? current.dataPeriod : null,
+            identityKey: dashboardCacheIdentity,
             error: loadError.message,
           }));
         }
@@ -4389,7 +4437,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, t, view, viewerAuthorization]);
+  }, [currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, pddCollectionFailureV2State.period.dateFrom, pddCollectionFailureV2State.period.dateTo, pddCollectionFailureRetryCount, t, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "sellers" || !isFirstMileUnderReview) return undefined;
@@ -6560,7 +6608,9 @@ export function DashboardApp() {
   const activeDataSourceId = SOURCE_ID_BY_VIEW[view];
   const activeDataSourceConfig = activeDataSourceId ? DASHBOARD_DATA_SOURCES[activeDataSourceId] : null;
   const canManageActiveDataSource = isMatrixAdminViewer && activeDataSourceConfig?.configured === true && !(view === "monitoramento" && isMatrixAdminViewer) && view !== "movimentacao" && view !== "bipagem";
-  const noMovementHasPublishedRecords = noMovementV2State.status === "ready" && noMovementV2State.receivedCount > 0;
+  const noMovementDataAuthorized = noMovementV2State.identityKey === dashboardCacheIdentity;
+  const noMovementHasPublishedRecords = noMovementDataAuthorized && noMovementV2State.records.length > 0;
+  const noMovementHasPreviousRecords = noMovementHasPublishedRecords && (noMovementV2State.status === "loading" || noMovementV2State.status === "error");
   const noMovementAvailabilityText = noMovementAvailabilityMessage(noMovementV2State.status, noMovementV2State.publicationId);
   const noMovementV2Diagnostic = isMatrixAdminViewer ? (
     <section className="filters-card taxa-filters-card" aria-label={t("Status da fonte oficial Sem Movimentação")} data-testid="no-movement-v2-diagnostic">
@@ -6576,7 +6626,7 @@ export function DashboardApp() {
         aria-live="polite"
       >
         <span><strong>{t("Status V2:")}</strong> {t(noMovementAvailabilityText)}</span>
-        <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || (noMovementV2State.status === "empty" && noMovementV2State.publicationId) ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
+        <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || (noMovementV2State.status === "empty" && noMovementV2State.publicationId) || noMovementHasPreviousRecords ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
         <span><strong>{t("Colunas:")}</strong> {formatNumber(noMovementV2State.columnCount)}</span>
         <span><strong>{t("Publicação:")}</strong> {noMovementV2State.publicationId ?? "—"}</span>
         <span><strong>{t("Data da coleta:")}</strong> {noMovementV2State.collectionDate ? formatDate(noMovementV2State.collectionDate) : "—"}</span>
@@ -7518,16 +7568,22 @@ export function DashboardApp() {
             </section>
           ) : (
             <PddCollectionFailureV2Dashboard
-              status={pddCollectionFailureV2State.status}
-              records={pddCollectionFailureV2State.records}
+              status={pddDataAuthorized ? pddCollectionFailureV2State.status : "loading"}
+              records={pddDataAuthorized ? pddCollectionFailureV2State.records : []}
               period={pddCollectionFailureV2State.period}
-              receivedCount={pddCollectionFailureV2State.receivedCount}
-              error={pddCollectionFailureV2State.error}
-              publicationId={pddCollectionFailureV2State.publicationId}
-              publicationIds={pddCollectionFailureV2State.publicationIds}
-              updatedAt={pddCollectionFailureV2State.updatedAt}
-              publishedAt={pddCollectionFailureV2State.publishedAt}
-              onPeriodChange={(period) => setPddCollectionFailureV2State((current) => ({ ...current, period }))}
+              receivedCount={pddDataAuthorized ? pddCollectionFailureV2State.receivedCount : 0}
+              error={pddDataAuthorized ? pddCollectionFailureV2State.error : null}
+              publicationId={pddDataAuthorized ? pddCollectionFailureV2State.publicationId : null}
+              publicationIds={pddDataAuthorized ? pddCollectionFailureV2State.publicationIds : []}
+              updatedAt={pddDataAuthorized ? pddCollectionFailureV2State.updatedAt : null}
+              publishedAt={pddDataAuthorized ? pddCollectionFailureV2State.publishedAt : null}
+              dataPeriod={pddDataAuthorized ? pddCollectionFailureV2State.dataPeriod : null}
+              progress={pddDataAuthorized ? pddCollectionFailureV2State.progress : { loaded: 0, total: 0 }}
+              onPeriodChange={(period) => setPddCollectionFailureV2State((current) => ({ ...current, period, status: "loading", progress: { loaded: 0, total: 0, stage: "records" }, error: null }))}
+              onRetry={() => {
+                setPddCollectionFailureV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));
+                setPddCollectionFailureRetryCount((value) => value + 1);
+              }}
               t={t}
             />
           )
@@ -7757,6 +7813,13 @@ export function DashboardApp() {
               </div>
               <p>{t("Aguardando liberação do acesso operacional pela administração.")}</p>
             </section>
+          ) : noMovementV2State.status === "error" && !noMovementHasPublishedRecords ? (
+            <DashboardLoadingSkeleton t={t} message="Carregando o snapshot publicado de Sem Movimentação…" error={noMovementV2State.error} onRetry={() => {
+              setNoMovementV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));
+              setNoMovementRetryCount((value) => value + 1);
+            }} />
+          ) : !noMovementDataAuthorized || (noMovementV2State.status === "loading" || noMovementV2State.status === "idle") && !noMovementHasPublishedRecords ? (
+            <DashboardLoadingSkeleton t={t} message={noMovementV2State.progress.stage === "validation" ? "Validando a consistência da publicação…" : noMovementV2State.progress.total > 0 ? "Carregando registros publicados…" : "Carregando o snapshot publicado de Sem Movimentação…"} progress={noMovementV2State.progress} />
           ) : !movementLoaded ? (
             <section className="dashboard-source-availability" role="status" aria-live="polite">
               <div className="dashboard-intro">
@@ -7782,6 +7845,15 @@ export function DashboardApp() {
                     : noMovementHasPublishedRecords ? t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) }) : t(noMovementAvailabilityText)}</span>
                 </div>
               </section>
+              {noMovementHasPreviousRecords ? <DashboardLoadingSkeleton compact t={t}
+                message={noMovementV2State.status === "error" ? "A atualização falhou" : "Atualizando os dados do dashboard…"}
+                previousDataLabel={noMovementV2State.collectionDate ? formatDate(noMovementV2State.collectionDate) : noMovementV2State.publicationId}
+                error={noMovementV2State.status === "error" ? noMovementV2State.error : null}
+                progress={noMovementV2State.progress}
+                onRetry={noMovementV2State.status === "error" ? () => {
+                  setNoMovementV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));
+                  setNoMovementRetryCount((value) => value + 1);
+                } : undefined} /> : null}
               {noMovementV2Diagnostic}
               {noMovementHasPublishedRecords ? dashboardActionBand : null}
 

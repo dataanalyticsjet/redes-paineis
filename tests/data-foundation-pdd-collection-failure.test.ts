@@ -199,3 +199,16 @@ test("rejeita intervalos inválidos e propaga cancelamento da consulta", async (
   assert.equal(requestSignals.length, 5);
   assert.equal(requestSignals.every((signal) => signal === controller.signal), true);
 });
+
+test("reporta progresso com base nas páginas reais do período consultado", async () => {
+  const records = Array.from({ length: 501 }, (_, index) => pddRecord(index + 2, "2026-10-05"));
+  const { fetcher } = makeFetcher(records);
+  const progress: Array<[number, number, string]> = [];
+  const published = await loadPublishedPddCollectionFailure(
+    { dateFrom: "2026-10-05", dateTo: "2026-10-05" }, fetcher, undefined,
+    (loaded, total, stage) => progress.push([loaded, total, stage]),
+  );
+
+  assert.equal(published.rowCount, 501);
+  assert.deepEqual(progress, [[0, 501, "records"], [250, 501, "records"], [500, 501, "records"], [501, 501, "records"], [0, 0, "validation"]]);
+});

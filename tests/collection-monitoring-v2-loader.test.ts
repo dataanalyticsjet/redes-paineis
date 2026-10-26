@@ -108,16 +108,16 @@ test("Monitoramento V2 loads only the selected historical period", async () => {
       : [record(4, "2026-10-18"), record(5, "2026-10-19")];
     return response({ sourceId: "collection_monitoring", records: periodRows.slice(offset, offset + 250), total: periodRows.length, limit: 250, offset });
   };
-  const progress: Array<[number, number]> = [];
+  const progress: Array<[number, number, string]> = [];
   const loaded = await loadPublishedCollectionMonitoringV2(
     { dateFrom: "2026-10-18", dateTo: "2026-10-19" },
     fetcher,
     undefined,
-    { onProgress: (loadedRows, totalRows) => progress.push([loadedRows, totalRows]) },
+    { onProgress: (loadedRows, totalRows, stage) => progress.push([loadedRows, totalRows, stage]) },
   );
   assert.deepEqual(loaded.records.map((item) => item.data_date), ["2026-10-18", "2026-10-19"]);
   assert.deepEqual(loaded.dates.map((item) => item.date), ["2026-10-18", "2026-10-19"]);
-  assert.deepEqual(progress, [[0, 2], [2, 2]]);
+  assert.deepEqual(progress, [[0, 2, "records"], [2, 2, "records"], [0, 0, "validation"]]);
   const recordRequests = requested.filter((path) => path.includes("/records?")).map((path) => new URL(path, "https://new-bi.test"));
   assert.ok(recordRequests.some((url) => url.searchParams.get("date_from") === "2026-10-18" && url.searchParams.get("date_to") === "2026-10-19"));
   const comparison = await loadCollectionMonitoringV2ComparisonSnapshots(loaded.dates, loaded.period, fetcher);

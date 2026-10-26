@@ -210,6 +210,7 @@ function rowIdentity(record: NoMovementV2Record, publicationId: string): string 
 export async function loadCurrentNoMovementSnapshot(
   fetcher: ApiFetch = apiFetch,
   signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number, stage: "records" | "validation") => void,
 ): Promise<PublishedNoMovementSnapshot> {
   const base = `/api/v2/data-sources/${NO_MOVEMENT_V2_SOURCE_ID}`;
   const before = await readCurrentSnapshotMetadata(base, fetcher, signal);
@@ -227,6 +228,7 @@ export async function loadCurrentNoMovementSnapshot(
   const expectedCount = before.snapshotRowCount;
   const records: NoMovementV2Record[] = [];
   const seenRows = new Set<string>();
+  onProgress?.(0, expectedCount, "records");
   for (let offset = 0; offset < expectedCount; offset += NO_MOVEMENT_V2_PAGE_SIZE) {
     const limit = Math.min(NO_MOVEMENT_V2_PAGE_SIZE, expectedCount - offset);
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
@@ -247,11 +249,13 @@ export async function loadCurrentNoMovementSnapshot(
       seenRows.add(identity);
       records.push(record);
     }
+    onProgress?.(records.length, expectedCount, "records");
   }
 
   if (records.length !== expectedCount) {
     throw new NoMovementV2LoadError("inconsistent", "A paginação V2 não recuperou todas as linhas esperadas.");
   }
+  onProgress?.(0, 0, "validation");
   const after = await readCurrentSnapshotMetadata(base, fetcher, signal);
   if (
     publication.publicationId !== after.publication?.publicationId ||
