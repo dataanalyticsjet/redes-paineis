@@ -5,6 +5,7 @@ import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revisi
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
 import { CollectionRateOperationalAnalysis } from "./collection-rate-operational-analysis.tsx";
+import { PddCollectionFailureOperationalAnalysis } from "./pdd-collection-failure-operational-analysis.tsx";
 
 import { AssistantHome } from "../home/assistant-home";
 import { DataFoundationAdmin } from "../data-foundation/data-foundation-admin";
@@ -2633,6 +2634,10 @@ interface PddCollectionFailureV2DashboardProps {
   publishedAt: string | null;
   dataPeriod: PddCollectionFailureV2Period | null;
   progress: { loaded: number; total: number; stage?: "records" | "validation" };
+  reportDate: string;
+  onPrint: () => void;
+  onAnalysis: () => void;
+  onShare: (filters: string[]) => void;
   onPeriodChange: (period: PddCollectionFailureV2Period) => void;
   onRetry: () => void;
   t: DashboardTranslator;
@@ -2664,6 +2669,10 @@ function PddCollectionFailureV2Dashboard({
   publishedAt,
   dataPeriod,
   progress,
+  reportDate,
+  onPrint,
+  onAnalysis,
+  onShare,
   onPeriodChange,
   onRetry,
   t,
@@ -2792,10 +2801,6 @@ function PddCollectionFailureV2Dashboard({
       ? error ? t("Aguardando primeira importação") : t("Sem dados publicados para o período selecionado.")
       : status === "loading" || status === "idle" ? t("Consultando publicação vigente…") : "";
 
-  if ((status === "loading" || status === "idle") && !hasData) {
-    return <DashboardLoadingSkeleton t={t} message={progress.stage === "validation" ? "Validando a consistência da publicação…" : progress.total > 0 ? "Carregando registros publicados…" : "Consultando publicação vigente…"} progress={progress} />;
-  }
-
   return (
     <div data-testid="pdd-collection-failure-v2-dashboard" data-v2-source="pdd_collection_failure" data-v2-status={status} data-v2-period-start={period.dateFrom} data-v2-period-end={period.dateTo} data-v2-record-count={receivedCount} data-v2-column-count={PDD_COLLECTION_FAILURE_V2_COLUMNS.length}>
       {hasPreviousData ? <DashboardLoadingSkeleton compact t={t} message={status === "error" ? "A atualização falhou" : "Atualizando os dados do dashboard…"}
@@ -2807,14 +2812,29 @@ function PddCollectionFailureV2Dashboard({
           <h1>{t("Falha na coleta PDD")}</h1>
           <p>{t("Acompanhe pedidos a bipar, falhas de bipagem e taxas por regional, base, RM, RGM, origem e período.")}</p>
         </div>
-        <div className="dataset-meta" aria-label={t("Resumo da fonte oficial Bot 02")}>
+        {hasData || status === "empty" ? <div className="dataset-meta" aria-label={t("Resumo da fonte oficial Bot 02")}>
           <span><Layers3 size={16} /> {t("{count} linhas", { count: formatNumber(receivedCount) })}</span>
           <span><MapPin size={16} /> {t("{count} regionais", { count: formatNumber(options.regions.length) })}</span>
           <span><Database size={16} /> {t("{count} bases", { count: formatNumber(options.bases.length) })}</span>
           <span><CalendarDays size={16} /> {t("Coleta executada em: {date}", { date: updatedAt ? formatDateTime(updatedAt) : "—" })}</span>
           <span><CalendarDays size={16} /> {t("Publicada em: {date}", { date: publishedAt ? formatDateTime(publishedAt) : "—" })}</span>
-        </div>
+        </div> : <div className="dataset-meta" role="status">{t("Consultando publicação vigente…")}</div>}
       </section>
+      <DashboardActionBand
+        reportDate={reportDate}
+        demoMode={false}
+        onPrint={onPrint}
+        onAnalysis={onAnalysis}
+        onShare={() => onShare([
+          t("Período") + ": " + formatPeriod(period.dateFrom, period.dateTo),
+          t("Regional") + ": " + selectedShareFilter(selectedValues(selectedRegions, options.regions), options.regions, "Todas as regionais", t),
+          "RM: " + selectedShareFilter(selectedValues(selectedRms, options.rms), options.rms, "Todos os RM", t),
+          "RGM: " + selectedShareFilter(selectedValues(selectedRgms, options.rgms), options.rgms, "Todos os RGM", t),
+          t("Base") + ": " + selectedShareFilter(selectedValues(selectedBases, options.bases), options.bases, "Todas as bases", t),
+          t("Origem do pedido") + ": " + selectedShareFilter(selectedValues(selectedOrigins, options.origins), options.origins, "Todas as origens", t),
+        ])}
+        t={t}
+      />
 
       {statusMessage && !hasPreviousData ? <div className={`inline-alert${status === "error" ? " error" : ""}`} role={status === "error" ? "alert" : "status"} aria-live="polite"><CircleAlert size={18} /><span>{statusMessage}</span>{status === "error" ? <button type="button" onClick={onRetry}>{t("Tentar novamente")}</button> : null}</div> : null}
 
@@ -2835,6 +2855,9 @@ function PddCollectionFailureV2Dashboard({
         {period.dateFrom && period.dateTo && period.dateFrom > period.dateTo ? <p className="date-error" role="alert">{t("A data inicial deve ser anterior à data final.")}</p> : null}
       </section>
 
+      {(status === "loading" || status === "idle") && !hasData ? (
+        <DashboardLoadingSkeleton t={t} message={progress.stage === "validation" ? "Validando a consistência da publicação…" : progress.total > 0 ? "Carregando registros publicados…" : "Consultando publicação vigente…"} progress={progress} />
+      ) : <>
       <section className="kpi-grid bipagem-kpi-grid" aria-label={t("Indicadores de falta de bipagem")}>
         <KpiCard icon={<Layers3 size={20} />} label={t("Total de pedidos")} value={hasData ? formatCompact(summary.totalOrders) : "—"} detail={t("Soma de totalNum no período")}/>
         <KpiCard icon={<CircleAlert size={20} />} label={t("Pedidos não bipados")} value={hasData ? formatCompact(summary.ordersUnscannedAtCollection) : "—"} detail={t("Soma da coluna oficial de pedidos não bipados na coleta no período")} tone="orange" />
@@ -2856,6 +2879,7 @@ function PddCollectionFailureV2Dashboard({
       </section>
 
       <div className="filter-summary" role="status" aria-live="polite"><span><strong>{t("Fonte oficial:")}</strong> {t("Data Foundation V2 · Bot 02")}</span><span><strong>{t("Registros recebidos:")}</strong> {formatNumber(receivedCount)}</span><span><strong>{t("Colunas do contrato:")}</strong> {formatNumber(PDD_COLLECTION_FAILURE_V2_COLUMNS.length)}</span><span><strong>{t("Período:")}</strong> {period.dateFrom} a {period.dateTo}</span>{publicationId ? <span><strong>{t("Publicação mais recente:")}</strong> {publicationId}</span> : null}{publicationIds.length > 1 ? <span><strong>{t("Publicações nas linhas:")}</strong> {publicationIds.join(", ")}</span> : null}</div>
+      </>}
     </div>
   );
 }
@@ -6651,13 +6675,33 @@ export function DashboardApp() {
       ] : []),
     ];
   };
-  const openPanelFeishuShare = () => {
+  const openPanelFeishuShare = async (filterOverride?: string[]) => {
     const panelTitle = dashboardCards.find((card) => card.id === view)?.title ?? "Monitoramento de coleta";
-    const contentAvailable = ["taxa", "movimentacao", "sellers", "bipagem"].includes(view) && Boolean(analysisText.trim());
+    let panelContent = analysisText;
+    if (view === "bipagem") {
+      panelContent = "";
+      if (viewerAuthorization && viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix") {
+        try {
+          const headers = new Headers();
+          if (viewerAuthorization !== "feishu-cookie-session") headers.set("authorization", viewerAuthorization);
+          const response = await apiFetch("/api/v2/pdd-collection-failure/operational-analysis?limit=1", {
+            cache: "no-store",
+            headers,
+          });
+          if (response.ok) {
+            const payload = await response.json() as { analyses?: Array<{ state: string; message: string | null }> };
+            panelContent = payload.analyses?.find((item) => item.state === "READY" && item.message)?.message ?? "";
+          }
+        } catch {
+          panelContent = "";
+        }
+      }
+    }
+    const contentAvailable = ["taxa", "movimentacao", "sellers", "bipagem"].includes(view) && Boolean(panelContent.trim());
     setFeishuSharePreview({
       title: t(panelTitle),
-      filters: currentPanelShareFilters(),
-      content: contentAvailable ? analysisText : "",
+      filters: filterOverride ?? currentPanelShareFilters(),
+      content: contentAvailable ? panelContent : "",
       contentAvailable,
     });
   };
@@ -7455,7 +7499,7 @@ export function DashboardApp() {
             <button type="button" className="upload-login-close" onClick={() => setAnalysisOpen(false)} aria-label={t("Fechar")}><X size={18} /></button>
             <span className="upload-login-icon"><Sparkles size={24} /></span>
             <h2 id="analysis-title">{t("Análise IA")}</h2>
-            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : view === "taxa" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
+            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : view === "taxa" ? "Análise operacional da última publicação" : view === "bipagem" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
             {view === "movimentacao" ? (
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
                 ? <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
@@ -7464,10 +7508,14 @@ export function DashboardApp() {
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
                 ? <CollectionRateOperationalAnalysis authorization={viewerAuthorization} t={t} />
                 : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
+            ) : view === "bipagem" ? (
+              viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
+                ? <PddCollectionFailureOperationalAnalysis authorization={viewerAuthorization} t={t} />
+                : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
             ) : <textarea readOnly value={analysisText} aria-label={t("Mensagem para grupo")} style={{ minHeight: 260, width: "100%", resize: "vertical" }} />}
             <div className="upload-login-actions">
               <button type="button" onClick={() => setAnalysisOpen(false)}>{t("Fechar")}</button>
-              {view !== "movimentacao" && view !== "taxa" ? <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button> : null}
+              {view !== "movimentacao" && view !== "taxa" && view !== "bipagem" ? <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button> : null}
             </div>
           </div>
         </div>
@@ -7647,6 +7695,10 @@ export function DashboardApp() {
               publishedAt={pddDataAuthorized ? pddCollectionFailureV2State.publishedAt : null}
               dataPeriod={pddDataAuthorized ? pddCollectionFailureV2State.dataPeriod : null}
               progress={pddDataAuthorized ? pddCollectionFailureV2State.progress : { loaded: 0, total: 0 }}
+              reportDate={reportGeneratedAt}
+              onPrint={handlePrintReport}
+              onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
+              onShare={(filters) => { void openPanelFeishuShare(filters); }}
               onPeriodChange={(period) => setPddCollectionFailureV2State((current) => ({ ...current, period, status: "loading", progress: { loaded: 0, total: 0, stage: "records" }, error: null }))}
               onRetry={() => {
                 setPddCollectionFailureV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));

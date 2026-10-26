@@ -1342,6 +1342,34 @@ def publish_import_job(
                 # The sidecar analysis schema is manually provisioned. Its absence
                 # or failure must never roll back a valid source publication.
                 logger.exception("Unable to enqueue no-movement operational analysis")
+        if source_id == "pdd_collection_failure" and contract.version == 2 and map_version_id is not None:
+            try:
+                operational_dates = [
+                    date.fromisoformat(key)
+                    for key, row_count in summary.per_date_counts.items()
+                    if int(row_count) > 0
+                ]
+                if operational_dates:
+                    with connection.begin_nested():
+                        connection.execute(text("""
+                            INSERT INTO pdd_collection_failure_operational_analyses
+                              (analysis_id, source_id, publication_id, publication_version, contract_version,
+                               map_version_id, operational_date, analysis_state, rules_version)
+                            VALUES
+                              (:analysis_id, :source_id, :publication_id, :publication_version, :contract_version,
+                               :map_version_id, :operational_date, 'PENDING', 'v1')
+                        """), {
+                            "analysis_id": uuid.uuid4().bytes,
+                            "source_id": source_id,
+                            "publication_id": publication_id,
+                            "publication_version": next_version,
+                            "contract_version": contract.version,
+                            "map_version_id": map_version_id,
+                            "operational_date": max(operational_dates),
+                        })
+            except SQLAlchemyError:
+                # The analysis sidecar is manually provisioned and must not fail a valid publication.
+                logger.exception("Unable to enqueue PDD operational analysis")
         publication_result: dict[str, object] = {
             "publicationId": str(publication_uuid), "version": next_version, "reused": False,
         }
