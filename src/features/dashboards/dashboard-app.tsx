@@ -7398,15 +7398,19 @@ export function DashboardApp() {
 
       {analysisOpen ? (
         <div className="upload-login-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAnalysisOpen(false); }}>
-          <div className="upload-login-dialog" role="dialog" aria-modal="true" aria-labelledby="analysis-title">
+          <div className={`upload-login-dialog${view === "movimentacao" ? " no-movement-analysis-dialog" : ""}`} role="dialog" aria-modal="true" aria-labelledby="analysis-title">
             <button type="button" className="upload-login-close" onClick={() => setAnalysisOpen(false)} aria-label={t("Fechar")}><X size={18} /></button>
             <span className="upload-login-icon"><Sparkles size={24} /></span>
             <h2 id="analysis-title">{t("Análise IA")}</h2>
-            <p>{t("Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
-            <textarea readOnly value={analysisText} aria-label={t("Mensagem para grupo")} style={{ minHeight: 260, width: "100%", resize: "vertical" }} />
+            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
+            {view === "movimentacao" ? (
+              viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
+                ? <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
+                : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
+            ) : <textarea readOnly value={analysisText} aria-label={t("Mensagem para grupo")} style={{ minHeight: 260, width: "100%", resize: "vertical" }} />}
             <div className="upload-login-actions">
               <button type="button" onClick={() => setAnalysisOpen(false)}>{t("Fechar")}</button>
-              <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button>
+              {view !== "movimentacao" ? <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button> : null}
             </div>
           </div>
         </div>
@@ -7862,9 +7866,6 @@ export function DashboardApp() {
                   setNoMovementRetryCount((value) => value + 1);
                 } : undefined} /> : null}
               {noMovementV2Diagnostic}
-              {viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization ? (
-                <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
-              ) : null}
               {noMovementHasPublishedRecords ? dashboardActionBand : null}
 
               {noMovementV2State.status === "error" && noMovementV2State.error ? (

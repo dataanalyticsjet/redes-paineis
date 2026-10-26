@@ -22,6 +22,9 @@ export interface BilingualDashboardText {
 const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "CONSOLIDADO NACIONAL": { en: "NATIONAL CONSOLIDATED", zh: "全国汇总" },
   "Análise operacional": { en: "Operational analysis", zh: "运营分析" },
+  "Análise operacional da última publicação": { en: "Operational analysis from the latest publication", zh: "最新发布的运营分析" },
+  "Total nacional": { en: "National total", zh: "全国总量" },
+  "A análise operacional nacional está disponível somente para o escopo MATRIZ.": { en: "The national operational analysis is available only to MATRIX scope users.", zh: "全国运营分析仅对矩阵范围用户开放。" },
   "Histórico de análises": { en: "Analysis history", zh: "分析历史" },
   "Atualizar análise": { en: "Refresh analysis", zh: "刷新分析" },
   "Copiar mensagem": { en: "Copy message", zh: "复制消息" },

@@ -5,7 +5,7 @@ import test from "node:test";
 const repo = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, repo), "utf8");
 
-test("Sem Movimentação integrates a national-only, copyable bilingual analysis section", async () => {
+test("Sem Movimentação shows the persisted national analysis only in the existing AI modal", async () => {
   const [dashboard, component, backend] = await Promise.all([
     read("src/features/dashboards/dashboard-app.tsx"),
     read("src/features/dashboards/no-movement-operational-analysis.tsx"),
@@ -13,11 +13,27 @@ test("Sem Movimentação integrates a national-only, copyable bilingual analysis
   ]);
   assert.match(dashboard, /NoMovementOperationalAnalysis authorization=\{viewerAuthorization\}/);
   assert.match(dashboard, /organizational_scope === "matrix" && viewerIdentity\?\.role === "matrix"/);
+  assert.match(dashboard, /view === "movimentacao" \? "Análise operacional da última publicação"/);
+  assert.match(dashboard, /: <textarea readOnly value=\{analysisText\}/);
+  assert.doesNotMatch(dashboard, /noMovementV2Diagnostic\}\s*\{viewerIdentity\?\.organizational_scope === "matrix"[\s\S]{0,180}NoMovementOperationalAnalysis/);
   assert.match(component, /navigator\.clipboard\.writeText/);
+  assert.match(component, /operational-analysis\?limit=20/);
+  assert.match(component, /formattedMessage = selected\?\.message\?\.split/);
+  assert.match(component, /no-movement-analysis-message/);
   assert.match(component, /Histórico/);
   assert.match(component, /PROCESSING/);
   assert.match(component, /FAILED/);
   assert.match(backend, /matrix_scope_required/);
+});
+
+test("official analysis keeps persisted text unchanged when copied and renders emphasis as formatting", async () => {
+  const [component, styles] = await Promise.all([
+    read("src/features/dashboards/no-movement-operational-analysis.tsx"),
+    read("src/styles/globals.css"),
+  ]);
+  assert.match(component, /navigator\.clipboard\.writeText\(selected\.message\)/);
+  assert.match(component, /part\.slice\(2, -2\)/);
+  assert.match(styles, /\.no-movement-analysis-message[^\n]*white-space: pre-wrap/);
 });
 
 test("analysis is scheduled only for a successful new no_movement V2 publication", async () => {
