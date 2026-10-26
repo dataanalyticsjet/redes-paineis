@@ -596,13 +596,16 @@ def create_preview_job(
     connection: Connection,
     *,
     source_id: str,
-    actor_user_id: int,
+    actor_user_id: int | None,
+    actor_service_principal_id: str | None = None,
     file_name: str,
     file_size: int,
     stored_file_key: str,
     summary: PreviewSummary,
     request_id: str | None,
 ) -> str:
+    if (actor_user_id is None) == (actor_service_principal_id is None):
+        raise DataFoundationError("import_actor_invalid", 403)
     contract = get_contract(source_id, summary.contract_version)
     if source_id == "base_mapping_official" and contract.version >= 2:
         raise DataFoundationError("mapping_candidate_endpoint_required", 409)
@@ -623,15 +626,23 @@ def create_preview_job(
             raise DataFoundationError("source_contract_definition_mismatch", 409)
         if registered["source_state"] in {"RETIRED", "PAUSED"}:
             raise DataFoundationError("data_source_unavailable", 409)
-        connection.execute(text("""
+        actor_columns = (
+            "submitted_by_user_id, submitted_by_service_principal_id"
+            if actor_service_principal_id else "submitted_by_user_id"
+        )
+        actor_values = (
+            ":actor_user_id, :service_principal_id"
+            if actor_service_principal_id else ":actor_user_id"
+        )
+        connection.execute(text(f"""
             INSERT INTO import_jobs
               (job_id, source_id, contract_version, validation_map_version_id,
-               submitted_by_user_id, job_state, original_file_name, stored_file_key,
+               {actor_columns}, job_state, original_file_name, stored_file_key,
                file_size_bytes, file_sha256, input_row_count, valid_row_count,
                error_count, request_id, validated_at)
             VALUES
               (:job_id, :source_id, :contract_version, :map_version_id,
-               :actor_user_id, :job_state, :file_name, :stored_file_key,
+               {actor_values}, :job_state, :file_name, :stored_file_key,
                :file_size, :file_sha256, :input_rows, :valid_rows,
                :error_count, :request_id, CURRENT_TIMESTAMP(6))
         """), {
@@ -640,6 +651,7 @@ def create_preview_job(
             "contract_version": contract.version,
             "map_version_id": summary_map_version(summary),
             "actor_user_id": actor_user_id,
+            "service_principal_id": actor_service_principal_id,
             "job_state": status,
             "file_name": file_name[:255],
             "stored_file_key": stored_file_key,
@@ -1090,20 +1102,35 @@ def _write_publication_dates(
 def _write_audit(
     connection: Connection,
     *,
-    actor_user_id: int,
+    actor_user_id: int | None,
+    actor_service_principal_id: str | None = None,
     action_code: str,
     object_type: str,
     object_id: bytes,
     request_id: str | None,
     safe_context: dict[str, object],
 ) -> None:
-    connection.execute(text("""
+    if actor_user_id is None and actor_service_principal_id is None:
+        raise DataFoundationError("audit_actor_required", 500)
+    if actor_user_id is not None and actor_service_principal_id is not None:
+        raise DataFoundationError("audit_actor_ambiguous", 500)
+    if actor_service_principal_id:
+        safe_context = {**safe_context, "actorType": "service", "servicePrincipalId": actor_service_principal_id}
+        statement = """
+            INSERT INTO data_audit_events
+              (actor_user_id, actor_service_principal_id, action_code, object_type, object_id, request_id, event_context)
+            VALUES (NULL, :service_principal_id, :action_code, :object_type, :object_id, :request_id, :event_context)
+        """
+    else:
+        statement = """
         INSERT INTO data_audit_events
           (actor_user_id, action_code, object_type, object_id, request_id, event_context)
         VALUES
           (:actor_user_id, :action_code, :object_type, :object_id, :request_id, :event_context)
-    """), {
+        """
+    connection.execute(text(statement), {
         "actor_user_id": actor_user_id,
+        "service_principal_id": actor_service_principal_id,
         "action_code": action_code,
         "object_type": object_type,
         "object_id": object_id,
@@ -1116,7 +1143,8 @@ def publish_import_job(
     engine: Engine,
     *,
     job_id: str,
-    actor_user_id: int,
+    actor_user_id: int | None,
+    actor_service_principal_id: str | None = None,
     staging_directory: Path,
     idempotency_key: str,
     request_id: str | None,
@@ -1128,7 +1156,14 @@ def publish_import_job(
         job = load_import_job(connection, job_id, lock=True)
         if job["source_id"] == "base_mapping_official":
             raise DataFoundationError("mapping_candidate_publication_not_enabled", 409)
-        if job["submitted_by_user_id"] != actor_user_id and job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
+        job_owner_matches = (
+            job.get("submitted_by_service_principal_id") == actor_service_principal_id
+            if actor_service_principal_id
+            else job["submitted_by_user_id"] == actor_user_id
+        )
+        if actor_service_principal_id and not job_owner_matches:
+            raise DataFoundationError("import_job_not_publishable", 409)
+        if not actor_service_principal_id and not job_owner_matches and job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
             raise DataFoundationError("import_job_not_publishable", 409)
         if job["job_state"] not in {"VALIDATED", "PUBLISHED", "REUSED"}:
             raise DataFoundationError("import_job_not_validated", 409)
@@ -1197,6 +1232,7 @@ def publish_import_job(
             _write_audit(
                 connection,
                 actor_user_id=actor_user_id,
+            actor_service_principal_id=actor_service_principal_id,
                 action_code="PUBLICATION_REUSED",
                 object_type="source_publication",
                 object_id=publication_id,
@@ -1291,6 +1327,7 @@ def publish_import_job(
         _write_audit(
             connection,
             actor_user_id=actor_user_id,
+            actor_service_principal_id=actor_service_principal_id,
             action_code="PUBLICATION_PUBLISHED",
             object_type="source_publication",
             object_id=publication_id,
@@ -2084,13 +2121,20 @@ def publish_initial_mapping_migration(
 def get_job_status(
     engine: Engine,
     job_id: str,
-    actor_user_id: int,
+    actor_user_id: int | None,
     *,
+    actor_service_principal_id: str | None = None,
     staging_directory: Path | None = None,
 ) -> dict[str, object]:
+    if (actor_user_id is None) == (actor_service_principal_id is None):
+        raise DataFoundationError("import_actor_invalid", 403)
     with engine.connect() as connection:
         job = load_import_job(connection, job_id)
-        if job["submitted_by_user_id"] != actor_user_id:
+        if actor_service_principal_id:
+            owns_job = job.get("submitted_by_service_principal_id") == actor_service_principal_id
+        else:
+            owns_job = job["submitted_by_user_id"] == actor_user_id
+        if not owns_job:
             raise DataFoundationError("import_job_not_found", 404)
         errors = list(connection.execute(text("""
             SELECT source_row_no, column_key, error_code
@@ -2168,12 +2212,19 @@ def validate_job_again(
     engine: Engine,
     *,
     job_id: str,
-    actor_user_id: int,
+    actor_user_id: int | None,
+    actor_service_principal_id: str | None = None,
     staging_directory: Path,
 ) -> dict[str, object]:
+    if (actor_user_id is None) == (actor_service_principal_id is None):
+        raise DataFoundationError("import_actor_invalid", 403)
     with engine.connect() as connection:
         job = load_import_job(connection, job_id)
-        if job["submitted_by_user_id"] != actor_user_id:
+        if actor_service_principal_id:
+            owns_job = job.get("submitted_by_service_principal_id") == actor_service_principal_id
+        else:
+            owns_job = job["submitted_by_user_id"] == actor_user_id
+        if not owns_job:
             raise DataFoundationError("import_job_not_found", 404)
         source_id = str(job["source_id"])
         if source_id == "base_mapping_official" and int(job["contract_version"]) >= 2:
@@ -2210,13 +2261,17 @@ def validate_job_again(
         connection.execute(text("""
             DELETE FROM import_job_errors WHERE job_id = :job_id
         """), {"job_id": _uuid_bytes(job_id)})
-        connection.execute(text("""
+        owner_predicate = (
+            "submitted_by_service_principal_id = :service_principal_id"
+            if actor_service_principal_id else "submitted_by_user_id = :actor_user_id"
+        )
+        connection.execute(text(f"""
             UPDATE import_jobs
             SET validation_map_version_id = :map_version_id,
                 job_state = :job_state, input_row_count = :input_rows,
                 valid_row_count = :valid_rows, error_count = :error_count,
                 validated_at = CURRENT_TIMESTAMP(6)
-            WHERE job_id = :job_id AND submitted_by_user_id = :actor_user_id
+            WHERE job_id = :job_id AND {owner_predicate}
         """), {
             "map_version_id": resolver.map_version_id,
             "job_state": "VALIDATED" if summary.can_publish else "INVALID",
@@ -2225,6 +2280,7 @@ def validate_job_again(
             "error_count": sum(summary.error_counts.values()),
             "job_id": _uuid_bytes(job_id),
             "actor_user_id": actor_user_id,
+            "service_principal_id": actor_service_principal_id,
         })
         _insert_errors(connection, _uuid_bytes(job_id), summary)
     return {"jobId": job_id, **summary.as_api_dict()}

@@ -22,6 +22,12 @@ from app.api.dependencies import AuthenticatedViewer, get_current_viewer, requir
 from app.core.config import get_settings
 from app.db.session import get_data_database_engine
 from app.services.data_foundation.contracts import CONTRACTS, INITIAL_MAPPING_WORKBOOK_SHA256, get_contract
+from app.services.data_foundation.service_principals import (
+    ServicePrincipal,
+    authenticate_service_principal,
+    allowed_bot_contracts,
+    principal_can_publish,
+)
 from app.services.data_foundation.queries import (
     export_records,
     get_current_mapping_status,
@@ -91,6 +97,7 @@ from app.services.pdd_collection_failure_operational_analysis import (
 
 router = APIRouter(prefix="/v2", tags=["data foundation v2"])
 MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024
+MAX_MACHINE_IMPORT_FILE_BYTES = 32 * 1024 * 1024
 MAX_PAGE_SIZE = 250
 MAX_EXPORT_ROWS = 10_000
 
@@ -123,6 +130,69 @@ def _require_metadata_feature() -> None:
     settings = get_settings()
     if not (settings.data_queries_enabled or settings.data_import_enabled):
         raise HTTPException(status_code=503, detail="data_foundation_v2_disabled")
+
+
+def _require_bot_publishing() -> None:
+    settings = get_settings()
+    if not settings.data_bot_publishing_enabled or not settings.data_import_enabled:
+        raise HTTPException(status_code=503, detail="bot_publication_disabled")
+    if settings.data_import_staging_directory is None:
+        raise HTTPException(status_code=503, detail="import_storage_unavailable")
+
+
+def require_service_principal(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> ServicePrincipal:
+    _require_bot_publishing()
+    if request.url.scheme.lower() != "https":
+        raise HTTPException(status_code=400, detail="https_required")
+    scheme, separator, token = (authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(status_code=401, detail="service_credential_invalid")
+    try:
+        with _engine().begin() as connection:
+            principal = authenticate_service_principal(connection, token.strip())
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if principal is None:
+        raise HTTPException(status_code=401, detail="service_credential_invalid")
+    return principal
+
+
+def _require_service_scope(
+    engine: Any,
+    principal: ServicePrincipal,
+    source_id: str,
+    contract_version: int,
+) -> None:
+    if (source_id, contract_version) not in allowed_bot_contracts():
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+    try:
+        with engine.connect() as connection:
+            allowed = principal_can_publish(connection, principal.principal_id, source_id, contract_version)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if not allowed:
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+
+
+def _require_service_job_scope(engine: Any, principal: ServicePrincipal, job_id: str) -> tuple[str, int]:
+    try:
+        with engine.connect() as connection:
+            job = connection.execute(text("""
+                SELECT source_id, contract_version, submitted_by_service_principal_id
+                FROM import_jobs WHERE job_id = :job_id
+            """), {"job_id": bytes.fromhex(job_id.replace("-", ""))}).mappings().first()
+    except ValueError:
+        raise HTTPException(status_code=404, detail="import_job_not_found") from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if job is None or job["submitted_by_service_principal_id"] != principal.principal_id:
+        raise HTTPException(status_code=404, detail="import_job_not_found")
+    source_id, version = str(job["source_id"]), int(job["contract_version"])
+    _require_service_scope(engine, principal, source_id, version)
+    return source_id, version
 
 
 def _engine():
@@ -1034,6 +1104,172 @@ def publish_import(
             _engine(),
             publication_id=str(publication["publicationId"]),
         )
+    return publication
+
+
+@router.post("/machine/imports/preview")
+async def machine_preview_import(
+    request: Request,
+    source_id: str = Form(..., min_length=1, max_length=64),
+    contract_version: int = Form(..., ge=1, le=65535),
+    file: UploadFile = File(...),
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, object]:
+    """Technical entry point, limited to the four explicitly allowed contracts."""
+    _require_bot_publishing()
+    engine = _engine()
+    _require_service_scope(engine, principal, source_id, contract_version)
+    if (source_id, contract_version) not in allowed_bot_contracts():
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+    contract = _source_contract(source_id, contract_version)
+    file_name = _safe_upload_name(file.filename)
+    content = await file.read(MAX_MACHINE_IMPORT_FILE_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="workbook_empty")
+    if len(content) > MAX_MACHINE_IMPORT_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="workbook_file_too_large")
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    stored_key: str | None = None
+    try:
+        with engine.connect() as connection:
+            resolver = load_mapping_resolver(connection, source_id=source_id)
+        summary = parse_workbook(content, contract, resolver)
+        stored_key = save_uploaded_workbook(settings.data_import_staging_directory, content)
+        write_preview_manifest(settings.data_import_staging_directory, stored_key, summary.as_api_dict())
+        with engine.connect() as connection:
+            job_id = create_preview_job(
+                connection, source_id=source_id, actor_user_id=None,
+                actor_service_principal_id=principal.principal_id,
+                file_name=file_name, file_size=len(content), stored_file_key=stored_key,
+                summary=summary, request_id=_request_id(request),
+            )
+    except (DataFoundationError, WorkbookValidationError) as error:
+        if stored_key:
+            root = settings.data_import_staging_directory.expanduser().resolve()
+            (root / stored_key).unlink(missing_ok=True)
+            (root / f"{stored_key}.preview.json").unlink(missing_ok=True)
+        raise _error(error) from None
+    except SQLAlchemyError:
+        if stored_key:
+            root = settings.data_import_staging_directory.expanduser().resolve()
+            (root / stored_key).unlink(missing_ok=True)
+            (root / f"{stored_key}.preview.json").unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    except OSError:
+        if stored_key:
+            root = settings.data_import_staging_directory.expanduser().resolve()
+            (root / stored_key).unlink(missing_ok=True)
+            (root / f"{stored_key}.preview.json").unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="import_storage_unavailable") from None
+    return {"jobId": job_id, **summary.as_api_dict()}
+
+
+@router.get("/machine/imports/{job_id}")
+def machine_import_status(
+    job_id: str,
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, object]:
+    _require_bot_publishing()
+    engine = _engine()
+    source_id, _ = _require_service_job_scope(engine, principal, job_id)
+    try:
+        result = get_job_status(engine, job_id, None, actor_service_principal_id=principal.principal_id)
+        if result["state"] in {"PUBLISHED", "REUSED"}:
+            publication = None
+            with engine.connect() as connection:
+                publication = connection.execute(text("""
+                    SELECT publication_id, version_no
+                    FROM source_publications
+                    WHERE source_id = :source_id AND job_id = :job_id
+                    LIMIT 1
+                """), {"source_id": source_id, "job_id": bytes.fromhex(job_id.replace("-", ""))}).mappings().first()
+                if publication is None:
+                    publication_id = connection.execute(text("""
+                        SELECT reused_publication_id FROM import_jobs WHERE job_id = :job_id
+                    """), {"job_id": bytes.fromhex(job_id.replace("-", ""))}).scalar_one_or_none()
+                    if publication_id:
+                        publication = connection.execute(text("""
+                            SELECT publication_id, version_no FROM source_publications
+                            WHERE publication_id = :publication_id
+                        """), {"publication_id": publication_id}).mappings().first()
+            if publication:
+                result.update({
+                    "publicationId": str(uuid.UUID(bytes=bytes(publication["publication_id"]))),
+                    "version": int(publication["version_no"]),
+                    "reused": result["state"] == "REUSED",
+                })
+        return result
+    except (DataFoundationError, ValueError) as error:
+        if isinstance(error, DataFoundationError):
+            raise _error(error) from None
+        raise HTTPException(status_code=404, detail="import_job_not_found") from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/machine/imports/{job_id}/validate")
+def machine_validate_import(
+    job_id: str,
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, object]:
+    _require_bot_publishing()
+    engine = _engine()
+    source_id, version = _require_service_job_scope(engine, principal, job_id)
+    if (source_id, version) not in allowed_bot_contracts():
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    try:
+        validated = validate_job_again(
+            engine, job_id=job_id, actor_user_id=None,
+            actor_service_principal_id=principal.principal_id,
+            staging_directory=settings.data_import_staging_directory,
+        )
+        return {"state": "VALIDATED" if validated.get("canPublish") else "INVALID", **validated}
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/machine/imports/{job_id}/publish")
+def machine_publish_import(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=8, max_length=128),
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, object]:
+    _require_bot_publishing()
+    if not idempotency_key:
+        raise HTTPException(status_code=422, detail="idempotency_key_required")
+    engine = _engine()
+    source_id, contract_version = _require_service_job_scope(engine, principal, job_id)
+    if (source_id, contract_version) not in allowed_bot_contracts():
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    try:
+        status = get_job_status(engine, job_id, None, actor_service_principal_id=principal.principal_id)
+        publication = publish_import_job(
+            engine, job_id=job_id, actor_user_id=None,
+            actor_service_principal_id=principal.principal_id,
+            staging_directory=settings.data_import_staging_directory,
+            idempotency_key=idempotency_key, request_id=_request_id(request),
+        )
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if not publication.get("reused"):
+        publication_id = str(publication["publicationId"])
+        if source_id == "no_movement" and contract_version == 2:
+            background_tasks.add_task(generate_publication_analysis, engine, publication_id=publication_id)
+        elif source_id == "collection_rate" and contract_version == 3:
+            background_tasks.add_task(generate_collection_rate_operational_analysis, engine, publication_id=publication_id)
+        elif source_id == "pdd_collection_failure" and contract_version == 2:
+            background_tasks.add_task(generate_pdd_collection_failure_operational_analysis, engine, publication_id=publication_id)
     return publication
 
 

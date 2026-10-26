@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     data_mapping_unit_metadata_enabled: bool = False
     data_import_enabled: bool = False
     data_import_staging_directory: Path | None = None
+    # Machine-identity publishing is a separate opt-in and remains disabled
+    # until its schema, credentials and scopes are provisioned deliberately.
+    data_bot_publishing_enabled: bool = False
 
     frontend_base_url: AnyHttpUrl = "http://127.0.0.1:3001"
     data_directory: Path = DEFAULT_DATA_DIRECTORY
