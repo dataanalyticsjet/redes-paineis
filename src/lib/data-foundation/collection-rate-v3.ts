@@ -108,6 +108,12 @@ export interface CollectionRateV3Period {
   dateTo: string;
 }
 
+export interface CollectionRateV3LoadProgress {
+  loaded: number;
+  total: number;
+  stage: "records" | "validation";
+}
+
 export interface PublishedCollectionRateV3Data {
   sourceId: typeof COLLECTION_RATE_V3_SOURCE_ID;
   contractVersion: typeof COLLECTION_RATE_V3_CONTRACT_VERSION;
@@ -272,6 +278,7 @@ export async function loadPublishedCollectionRateV3(
   period: CollectionRateV3Period,
   fetcher: ApiFetch = apiFetch,
   signal?: AbortSignal,
+  onProgress?: (progress: CollectionRateV3LoadProgress) => void,
 ): Promise<PublishedCollectionRateV3Data> {
   const dateFrom = normalizeDate(period.dateFrom);
   const dateTo = normalizeDate(period.dateTo);
@@ -307,6 +314,7 @@ export async function loadPublishedCollectionRateV3(
 
   const expectedDates = [...expectedByDate.values()];
   const expectedCount = expectedDates.reduce((sum, item) => sum + item.rowCount, 0);
+  onProgress?.({ loaded: 0, total: expectedCount, stage: "records" });
   const publicationIds = [...new Set(expectedDates.map((item) => item.publicationId))].sort();
   const publishedAt = latestTimestamp(expectedDates.map((item) => item.publishedAt));
   const snapshotAsOf = latestTimestamp(expectedDates.map((item) => item.snapshotAsOf));
@@ -349,9 +357,11 @@ export async function loadPublishedCollectionRateV3(
       seenRows.add(identity);
       records.push(record);
     }
+    onProgress?.({ loaded: records.length, total: expectedCount, stage: "records" });
   }
   if (records.length !== expectedCount) throw new CollectionRateV3LoadError("inconsistent", "A paginação não recuperou todas as linhas esperadas.");
 
+  onProgress?.({ loaded: 0, total: 0, stage: "validation" });
   const receivedByDate = new Map<string, number>();
   for (const record of records) {
     const date = recordDate(record);

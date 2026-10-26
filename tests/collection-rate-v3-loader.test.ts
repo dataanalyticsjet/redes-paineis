@@ -133,3 +133,33 @@ test("V3 loader rejects rate values outside JMS fraction scale", async () => {
     /decimal inválido em collection_rate/,
   );
 });
+
+test("V3 loader reports only page progress against the selected authorized period total", async () => {
+  const count = 501;
+  const dates = [{ date: "2026-10-13", rowCount: count, publicationId, publishedAt: null, snapshotAsOf: null }];
+  const records = Array.from({ length: count }, (_, index) => officialRecord("2026-10-13", index + 2));
+  const progress: Array<{ loaded: number; total: number; stage: "records" | "validation" }> = [];
+  const fetcher = async (path: string): Promise<Response> => {
+    const url = new URL(path, "https://new-bi.test");
+    if (url.pathname.endsWith("/dates")) return jsonResponse({ sourceId: "collection_rate", dates, hasPublishedPublication: true });
+    const offset = Number(url.searchParams.get("offset"));
+    const limit = Number(url.searchParams.get("limit"));
+    return jsonResponse({ sourceId: "collection_rate", total: count, offset, limit, records: records.slice(offset, offset + limit) });
+  };
+
+  const result = await loadPublishedCollectionRateV3(
+    { dateFrom: "2026-10-13", dateTo: "2026-10-13" },
+    fetcher,
+    undefined,
+    (value) => progress.push(value),
+  );
+
+  assert.equal(result.rowCount, count);
+  assert.deepEqual(progress, [
+    { loaded: 0, total: count, stage: "records" },
+    { loaded: 250, total: count, stage: "records" },
+    { loaded: 500, total: count, stage: "records" },
+    { loaded: count, total: count, stage: "records" },
+    { loaded: 0, total: 0, stage: "validation" },
+  ]);
+});

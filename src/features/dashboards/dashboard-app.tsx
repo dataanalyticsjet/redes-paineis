@@ -2939,7 +2939,10 @@ export function DashboardApp() {
     return {
       status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
       period: { dateFrom: `${yesterday.slice(0, 7)}-01`, dateTo: today.toISOString().slice(0, 10) },
+      loadedPeriod: null as { dateFrom: string; dateTo: string } | null,
       records: [] as CollectionRateV3Record[],
+      progress: { loaded: 0, total: 0, stage: "records" as "records" | "validation" },
+      retryKey: 0,
       receivedCount: 0,
       columnCount: COLLECTION_RATE_V3_COLUMNS.length,
       publicationId: null as string | null,
@@ -3136,7 +3139,7 @@ export function DashboardApp() {
     loadedDashboardDataViewerRef.current = null;
     setMonitoringV2Status("idle");
     setMonitoringV2Message(null);
-    setCollectionRateV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, snapshotAsOf: null, latestDayMayBeIncomplete: false, error: null }));
+    setCollectionRateV2State((current) => ({ ...current, status: "idle", loadedPeriod: null, records: [], progress: { loaded: 0, total: 0, stage: "records" }, receivedCount: 0, publicationId: null, publicationIds: [], publishedAt: null, snapshotAsOf: null, latestDayMayBeIncomplete: false, error: null }));
     setNoMovementV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, updatedAt: null, collectionDate: null, publishedAt: null, error: null }));
     setPddCollectionFailureV2State((current) => ({ ...current, status: "idle", records: [], receivedCount: 0, publicationId: null, publicationIds: [], updatedAt: null, publishedAt: null, error: null }));
     jtMonitoringV2RequestRef.current?.abort();
@@ -4156,13 +4159,7 @@ export function DashboardApp() {
         setCollectionRateV2State((current) => ({
           ...current,
           status: "loading",
-          records: [],
-          receivedCount: 0,
-          publicationId: null,
-          publicationIds: [],
-          publishedAt: null,
-          snapshotAsOf: null,
-          latestDayMayBeIncomplete: false,
+          progress: { loaded: 0, total: 0, stage: "records" },
           error: null,
         }));
         if (!dateFrom || !dateTo || dateFrom > dateTo) {
@@ -4193,14 +4190,18 @@ export function DashboardApp() {
               publicationToken: currentDashboardPublicationToken,
               fetcher: cacheFetcher,
             }, signal),
-            load: (signal) => loadPublishedCollectionRateV3({ dateFrom, dateTo }, cacheFetcher, signal),
+            load: (signal) => loadPublishedCollectionRateV3({ dateFrom, dateTo }, cacheFetcher, signal, (progress) => {
+              if (active) setCollectionRateV2State((current) => ({ ...current, progress }));
+            }),
           }, controller.signal);
           if (!active) return;
           setCollectionRateV2State((current) => ({
             ...current,
             status: published.rowCount === 0 ? "empty" : "ready",
             period: published.period,
+            loadedPeriod: published.period,
             records: published.records,
+            progress: { loaded: published.rowCount, total: published.rowCount, stage: "records" },
             receivedCount: published.rowCount,
             columnCount: published.columnCount,
             publicationId: published.publicationId,
@@ -4218,13 +4219,16 @@ export function DashboardApp() {
           setCollectionRateV2State((current) => ({
             ...current,
             status: loadError.kind === "empty" ? "empty" : "error",
-            records: [],
-            receivedCount: 0,
-            publicationId: null,
-            publicationIds: [],
-            publishedAt: null,
-            snapshotAsOf: null,
-            latestDayMayBeIncomplete: false,
+            ...(loadError.kind === "empty" ? {
+              loadedPeriod: { dateFrom, dateTo },
+              records: [],
+              receivedCount: 0,
+              publicationId: null,
+              publicationIds: [],
+              publishedAt: null,
+              snapshotAsOf: null,
+              latestDayMayBeIncomplete: false,
+            } : {}),
             error: loadError.message,
           }));
         }
@@ -4236,7 +4240,7 @@ export function DashboardApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, view, viewerAuthorization]);
+  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, collectionRateV2State.retryKey, currentDashboardManifestReady, currentDashboardPublicationToken, dashboardAvailability, dashboardCacheIdentity, dashboardSourcesReady, isAuthorizedDashboardViewer, view, viewerAuthorization]);
 
   useEffect(() => {
     if (view !== "movimentacao") return undefined;
@@ -5656,6 +5660,8 @@ export function DashboardApp() {
     () => collectionRateV2State.records.map(mapCollectionRateV3Record),
     [collectionRateV2State.records],
   );
+  const taxaV2HasPreviousData = (collectionRateV2State.status === "loading" || collectionRateV2State.status === "error") &&
+    collectionRateV2State.records.length > 0 && collectionRateV2State.loadedPeriod !== null;
   const taxaV2Options = useMemo(() => collectionRateV3FilterOptions(taxaV2Rows), [taxaV2Rows]);
   const taxaV2FilteredRows = useMemo(
     () => filterCollectionRateV3Rows(taxaV2Rows, taxaV2Filters),
@@ -9066,6 +9072,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                       setTaxaV2Page(1);
                       setCollectionRateV2State((current) => ({
                         ...current,
+                        status: current.period.dateFrom !== yesterday || current.period.dateTo !== yesterday ? "loading" : current.status,
+                        progress: current.period.dateFrom !== yesterday || current.period.dateTo !== yesterday ? { loaded: 0, total: 0, stage: "records" } : current.progress,
+                        error: current.period.dateFrom !== yesterday || current.period.dateTo !== yesterday ? null : current.error,
                         period: { dateFrom: yesterday, dateTo: yesterday },
                       }));
                     }}
@@ -9142,6 +9151,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                           setTaxaV2Page(1);
                           setCollectionRateV2State((current) => ({
                             ...current,
+                            status: current.period.dateFrom !== dateFrom || current.period.dateTo < dateFrom ? "loading" : current.status,
+                            progress: current.period.dateFrom !== dateFrom || current.period.dateTo < dateFrom ? { loaded: 0, total: 0, stage: "records" } : current.progress,
+                            error: current.period.dateFrom !== dateFrom || current.period.dateTo < dateFrom ? null : current.error,
                             period: {
                               dateFrom,
                               dateTo: !current.period.dateTo || current.period.dateTo < dateFrom ? dateFrom : current.period.dateTo,
@@ -9165,6 +9177,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                           setTaxaV2Page(1);
                           setCollectionRateV2State((current) => ({
                             ...current,
+                            status: current.period.dateFrom !== (current.period.dateFrom || dateTo) || current.period.dateTo !== dateTo ? "loading" : current.status,
+                            progress: current.period.dateFrom !== (current.period.dateFrom || dateTo) || current.period.dateTo !== dateTo ? { loaded: 0, total: 0, stage: "records" } : current.progress,
+                            error: current.period.dateFrom !== (current.period.dateFrom || dateTo) || current.period.dateTo !== dateTo ? null : current.error,
                             period: {
                               dateFrom: current.period.dateFrom || dateTo,
                               dateTo,
@@ -9222,7 +9237,16 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   {collectionRateV2State.latestDayMayBeIncomplete ? <span className="quality-warning">{t("O último dia publicado pode estar incompleto; os valores exibidos não foram ajustados.")}</span> : null}
                 </div>
               </section>
-              {collectionRateV2State.status === "ready" ? (
+              {taxaV2HasPreviousData ? <DashboardLoadingSkeleton compact t={t}
+                message={collectionRateV2State.status === "error" ? "A atualização falhou" : "Atualizando os dados do dashboard…"}
+                previousDataLabel={`${collectionRateV2State.loadedPeriod?.dateFrom ?? ""}${collectionRateV2State.loadedPeriod?.dateTo && collectionRateV2State.loadedPeriod.dateTo !== collectionRateV2State.loadedPeriod.dateFrom ? ` a ${collectionRateV2State.loadedPeriod.dateTo}` : ""}`}
+                error={collectionRateV2State.status === "error" ? collectionRateV2State.error : null}
+                progress={collectionRateV2State.progress}
+                onRetry={collectionRateV2State.status === "error" ? () => setCollectionRateV2State((current) => ({ ...current, status: "loading", progress: { loaded: 0, total: 0, stage: "records" }, error: null, retryKey: current.retryKey + 1 })) : undefined} /> : null}
+              {collectionRateV2State.status === "loading" && !taxaV2HasPreviousData ? <DashboardLoadingSkeleton t={t}
+                message={collectionRateV2State.progress.stage === "validation" ? "Validando a consistência da publicação…" : collectionRateV2State.progress.total > 0 ? "Carregando registros publicados…" : "Consultando publicação vigente…"}
+                progress={collectionRateV2State.progress} /> : null}
+              {collectionRateV2State.status === "ready" || taxaV2HasPreviousData ? (
                 <>
                   <section className="kpi-grid" aria-label={t("Indicadores de taxa de coleta")} data-testid="taxa-v2-kpi-grid">
                     <KpiCard icon={<Target size={20} />} label={t("Taxa de coleta")} value={formatTaxaRate(taxaV2Summary.collectionRate)} detail={t("{count} coletados de {planned} previstos", { count: formatNumber(taxaV2Summary.collected), planned: formatNumber(taxaV2Summary.planned) })} />
@@ -9300,9 +9324,9 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
               ) : collectionRateV2State.status === "empty" ? (
                 <div className="quality-note" role="status">{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</div>
               ) : collectionRateV2State.status === "error" ? (
-                <div className="inline-alert error" role="alert"><CircleAlert size={18} /><span>{collectionRateV2State.error ? t(collectionRateV2State.error) : t("Erro de conexão")}</span></div>
+                <DashboardLoadingSkeleton t={t} message="Consultando publicação vigente…" error={collectionRateV2State.error} onRetry={() => setCollectionRateV2State((current) => ({ ...current, status: "loading", progress: { loaded: 0, total: 0, stage: "records" }, error: null, retryKey: current.retryKey + 1 }))} />
               ) : (
-                <div className="filter-summary" role="status">{collectionRateV2State.status === "loading" ? t("Consultando publicação vigente…") : currentDashboardAvailability.status === "unavailable" ? t("Fonte Taxa V3 indisponível. Verifique o registro do contrato e a conexão com a Data Foundation.") : t("Aguardando consulta à Data Foundation V3")}</div>
+                collectionRateV2State.status === "loading" ? null : <div className="filter-summary" role="status">{currentDashboardAvailability.status === "unavailable" ? t("Fonte Taxa V3 indisponível. Verifique o registro do contrato e a conexão com a Data Foundation.") : t("Aguardando consulta à Data Foundation V3")}</div>
               )}
             </>
           ) : !taxaLoaded ? (
