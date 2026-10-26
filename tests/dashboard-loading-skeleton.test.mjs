@@ -49,3 +49,28 @@ test("all four dashboards share the loading experience without showing stale dat
   assert.match(taxaEffect, /if \(!active\) return/);
   assert.match(taxaEffect, /active = false;[\s\S]*controller\.abort\(\)/);
 });
+
+test("Sem Movimentação keeps its header, actions, and existing filters visible while the results load", () => {
+  const movementStart = dashboards.indexOf(') : view === "movimentacao" ? (', dashboards.indexOf("<main"));
+  const movementEnd = dashboards.indexOf(') : view === "sellers" ? (', movementStart);
+  const movementBranch = dashboards.slice(movementStart, movementEnd);
+  const header = movementBranch.indexOf('className="dashboard-intro"');
+  const actions = movementBranch.indexOf("{dashboardActionBand}");
+  const filters = movementBranch.indexOf('className="filters-card movement-filters-card"');
+  const resultsGate = movementBranch.indexOf("{noMovementHasPublishedRecords && movementLoaded ? <>");
+  const skeleton = movementBranch.indexOf("<DashboardLoadingSkeleton", resultsGate);
+  assert.ok(header >= 0 && actions > header && filters > actions && resultsGate > filters && skeleton > resultsGate);
+  assert.match(movementBranch, /noMovementV2State.status === "error"[\s\S]*?<DashboardLoadingSkeleton[\s\S]*?onRetry/);
+  assert.match(movementBranch, /status === "loading" \|\| noMovementV2State.status === "idle" \|\| !noMovementDataAuthorized/);
+  assert.match(movementBranch, /disabled=\{!noMovementHasPublishedRecords\}/);
+  assert.match(movementBranch, /noMovementHasPublishedRecords && movementLoaded \? t\("\{count\} colunas"[\s\S]*?: "—"/);
+  assert.match(movementBranch, /<div className="filter-grid movement-filter-grid">/);
+});
+
+test("the permanent dashboard loading rule is documented without applying it to other panels", async () => {
+  const standard = await readFile(new URL("../docs/architecture/dashboard-loading-standard.md", import.meta.url), "utf8");
+  assert.match(standard, /header and permitted action buttons immediately/);
+  assert.match(standard, /only in the results area/);
+  assert.match(standard, /indeterminate progress/);
+  assert.match(standard, /does not authorize changing other dashboard loading behavior/);
+});

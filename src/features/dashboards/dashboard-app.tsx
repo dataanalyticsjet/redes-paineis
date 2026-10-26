@@ -3033,7 +3033,6 @@ export function DashboardApp() {
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
   const [taxaV2Filters, setTaxaV2Filters] = useState<CollectionRateV3Filters>({});
-  const [taxaV2FiltersExpanded, setTaxaV2FiltersExpanded] = useState(false);
   const [taxaV2TableQuery, setTaxaV2TableQuery] = useState("");
   const [taxaV2Page, setTaxaV2Page] = useState(1);
   const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
@@ -6688,7 +6687,7 @@ export function DashboardApp() {
       >
         <span><strong>{t("Status V2:")}</strong> {t(noMovementAvailabilityText)}</span>
         <span><strong>{t("Registros recebidos:")}</strong> {noMovementV2State.status === "ready" || (noMovementV2State.status === "empty" && noMovementV2State.publicationId) || noMovementHasPreviousRecords ? formatNumber(noMovementV2State.receivedCount) : "—"}</span>
-        <span><strong>{t("Colunas:")}</strong> {formatNumber(noMovementV2State.columnCount)}</span>
+        <span><strong>{t("Colunas:")}</strong> {noMovementV2State.columnCount > 0 ? formatNumber(noMovementV2State.columnCount) : "—"}</span>
         <span><strong>{t("Publicação:")}</strong> {noMovementV2State.publicationId ?? "—"}</span>
         <span><strong>{t("Data da coleta:")}</strong> {noMovementV2State.collectionDate ? formatDate(noMovementV2State.collectionDate) : "—"}</span>
         <span><strong>{t("Executada em:")}</strong> {noMovementV2State.updatedAt ? formatDateTime(noMovementV2State.updatedAt) : "—"}</span>
@@ -6829,7 +6828,7 @@ export function DashboardApp() {
       onPrint={handlePrintReport}
       onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
       onShare={openPanelFeishuShare}
-      onDataSource={canManageActiveDataSource && activeDataSourceId ? () => setDataSourceDialogId(activeDataSourceId) : undefined}
+      onDataSource={view !== "taxa" && canManageActiveDataSource && activeDataSourceId ? () => setDataSourceDialogId(activeDataSourceId) : undefined}
       sourceLabel={view === "taxa" && taxaLoaded?.sourceType === "MANUAL_UPLOAD" ? taxaLoaded.fileName : undefined}
       t={t}
     />
@@ -7882,36 +7881,22 @@ export function DashboardApp() {
               </div>
               <p>{t("Aguardando liberação do acesso operacional pela administração.")}</p>
             </section>
-          ) : noMovementV2State.status === "error" && !noMovementHasPublishedRecords ? (
-            <DashboardLoadingSkeleton t={t} message="Carregando o snapshot publicado de Sem Movimentação…" error={noMovementV2State.error} onRetry={() => {
-              setNoMovementV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));
-              setNoMovementRetryCount((value) => value + 1);
-            }} />
-          ) : !noMovementDataAuthorized || (noMovementV2State.status === "loading" || noMovementV2State.status === "idle") && !noMovementHasPublishedRecords ? (
-            <DashboardLoadingSkeleton t={t} message={noMovementV2State.progress.stage === "validation" ? "Validando a consistência da publicação…" : noMovementV2State.progress.total > 0 ? "Carregando registros publicados…" : "Carregando o snapshot publicado de Sem Movimentação…"} progress={noMovementV2State.progress} />
-          ) : !movementLoaded ? (
-            <section className="dashboard-source-availability" role="status" aria-live="polite">
-              <div className="dashboard-intro">
-                <div><div className="eyebrow"><Activity size={15} /> {t("SEM MOVIMENTAÇÃO")}</div><h1>{t("Sem movimentação")}</h1></div>
-              </div>
-              <p>{t(noMovementAvailabilityText)}</p>
-            </section>
           ) : (
             <>
               <section className="dashboard-intro">
                 <div>
                   <div className="eyebrow"><Activity size={15} /> {t("SEM MOVIMENTAÇÃO")}</div>
                   <h1>{t("Sem movimentação")}</h1>
-                  <p>{t(movementLoaded.format === "summary" ? "Total sem movimentação por regional, base, RM, RGM e região do RM." : "Pedidos sem movimentação por AGING, regional, RM, base, status, origem e período.")}</p>
+                  <p>{t(movementLoaded?.format === "summary" ? "Total sem movimentação por regional, base, RM, RGM e região do RM." : "Pedidos sem movimentação por AGING, regional, RM, base, status, origem e período.")}</p>
                 </div>
                 <div className="dataset-meta" aria-label={t("Resumo da fonte oficial de movimentação")}>
-                  <span><Layers3 size={16} /> {noMovementHasPublishedRecords ? t("{count} pedidos", { count: formatNumber(movementSummary.totalStopped) }) : t(noMovementAvailabilityText)}</span>
-                  <span><MapPin size={16} /> {noMovementHasPublishedRecords ? t("{count} regionais", { count: formatNumber(movementRegionOptions.length) }) : t(noMovementAvailabilityText)}</span>
-                  <span><Database size={16} /> {t("{count} colunas", { count: formatNumber(movementLoaded.displayColumns.length) })}</span>
-                  <span><CircleAlert size={16} /> {noMovementHasPublishedRecords ? t("{count} bases críticas", { count: formatNumber(movementSummary.criticalBases) }) : t(noMovementAvailabilityText)}</span>
-                  <span><CalendarDays size={16} /> {noMovementHasPublishedRecords && movementLoaded.sourceType === "DATA_FOUNDATION_V2"
+                  <span><Layers3 size={16} /> {noMovementHasPublishedRecords ? t("{count} pedidos", { count: formatNumber(movementSummary.totalStopped) }) : "—"}</span>
+                  <span><MapPin size={16} /> {noMovementHasPublishedRecords ? t("{count} regionais", { count: formatNumber(movementRegionOptions.length) }) : "—"}</span>
+                  <span><Database size={16} /> {noMovementHasPublishedRecords && movementLoaded ? t("{count} colunas", { count: formatNumber(movementLoaded.displayColumns.length) }) : "—"}</span>
+                  <span><CircleAlert size={16} /> {noMovementHasPublishedRecords ? t("{count} bases críticas", { count: formatNumber(movementSummary.criticalBases) }) : "—"}</span>
+                  <span><CalendarDays size={16} /> {noMovementHasPublishedRecords && movementLoaded?.sourceType === "DATA_FOUNDATION_V2"
                     ? t("Data da coleta: {date}", { date: movementLoaded.collectionDate ? formatDate(movementLoaded.collectionDate) : "—" })
-                    : noMovementHasPublishedRecords ? t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) }) : t(noMovementAvailabilityText)}</span>
+                    : noMovementHasPublishedRecords && movementLoaded ? t("Última atualização: {date}", { date: formatDateTime(movementLoaded.updatedAt) }) : "—"}</span>
                 </div>
               </section>
               {noMovementHasPreviousRecords ? <DashboardLoadingSkeleton compact t={t}
@@ -7924,7 +7909,7 @@ export function DashboardApp() {
                   setNoMovementRetryCount((value) => value + 1);
                 } : undefined} /> : null}
               {noMovementV2Diagnostic}
-              {noMovementHasPublishedRecords ? dashboardActionBand : null}
+              {dashboardActionBand}
 
               {noMovementV2State.status === "error" && noMovementV2State.error ? (
                 <div className="inline-alert error" role="alert">
@@ -8006,7 +7991,7 @@ export function DashboardApp() {
                     onChange={(value) => applyMovementFilterSelection("rgms", value)} allLabel={t("Todos os RGM")}
                     singular="RGM" plural="RGM" searchable disabled={!noMovementHasPublishedRecords}
                     disabledLabel={t(noMovementAvailabilityText)} t={t} />
-                  {movementLoaded.format === "summary" ? (
+                  {movementLoaded?.format === "summary" ? (
                     <div className="filter-field">
                       <label className="filter-label" htmlFor="movement-metric">{t("Indicador / AGING")}</label>
                       <select className="date-input" id="movement-metric" value={movementSummaryMetric}
@@ -8018,15 +8003,15 @@ export function DashboardApp() {
                   ) : (<>
                   <div className="filter-field">
                     <label className="filter-label" htmlFor="movement-date-start">{t("Data inicial")}</label>
-                    <input className="date-input" id="movement-date-start" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateStart} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateStart(event.target.value); setMovementPage(1); }} />
+                    <input className="date-input" id="movement-date-start" type="date" min={movementLoaded?.dates[0]} max={movementLoaded?.dates[movementLoaded.dates.length - 1]} value={movementDateStart} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateStart(event.target.value); setMovementPage(1); }} />
                   </div>
                   <div className="filter-field">
                     <label className="filter-label" htmlFor="movement-date-end">{t("Data final")}</label>
-                    <input className="date-input" id="movement-date-end" type="date" min={movementLoaded.dates[0]} max={movementLoaded.dates[movementLoaded.dates.length - 1]} value={movementDateEnd} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateEnd(event.target.value); setMovementPage(1); }} />
+                    <input className="date-input" id="movement-date-end" type="date" min={movementLoaded?.dates[0]} max={movementLoaded?.dates[movementLoaded.dates.length - 1]} value={movementDateEnd} disabled={!noMovementHasPublishedRecords} onChange={(event) => { setMovementDateEnd(event.target.value); setMovementPage(1); }} />
                   </div>
                   <MultiSelect
                     label={t("Origem do pedido")}
-                    options={movementLoaded.origins}
+                    options={movementLoaded?.origins ?? []}
                     selected={movementSelectedOrigins}
                     onChange={(value) => { setMovementSelectedOrigins(value); setMovementPage(1); }}
                     allLabel={t("Todas as origens")}
@@ -8039,7 +8024,7 @@ export function DashboardApp() {
                   />
                   <MultiSelect
                     label="AGING"
-                    options={movementLoaded.agings}
+                    options={movementLoaded?.agings ?? []}
                     selected={movementSelectedAgings}
                     onChange={(value) => { setMovementSelectedAgings(value); setMovementPage(1); }}
                     allLabel={t("Todos os AGING")}
@@ -8052,7 +8037,7 @@ export function DashboardApp() {
                   />
                   <MultiSelect
                     label={t("Status")}
-                    options={movementLoaded.statuses}
+                    options={movementLoaded?.statuses ?? []}
                     selected={movementSelectedStatuses}
                     onChange={(value) => { setMovementSelectedStatuses(value); setMovementPage(1); }}
                     allLabel={t("Todos os status")}
@@ -8068,6 +8053,7 @@ export function DashboardApp() {
                 {movementDateStart && movementDateEnd && movementDateStart > movementDateEnd ? <p className="date-error" role="alert">{t("A data inicial deve ser anterior à data final.")}</p> : null}
               </section>
 
+              {noMovementHasPublishedRecords && movementLoaded ? <>
               {movementLoaded.blankBaseRows > 0 || movementLoaded.blankRegionRows > 0 ? (
                 <div className="quality-note">
                   <Info size={16} />
@@ -8088,7 +8074,7 @@ export function DashboardApp() {
                 />
                 <KpiCard
                   icon={<Database size={20} />}
-                  label={t(movementLoaded.format === "summary" ? "Pedidos em trânsito" : "Pedidos no período")}
+                  label={t(movementLoaded?.format === "summary" ? "Pedidos em trânsito" : "Pedidos no período")}
                   value={noMovementHasPublishedRecords ? formatCompact(movementSummary.inTransit) : "—"}
                   detail={noMovementHasPublishedRecords ? t("{count} pedidos no filtro", { count: formatNumber(movementSummary.inTransit) }) : t(noMovementAvailabilityText)}
                   tone="orange"
@@ -8343,6 +8329,18 @@ export function DashboardApp() {
                   ? t("Data da coleta: {date} · Publicada em: {publishedAt}", { date: formatDate(movementLoaded.collectionDate), publishedAt: movementLoaded.publishedAt ? formatDateTime(movementLoaded.publishedAt) : "—" })
                   : t(noMovementAvailabilityText)}</span>
               </footer>
+            </> : noMovementV2State.status === "error" ? (
+              <DashboardLoadingSkeleton t={t} message="Carregando o snapshot publicado de Sem Movimentação…" error={noMovementV2State.error} onRetry={() => {
+                setNoMovementV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));
+                setNoMovementRetryCount((value) => value + 1);
+              }} />
+            ) : noMovementV2State.status === "loading" || noMovementV2State.status === "idle" || !noMovementDataAuthorized ? (
+              <DashboardLoadingSkeleton t={t} message={noMovementV2State.progress.stage === "validation" ? "Validando a consistência da publicação…" : noMovementV2State.progress.total > 0 ? "Carregando registros publicados…" : "Carregando o snapshot publicado de Sem Movimentação…"} progress={noMovementV2State.progress} />
+            ) : (
+              <section className="dashboard-source-availability" role="status" aria-live="polite">
+                <p>{t(noMovementAvailabilityText)}</p>
+              </section>
+            )}
             </>
           )
         ) : view === "sellers" ? (
@@ -9133,21 +9131,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   <div className="filter-card-actions">
                     <button
                       type="button"
-                      className="reset-button filter-toggle-button"
-                      aria-expanded={taxaV2FiltersExpanded}
-                      aria-controls="taxa-v2-filter-content"
-                      onClick={() => {
-                        if (taxaV2FiltersExpanded) {
-                          document.querySelectorAll<HTMLDetailsElement>("#taxa-v2-filter-content details[open]").forEach((menu) => { menu.open = false; });
-                        }
-                        setTaxaV2FiltersExpanded((expanded) => !expanded);
-                      }}
-                    >
-                      <ChevronDown size={15} className={taxaV2FiltersExpanded ? "is-expanded" : ""} />
-                      {t(taxaV2FiltersExpanded ? "Recolher filtros" : "Expandir filtros")}
-                    </button>
-                    <button
-                      type="button"
                       className="reset-button"
                       onClick={() => {
                       const yesterday = yesterdayInSaoPaulo();
@@ -9167,7 +9150,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     </button>
                   </div>
                 </div>
-                <div id="taxa-v2-filter-content" className="taxa-v2-filter-content" hidden={!taxaV2FiltersExpanded}>
+                <div id="taxa-v2-filter-content" className="taxa-v2-filter-content">
                 <div className="filter-grid taxa-filter-grid">
                   <MultiSelect
                     label={t("Regional")}

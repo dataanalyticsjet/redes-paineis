@@ -4784,10 +4784,6 @@ tbody tr:hover td {
     font-size: 10px;
   }
 
-  .dashboard-main-taxa-v2 .taxa-v2-filter-content[hidden] {
-    display: block !important;
-  }
-
   .dashboard-main-taxa-v2 .taxa-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
@@ -5554,10 +5550,6 @@ tbody tr:hover td {
 
 .dashboard-main-taxa-v2 .taxa-filters-card .multi-select[open] {
   z-index: 110;
-}
-
-.dashboard-main-taxa-v2 .taxa-v2-filter-content[hidden] {
-  display: none !important;
 }
 
 .dashboard-main-taxa-v2 .taxa-v2-filter-content .multi-select[data-popover-align="left"] .multi-select-popover {

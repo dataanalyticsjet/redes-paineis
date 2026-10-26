@@ -104,7 +104,7 @@ test("persists the latest workbook and exposes all requested filters", async () 
   assert.match(route, /async def write_workbook/);
   assert.match(route, /Depends\(get_current_viewer\)/);
   assert.match(route, /Depends\(require_matrix_admin\)/);
-  assert.match(source, /onDataSource=\{canManageActiveDataSource && activeDataSourceId \? \(\) => setDataSourceDialogId\(activeDataSourceId\) : undefined\}/);
+  assert.match(source, /onDataSource=\{view !== "taxa" && canManageActiveDataSource && activeDataSourceId \? \(\) => setDataSourceDialogId\(activeDataSourceId\) : undefined\}/);
   assert.match(source, /loaded\.sourceType === "DATA_FOUNDATION_V2" && !isAuthorizedDashboardViewer/);
   assert.match(source, /className="primary-upload-button" type="button" onClick=\{\(\) => setDataSourceDialogId\("taxa"\)\}/);
   assert.doesNotMatch(source, /view === "taxa" && !LOCAL_DASHBOARD_DEMO_MODE/);
