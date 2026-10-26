@@ -79,6 +79,10 @@ from app.services.no_movement_operational_analysis import (
     generate_publication_analysis,
     get_analysis_history,
 )
+from app.services.collection_rate_operational_analysis import (
+    generate_publication_analysis as generate_collection_rate_operational_analysis,
+    get_analysis_history as get_collection_rate_analysis_history,
+)
 
 
 router = APIRouter(prefix="/v2", tags=["data foundation v2"])
@@ -1014,6 +1018,12 @@ def publish_import(
             confirmation_user_id=publication.get("exportMetadataConfirmedByUserId"),
             confirmed_at=publication.get("exportMetadataConfirmedAt"),
         )
+    if status.get("sourceId") == "collection_rate" and status.get("contractVersion") == 3 and not publication.get("reused"):
+        background_tasks.add_task(
+            generate_collection_rate_operational_analysis,
+            _engine(),
+            publication_id=str(publication["publicationId"]),
+        )
     return publication
 
 
@@ -1030,6 +1040,23 @@ def no_movement_operational_analysis(
         raise HTTPException(status_code=403, detail="matrix_scope_required")
     try:
         return get_analysis_history(_engine(), limit=limit)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/collection-rate/operational-analysis")
+def collection_rate_operational_analysis(
+    limit: int = Query(default=20, ge=1, le=50),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    if not (
+        str(viewer.identity.get("organizational_scope") or "").strip().lower() == "matrix"
+        and str(viewer.identity.get("role") or "").strip().lower() == "matrix"
+    ):
+        raise HTTPException(status_code=403, detail="matrix_scope_required")
+    try:
+        return get_collection_rate_analysis_history(_engine(), limit=limit)
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 

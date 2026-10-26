@@ -4,6 +4,7 @@ import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revisi
 
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
+import { CollectionRateOperationalAnalysis } from "./collection-rate-operational-analysis.tsx";
 
 import { AssistantHome } from "../home/assistant-home";
 import { DataFoundationAdmin } from "../data-foundation/data-foundation-admin";
@@ -7398,19 +7399,23 @@ export function DashboardApp() {
 
       {analysisOpen ? (
         <div className="upload-login-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAnalysisOpen(false); }}>
-          <div className={`upload-login-dialog${view === "movimentacao" ? " no-movement-analysis-dialog" : ""}`} role="dialog" aria-modal="true" aria-labelledby="analysis-title">
+          <div className={`upload-login-dialog${view === "movimentacao" || view === "taxa" ? " no-movement-analysis-dialog" : ""}`} role="dialog" aria-modal="true" aria-labelledby="analysis-title">
             <button type="button" className="upload-login-close" onClick={() => setAnalysisOpen(false)} aria-label={t("Fechar")}><X size={18} /></button>
             <span className="upload-login-icon"><Sparkles size={24} /></span>
             <h2 id="analysis-title">{t("Análise IA")}</h2>
-            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
+            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : view === "taxa" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
             {view === "movimentacao" ? (
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
                 ? <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
                 : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
+            ) : view === "taxa" ? (
+              viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
+                ? <CollectionRateOperationalAnalysis authorization={viewerAuthorization} t={t} />
+                : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
             ) : <textarea readOnly value={analysisText} aria-label={t("Mensagem para grupo")} style={{ minHeight: 260, width: "100%", resize: "vertical" }} />}
             <div className="upload-login-actions">
               <button type="button" onClick={() => setAnalysisOpen(false)}>{t("Fechar")}</button>
-              {view !== "movimentacao" ? <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button> : null}
+              {view !== "movimentacao" && view !== "taxa" ? <button type="button" onClick={() => { void navigator.clipboard.writeText(analysisText); setAnalysisCopied(true); }}><Copy size={16} /> {t(analysisCopied ? "Copiado" : "Copiar mensagem")}</button> : null}
             </div>
           </div>
         </div>
