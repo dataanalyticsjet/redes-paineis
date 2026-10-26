@@ -87,6 +87,8 @@ class PreviewSummary:
     bot_execution_id: str | None = None
     bot_executed_at: datetime | None = None
     collection_date: date | None = None
+    export_metadata_confirmed_by_user_id: int | None = None
+    export_metadata_confirmed_at: datetime | None = None
     execution_period_start: date | None = None
     execution_period_end: date | None = None
     execution_page_count: int | None = None
@@ -134,6 +136,11 @@ class PreviewSummary:
             "botExecutionId": self.bot_execution_id,
             "botExecutedAt": self.bot_executed_at.isoformat(sep=" ") if self.bot_executed_at else None,
             "collectionDate": self.collection_date.isoformat() if self.collection_date else None,
+            **({
+                "exportMetadataSource": "ADMIN_CONFIRMATION" if self.export_metadata_confirmed_by_user_id else "BOT_METADATA" if self.bot_executed_at else "UNKNOWN",
+                "exportMetadataConfirmedByUserId": self.export_metadata_confirmed_by_user_id,
+                "exportMetadataConfirmedAt": self.export_metadata_confirmed_at.isoformat(sep=" ") if self.export_metadata_confirmed_at else None,
+            } if self.source_id == "no_movement" else {}),
             "executionPeriodStart": self.execution_period_start.isoformat() if self.execution_period_start else None,
             "executionPeriodEnd": self.execution_period_end.isoformat() if self.execution_period_end else None,
             "executionPageCount": self.execution_page_count,
@@ -587,7 +594,10 @@ def _validate_no_movement_metadata(
         if dictionary_field_count != len(expected_dictionary_fields) or dictionary_fields != expected_dictionary_fields or not dictionary_confirmed:
             return None, None, None, None, None, "no_movement_dictionary_invalid"
 
-        executions_path = _sheet_path(archive, "Execucoes")
+        try:
+            executions_path = _sheet_path(archive, "Execucoes")
+        except WorkbookValidationError:
+            return None, None, None, None, None, "no_movement_execution_metadata_missing"
         execution_rows = iter(_iter_sheet_rows(archive, executions_path, shared, date_styles))
         execution_header_row, execution_header = next(execution_rows)
         if execution_header_row != 1:
@@ -1621,6 +1631,7 @@ def parse_workbook(
     on_progress: Callable[[int], None] | None = None,
     trusted_file_sha256: str | None = None,
     expected_file_sha256: str | None = None,
+    manual_export_confirmation: dict[str, object] | None = None,
 ) -> PreviewSummary:
     if not content:
         raise WorkbookValidationError("workbook_empty", 400)
@@ -1724,7 +1735,23 @@ def parse_workbook(
                 metadata_error,
             ) = _validate_no_movement_metadata(archive, shared, date_styles, uses_1904_epoch)
             if metadata_error:
-                summary.add_workbook_error(metadata_error)
+                confirmation_date = (manual_export_confirmation or {}).get("export_date")
+                confirmation_time = (manual_export_confirmation or {}).get("export_time")
+                confirmer = (manual_export_confirmation or {}).get("user_id")
+                if (
+                    metadata_error == "no_movement_execution_metadata_missing"
+                    and isinstance(confirmation_date, date)
+                    and isinstance(confirmation_time, datetime)
+                    and isinstance(confirmer, int)
+                    and confirmer > 0
+                ):
+                    summary.collection_date = confirmation_date
+                    summary.bot_executed_at = confirmation_time
+                    summary.export_metadata_confirmed_by_user_id = confirmer
+                    confirmed_at = (manual_export_confirmation or {}).get("confirmed_at")
+                    summary.export_metadata_confirmed_at = confirmed_at if isinstance(confirmed_at, datetime) else datetime.now()
+                else:
+                    summary.add_workbook_error(metadata_error)
 
         def process_row(row_no: int, cells: dict[int, _RawCell]) -> None:
             nonlocal expected_row_no
@@ -1844,7 +1871,7 @@ def parse_workbook(
             process_row(row_no, cells)
             expected_row_no = row_no + 1
 
-    if contract.source_id == "no_movement" and contract.version >= 2:
+    if contract.source_id == "no_movement" and contract.version >= 2 and not summary.export_metadata_confirmed_by_user_id:
         if no_movement_received_count != summary.input_row_count:
             summary.add_workbook_error("no_movement_execution_row_count_mismatch")
         if summary.input_row_count > 0 and (no_movement_page_count is None or no_movement_page_count < 1):

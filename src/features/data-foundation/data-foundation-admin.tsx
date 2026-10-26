@@ -66,6 +66,10 @@ type Preview = {
   ambiguousRowCount: number;
   mappingVersionAvailable: boolean;
   mappingVersionId: string | null;
+  collectionDate?: string | null;
+  botExecutedAt?: string | null;
+  exportMetadataSource?: "BOT_METADATA" | "ADMIN_CONFIRMATION" | "UNKNOWN";
+  exportMetadataConfirmedByUserId?: number | null;
   perDateCounts: Record<string, number>;
   errorCounts: Record<string, number>;
   errors: { rowNumber: number; column: string | null; code: string }[];
@@ -212,6 +216,9 @@ export function DataFoundationAdmin({
   const [mappingLoading, setMappingLoading] = useState(false);
   const [selectedSource, setSelectedSource] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [confirmNoMovementExport, setConfirmNoMovementExport] = useState(false);
+  const [noMovementExportDate, setNoMovementExportDate] = useState("");
+  const [noMovementExportTime, setNoMovementExportTime] = useState("");
   const [mappingFile, setMappingFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewSource, setPreviewSource] = useState("");
@@ -553,6 +560,9 @@ export function DataFoundationAdmin({
     setCandidates([]);
     setMappingReviewDirty(false);
     setFile(null);
+    setConfirmNoMovementExport(false);
+    setNoMovementExportDate("");
+    setNoMovementExportTime("");
     void ensureSourceHistory(sourceId);
   }, [ensureSourceHistory, loading]);
 
@@ -590,10 +600,19 @@ export function DataFoundationAdmin({
     setCandidates([]);
     setMappingReviewDirty(false);
     setAcknowledgeUnmapped(false);
+    if (selectedSource === "no_movement" && confirmNoMovementExport && (!noMovementExportDate || !noMovementExportTime)) {
+      setError("Preencha a data e o horário local da exportação antes de confirmar.");
+      setBusy(false);
+      return;
+    }
     try {
       const body = new FormData();
       body.append("source_id", selectedSource);
       body.append("file", file, file.name);
+      if (selectedSource === "no_movement" && confirmNoMovementExport) {
+        body.append("confirmed_export_date", noMovementExportDate);
+        body.append("confirmed_export_time", noMovementExportTime);
+      }
       let result: Preview;
       if (selectedSource === "collection_monitoring_t4_t5") {
         const accepted = await requestJson<T4T5ImportStatus>("/api/v2/imports/preview", { method: "POST", body });
@@ -870,6 +889,14 @@ export function DataFoundationAdmin({
                     <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setLargeImportProgress(null); window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || !contract || busy} /></label>
                     <button type="submit" disabled={!importActionsEnabled || !contract || !file || busy}><Upload size={16} />{t("Gerar prévia")}</button>
                   </form>
+                  {selectedSource === "no_movement" ? <div className="no-movement-export-confirmation">
+                    <label className="no-movement-export-confirmation-check"><input type="checkbox" checked={confirmNoMovementExport} onChange={(event) => setConfirmNoMovementExport(event.target.checked)} disabled={busy} />{t("Confirmo manualmente a data e hora da exportação se o arquivo não trouxer metadados confiáveis.")}</label>
+                    <p>{t("Se a aba Execucoes tiver uma execução válida, os metadados do Bot serão priorizados e esta confirmação não os substitui.")}</p>
+                    <div className="no-movement-export-confirmation-fields">
+                      <label>{t("Data da exportação")}<input type="date" value={noMovementExportDate} onChange={(event) => setNoMovementExportDate(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label>
+                      <label>{t("Horário local da exportação")}<input type="time" value={noMovementExportTime} onChange={(event) => setNoMovementExportTime(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label>
+                    </div>
+                  </div> : null}
                   {largeImportProgress?.sourceId === selectedSource && ["RECEIVED", "PARSING"].includes(largeImportProgress.state) ? (
                     <div className="data-foundation-alert is-disabled" role="status" aria-live="polite">
                       <Clock3 size={17} />
@@ -980,6 +1007,7 @@ function PreviewPanel({
         : `${formatCount(preview.mappedRowCount)} / ${formatCount(preview.validRowCount)} ${t("linhas válidas com base associada")}`}</small></div>
       {preview.duplicateCount || preview.exactNameCandidateRowCount || preview.normalizedNameCandidateRowCount || preview.noMappingMatchRowCount || preview.missingIdentifierRowCount || preview.ambiguousRowCount ? <div className="data-foundation-extra-counts"><span>{t("Duplicatas preservadas")}: <strong>{formatCount(preview.duplicateCount)}</strong></span><span>{t("Candidatas por nome exato")}: <strong>{formatCount(preview.exactNameCandidateRowCount)}</strong></span><span>{t("Candidatas por nome normalizado")}: <strong>{formatCount(preview.normalizedNameCandidateRowCount ?? 0)}</strong></span><span>{t("Sem correspondência")}: <strong>{formatCount(preview.noMappingMatchRowCount)}</strong></span><span>{t("Identificador ausente")}: <strong>{formatCount(preview.missingIdentifierRowCount)}</strong></span><span>{t("Ambíguas")}: <strong>{formatCount(preview.ambiguousRowCount)}</strong></span></div> : null}
       {Object.keys(preview.perDateCounts).length ? <details className="data-foundation-details"><summary>{t("Contagem por data")}</summary><div className="data-foundation-date-counts">{Object.entries(preview.perDateCounts).map(([date, count]) => <span key={date}>{date}<strong>{formatCount(count)}</strong></span>)}</div></details> : null}
+      {preview.sourceId === "no_movement" && preview.collectionDate ? <div className="data-foundation-latest"><Clock3 size={15} /> {t("Data operacional")}: {preview.collectionDate} · {t("Exportação")}: {preview.botExecutedAt ?? t("Horário não confirmado")}{preview.exportMetadataSource === "ADMIN_CONFIRMATION" ? ` · ${t("Horário confirmado manualmente pelo administrador")}` : ""}</div> : null}
       {preview.errors.length || Object.keys(preview.errorCounts).length ? <div className="data-foundation-validation-errors"><h3><AlertTriangle size={16} /> {t("Erros de validação")}</h3><p>{t("{count} linhas inválidas", { count: formatCount(preview.invalidRowCount) })}</p>{Object.entries(preview.errorCounts).map(([code, count]) => <span key={code}>{t(code)} · {formatCount(count)}</span>)}<ul>{preview.errors.map((error, index) => <li key={`${error.rowNumber}-${error.code}-${index}`}>{t("Linha {row}", { row: error.rowNumber })}{error.column ? ` · ${error.column}` : ""} · {t(error.code)}</li>)}</ul></div> : null}
       {mappingReviewDirty ? <div className="data-foundation-alert is-disabled"><AlertTriangle size={17} />{t("Há decisões de nome novas. Revalide o arquivo para atualizar a cobertura antes de publicar.")}</div> : null}
       {candidates.length ? (

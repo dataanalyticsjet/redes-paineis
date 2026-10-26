@@ -4,7 +4,7 @@ import csv
 import hashlib
 import io
 import re
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -73,6 +73,11 @@ from app.services.collection_monitoring_t4_t5 import (
     get_filter_options,
     get_group_page,
     get_seller_outcomes_summary,
+)
+from app.services.no_movement_operational_analysis import (
+    SAO_PAULO,
+    generate_publication_analysis,
+    get_analysis_history,
 )
 
 
@@ -513,6 +518,8 @@ async def preview_import(
     background_tasks: BackgroundTasks,
     source_id: str = Form(..., min_length=1, max_length=64),
     contract_version: int | None = Form(default=None, ge=1, le=65535),
+    confirmed_export_date: date | None = Form(default=None),
+    confirmed_export_time: time | None = Form(default=None),
     file: UploadFile = File(...),
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
@@ -595,9 +602,22 @@ async def preview_import(
     try:
         with engine.connect() as connection:
             resolver = load_mapping_resolver(connection, source_id=source_id)
-        summary = parse_workbook(content, contract, resolver)
+        if (confirmed_export_date is None) != (confirmed_export_time is None):
+            raise HTTPException(status_code=422, detail="export_confirmation_date_time_required_together")
+        if source_id != "no_movement" and confirmed_export_date is not None:
+            raise HTTPException(status_code=422, detail="export_confirmation_not_supported_for_source")
+        confirmation = None
+        if source_id == "no_movement" and confirmed_export_date and confirmed_export_time:
+            confirmation = {
+                "export_date": confirmed_export_date,
+                "export_time": datetime.combine(confirmed_export_date, confirmed_export_time),
+                "confirmed_at": datetime.now(SAO_PAULO).replace(tzinfo=None),
+                "user_id": admin.user.id,
+            }
+        summary = parse_workbook(content, contract, resolver, manual_export_confirmation=confirmation)
         stored_key = save_uploaded_workbook(settings.data_import_staging_directory, content)
         try:
+            write_preview_manifest(settings.data_import_staging_directory, stored_key, summary.as_api_dict())
             with engine.connect() as connection:
                 job_id = create_preview_job(
                     connection,
@@ -611,6 +631,7 @@ async def preview_import(
                 )
         except Exception:
             (settings.data_import_staging_directory.expanduser().resolve() / stored_key).unlink(missing_ok=True)
+            (settings.data_import_staging_directory.expanduser().resolve() / f"{stored_key}.preview.json").unlink(missing_ok=True)
             raise
     except (DataFoundationError, WorkbookValidationError) as error:
         raise _error(error) from None
@@ -985,7 +1006,32 @@ def publish_import(
             version=int(publication["version"]),
             actor_user_id=admin.user.id,
         )
+    if status.get("sourceId") == "no_movement" and status.get("contractVersion") == 2 and not publication.get("reused"):
+        background_tasks.add_task(
+            generate_publication_analysis,
+            _engine(),
+            publication_id=str(publication["publicationId"]),
+            confirmation_user_id=publication.get("exportMetadataConfirmedByUserId"),
+            confirmed_at=publication.get("exportMetadataConfirmedAt"),
+        )
     return publication
+
+
+@router.get("/no-movement/operational-analysis")
+def no_movement_operational_analysis(
+    limit: int = Query(default=20, ge=1, le=50),
+    viewer: AuthenticatedViewer = Depends(get_current_viewer),
+) -> dict[str, object]:
+    _require_feature()
+    if not (
+        str(viewer.identity.get("organizational_scope") or "").strip().lower() == "matrix"
+        and str(viewer.identity.get("role") or "").strip().lower() == "matrix"
+    ):
+        raise HTTPException(status_code=403, detail="matrix_scope_required")
+    try:
+        return get_analysis_history(_engine(), limit=limit)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 
 
 @router.get("/imports/{job_id}")

@@ -8174,6 +8174,28 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
 .data-foundation-history strong { color: #424953; }
 .data-foundation-history small { color: #858b94; }
 .data-foundation-upload-form { display: flex; align-items: end; gap: 12px; }
+.no-movement-export-confirmation { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #f0d7b6; border-radius: 9px; background: #fffaf2; color: #68543c; font-size: 11px; }
+.no-movement-export-confirmation p { margin: 0; color: #7a6b56; }
+.no-movement-export-confirmation-check { display: flex; align-items: flex-start; gap: 8px; font-weight: 700; }
+.no-movement-export-confirmation-fields { display: flex; gap: 12px; }
+.no-movement-export-confirmation-fields label { display: grid; flex: 1; gap: 5px; font-weight: 700; }
+.no-movement-export-confirmation-fields input { min-height: 36px; padding: 6px 8px; border: 1px solid #dedfe3; border-radius: 7px; background: #fff; color: #383d46; font: inherit; }
+.no-movement-operational-analysis { display: grid; gap: 14px; margin: 16px 0; padding: 18px; border: 1px solid var(--line, #e5e7eb); border-radius: 14px; background: var(--panel, #fff); }
+.no-movement-analysis-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.no-movement-analysis-heading h2 { margin: 4px 0 0; font-size: 19px; }
+.no-movement-analysis-actions { display: flex; align-items: end; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.no-movement-analysis-actions button, .no-movement-analysis-actions select { min-height: 36px; padding: 0 10px; border: 1px solid var(--line, #ddd); border-radius: 8px; background: var(--panel, #fff); color: inherit; font: inherit; font-size: 12px; }
+.no-movement-analysis-actions button { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.no-movement-analysis-actions button:disabled { opacity: .6; cursor: wait; }
+.no-movement-analysis-actions label { display: grid; gap: 4px; font-size: 10px; }
+.no-movement-analysis-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted, #707782); font-size: 11px; }
+.no-movement-analysis-meta strong { color: var(--text, #282c32); }
+.no-movement-analysis-message { max-height: 520px; overflow: auto; margin: 0; padding: 14px; border: 1px solid var(--line, #e5e7eb); border-radius: 10px; background: var(--soft-panel, #f8f9fb); color: var(--text, #282c32); font: inherit; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.no-movement-analysis-error { color: #b42318; }
+@media (max-width: 600px) { .no-movement-analysis-heading { align-items: flex-start; flex-direction: column; } .no-movement-analysis-actions { width: 100%; justify-content: flex-start; } .no-movement-analysis-actions button { flex: 1; } .no-movement-export-confirmation-fields { flex-direction: column; } }
+html[data-theme="dark"] .no-movement-export-confirmation { border-color: #59452a; background: #2b251c; color: #ead9bd; }
+html[data-theme="dark"] .no-movement-export-confirmation p { color: #c7b99f; }
+html[data-theme="dark"] .no-movement-export-confirmation-fields input { border-color: #444953; background: #1d2026; color: #edf0f5; }
 .data-foundation-upload-form label, .data-foundation-name-review > label { display: grid; min-width: 0; flex: 1; gap: 6px; color: #565d67; font-size: 11px; font-weight: 700; }
 .data-foundation-upload-form input[type="file"], .data-foundation-name-review input { width: 100%; min-height: 38px; padding: 8px; border: 1px solid #e2e4e8; border-radius: 7px; background: #fff; color: #555c66; font: inherit; font-size: 11px; }
 .data-foundation-upload-form button, .data-foundation-preview-actions button:last-child { border-color: #c92e2e; background: #d92f2f; color: #fff; }

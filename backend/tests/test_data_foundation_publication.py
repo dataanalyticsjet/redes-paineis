@@ -190,6 +190,7 @@ def _xlsx_bytes(
     *,
     execution_overrides: dict[str, object] | None = None,
     dictionary_status: str = "Confirmado",
+    include_execution_metadata: bool = True,
 ) -> bytes:
     def column_letters(index: int) -> str:
         result = ""
@@ -351,11 +352,10 @@ def _xlsx_bytes(
             }
             for field in dictionary_fields
         ]
-        sheets = [
-            ("Dados", data_headers, rows, data_kinds, [column.key for column in contract.columns]),
-            ("Execucoes", execution_headers, [execution_row], ["TEXT", "DATETIME", "INTEGER", "INTEGER", "TEXT", "TEXT", "DATE"], None),
-            ("Dicionario", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None),
-        ]
+        sheets = [("Dados", data_headers, rows, data_kinds, [column.key for column in contract.columns])]
+        if include_execution_metadata:
+            sheets.append(("Execucoes", execution_headers, [execution_row], ["TEXT", "DATETIME", "INTEGER", "INTEGER", "TEXT", "TEXT", "DATE"], None))
+        sheets.append(("Dicionario", dictionary_headers, dictionary_rows, ["TEXT"] * 4, None))
     else:
         headers = list(contract.headers)
         sheets = [(contract.sheet_name, headers, rows, [column.kind for column in contract.columns], [column.key for column in contract.columns])]
@@ -774,6 +774,51 @@ def test_no_movement_v2_parser_blocks_failed_execution_and_unconfirmed_dictionar
     assert unconfirmed.valid_row_count == 1
     assert unconfirmed.can_publish is False
     assert unconfirmed.error_counts["no_movement_dictionary_invalid"] == 1
+
+
+def test_no_movement_v2_missing_export_metadata_requires_and_audits_matrix_confirmation():
+    contract = CONTRACTS["no_movement"]
+    content = _xlsx_bytes(contract, [_snapshot_row("CODE-001", "Unidade sem mapeamento")], include_execution_metadata=False)
+    resolver = MappingResolver(map_version_id=b"0123456789abcdef")
+
+    missing = parse_workbook(content, contract, resolver)
+    assert missing.can_publish is False
+    assert missing.error_counts["no_movement_execution_metadata_missing"] == 1
+
+    confirmed_at = datetime(2026, 10, 26, 14, 2)
+    confirmed = parse_workbook(content, contract, resolver, manual_export_confirmation={
+        "export_date": date(2026, 10, 26),
+        "export_time": datetime(2026, 10, 26, 9, 15),
+        "confirmed_at": confirmed_at,
+        "user_id": 7,
+    })
+    assert confirmed.can_publish is True
+    assert confirmed.collection_date == date(2026, 10, 26)
+    assert confirmed.bot_executed_at == datetime(2026, 10, 26, 9, 15)
+    assert confirmed.export_metadata_confirmed_by_user_id == 7
+    assert confirmed.export_metadata_confirmed_at == confirmed_at
+
+    invalid_confirmation = parse_workbook(content, contract, resolver, manual_export_confirmation={
+        "export_date": date(2026, 10, 26),
+        "export_time": datetime(2026, 10, 26, 9, 15),
+        "user_id": 0,
+    })
+    assert invalid_confirmation.can_publish is False
+
+
+def test_no_movement_v2_trusted_bot_metadata_cannot_be_overridden_by_manual_confirmation():
+    contract = CONTRACTS["no_movement"]
+    content = _xlsx_bytes(contract, [_snapshot_row("CODE-001", "Base com metadados")])
+    summary = parse_workbook(content, contract, MappingResolver(map_version_id=b"0123456789abcdef"), manual_export_confirmation={
+        "export_date": date(2026, 1, 1),
+        "export_time": datetime(2026, 1, 1, 1),
+        "confirmed_at": datetime(2026, 1, 1, 2),
+        "user_id": 7,
+    })
+    assert summary.can_publish is True
+    assert summary.collection_date == date(2026, 10, 14)
+    assert summary.bot_executed_at == datetime(2026, 10, 14, 10, 0)
+    assert summary.export_metadata_confirmed_by_user_id is None
 
 
 def test_no_movement_v2_parser_blocks_execution_count_and_aging_mismatches():

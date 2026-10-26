@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import uuid
 import threading
 from contextlib import contextmanager
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator
 
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Connection, RowMapping
 
 from app.services.data_foundation.contracts import (
@@ -37,6 +39,8 @@ from app.services.data_foundation.xlsx_parser import (
     WorkbookValidationError,
     parse_workbook,
 )
+
+logger = logging.getLogger(__name__)
 
 
 FACT_TABLES = {
@@ -1141,7 +1145,25 @@ def publish_import_job(
             raise DataFoundationError("official_mapping_changed_repreview", 409)
         resolver = load_mapping_resolver(connection, source_id=source_id, map_version_id=map_version_id)
         content = read_staged_workbook(staging_directory, str(job["stored_file_key"]))
-        summary = parse_workbook(content, contract, resolver)
+        preview_manifest = read_preview_manifest(staging_directory, str(job["stored_file_key"])) or {}
+        manual_export_confirmation = None
+        if source_id == "no_movement" and preview_manifest.get("exportMetadataSource") == "ADMIN_CONFIRMATION":
+            try:
+                confirmer = int(preview_manifest["exportMetadataConfirmedByUserId"])
+                if confirmer != actor_user_id:
+                    raise ValueError("confirmation actor changed")
+                export_date = date.fromisoformat(str(preview_manifest["collectionDate"]))
+                export_time = datetime.fromisoformat(str(preview_manifest["botExecutedAt"]))
+                confirmed_at = datetime.fromisoformat(str(preview_manifest["exportMetadataConfirmedAt"]))
+                manual_export_confirmation = {
+                    "export_date": export_date,
+                    "export_time": export_time,
+                    "confirmed_at": confirmed_at,
+                    "user_id": confirmer,
+                }
+            except (KeyError, TypeError, ValueError):
+                raise DataFoundationError("no_movement_export_confirmation_invalid", 409) from None
+        summary = parse_workbook(content, contract, resolver, manual_export_confirmation=manual_export_confirmation)
         if summary.file_sha256 != bytes(job["file_sha256"]).hex():
             raise DataFoundationError("import_source_hash_mismatch", 409)
         if not summary.can_publish:
@@ -1283,11 +1305,52 @@ def publish_import_job(
                     "botExecutionId": summary.bot_execution_id,
                     "botExecutedAt": summary.bot_executed_at.isoformat(sep=" ") if summary.bot_executed_at else None,
                     "collectionDate": summary.collection_date.isoformat() if summary.collection_date else None,
+                    "exportMetadataSource": "ADMIN_CONFIRMATION" if summary.export_metadata_confirmed_by_user_id else "BOT_METADATA",
+                    "exportMetadataConfirmedByUserId": summary.export_metadata_confirmed_by_user_id,
+                    "exportMetadataConfirmedAt": summary.export_metadata_confirmed_at.isoformat(sep=" ") if summary.export_metadata_confirmed_at else None,
+                    "exportTimeZone": "America/Sao_Paulo",
                 } if source_id == "no_movement" else {}),
                 "idempotencyKeySha256": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
             },
         )
-        return {"publicationId": str(publication_uuid), "version": next_version, "reused": False}
+        if source_id == "no_movement" and contract.version == 2:
+            try:
+                with connection.begin_nested():
+                    connection.execute(text("""
+                        INSERT INTO no_movement_operational_analyses
+                          (analysis_id, source_id, publication_id, publication_version, contract_version,
+                           map_version_id, operational_date, export_time_local, export_time_zone,
+                           export_time_source, confirmation_user_id, confirmed_at, analysis_state, rules_version)
+                        VALUES
+                          (:analysis_id, :source_id, :publication_id, :publication_version, :contract_version,
+                           :map_version_id, :operational_date, :export_time_local, 'America/Sao_Paulo',
+                           :export_time_source, :confirmation_user_id, :confirmed_at, 'PENDING', 'v1')
+                    """), {
+                        "analysis_id": uuid.uuid4().bytes,
+                        "source_id": source_id,
+                        "publication_id": publication_id,
+                        "publication_version": next_version,
+                        "contract_version": contract.version,
+                        "map_version_id": map_version_id,
+                        "operational_date": summary.collection_date,
+                        "export_time_local": summary.bot_executed_at,
+                        "export_time_source": "ADMIN_CONFIRMATION" if summary.export_metadata_confirmed_by_user_id else "BOT_METADATA" if summary.bot_executed_at else "UNKNOWN",
+                        "confirmation_user_id": summary.export_metadata_confirmed_by_user_id,
+                        "confirmed_at": summary.export_metadata_confirmed_at,
+                    })
+            except SQLAlchemyError:
+                # The sidecar analysis schema is manually provisioned. Its absence
+                # or failure must never roll back a valid source publication.
+                logger.exception("Unable to enqueue no-movement operational analysis")
+        publication_result: dict[str, object] = {
+            "publicationId": str(publication_uuid), "version": next_version, "reused": False,
+        }
+        if source_id == "no_movement":
+            publication_result.update({
+                "exportMetadataConfirmedByUserId": summary.export_metadata_confirmed_by_user_id,
+                "exportMetadataConfirmedAt": summary.export_metadata_confirmed_at.isoformat(sep=" ") if summary.export_metadata_confirmed_at else None,
+            })
+        return publication_result
 
 
 def _summary_from_preview_manifest(payload: dict[str, object]) -> PreviewSummary:
@@ -2095,10 +2158,26 @@ def validate_job_again(
             connection, source_id=source_id
         )
     content = read_staged_workbook(staging_directory, str(job["stored_file_key"]))
-    summary = parse_workbook(content, contract, resolver)
+    manual_export_confirmation = None
+    preview_manifest = read_preview_manifest(staging_directory, str(job["stored_file_key"])) or {}
+    if source_id == "no_movement" and preview_manifest.get("exportMetadataSource") == "ADMIN_CONFIRMATION":
+        try:
+            confirmer = int(preview_manifest["exportMetadataConfirmedByUserId"])
+            if confirmer != actor_user_id:
+                raise ValueError("confirmation actor changed")
+            manual_export_confirmation = {
+                "export_date": date.fromisoformat(str(preview_manifest["collectionDate"])),
+                "export_time": datetime.fromisoformat(str(preview_manifest["botExecutedAt"])),
+                "confirmed_at": datetime.fromisoformat(str(preview_manifest["exportMetadataConfirmedAt"])),
+                "user_id": confirmer,
+            }
+        except (KeyError, TypeError, ValueError):
+            raise DataFoundationError("no_movement_export_confirmation_invalid", 409) from None
+    summary = parse_workbook(content, contract, resolver, manual_export_confirmation=manual_export_confirmation)
     if summary.file_sha256 != bytes(job["file_sha256"]).hex():
         raise DataFoundationError("import_source_hash_mismatch", 409)
     summary.map_version_id = resolver.map_version_id
+    write_preview_manifest(staging_directory, str(job["stored_file_key"]), summary.as_api_dict())
     with engine.begin() as connection:
         connection.execute(text("""
             DELETE FROM import_job_errors WHERE job_id = :job_id

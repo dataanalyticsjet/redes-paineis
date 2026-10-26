@@ -3,6 +3,7 @@
 import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revision.ts";
 
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
+import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
 
 import { AssistantHome } from "../home/assistant-home";
 import { DataFoundationAdmin } from "../data-foundation/data-foundation-admin";
@@ -7861,6 +7862,9 @@ export function DashboardApp() {
                   setNoMovementRetryCount((value) => value + 1);
                 } : undefined} /> : null}
               {noMovementV2Diagnostic}
+              {viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization ? (
+                <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
+              ) : null}
               {noMovementHasPublishedRecords ? dashboardActionBand : null}
 
               {noMovementV2State.status === "error" && noMovementV2State.error ? (
