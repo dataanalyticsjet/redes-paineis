@@ -1006,6 +1006,22 @@ label[for]:focus-visible {
   gap: 6px;
 }
 
+.filter-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-toggle-button > svg {
+  transition: transform 150ms ease;
+}
+
+.filter-toggle-button > svg.is-expanded {
+  transform: rotate(180deg);
+}
+
 .reset-button:hover:not(:disabled) {
   border-color: #efb0b0;
   color: var(--jnt-red);
@@ -4752,6 +4768,35 @@ tbody tr:hover td {
     display: none !important;
   }
 
+  .dashboard-main-taxa-v2 .taxa-v3-print-heading {
+    display: block !important;
+    margin: 0 0 8px;
+    color: #20232a;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v3-print-heading h1 {
+    margin: 0 0 3px;
+    font-size: 16px;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v3-print-heading p {
+    margin: 0;
+    font-size: 10px;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-v2-filter-content[hidden] {
+    display: block !important;
+  }
+
+  .dashboard-main-taxa-v2 .taxa-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .dashboard-main-taxa-v2 .filter-card-actions,
+  .dashboard-main-taxa-v2 .dashboard-action-buttons {
+    display: none !important;
+  }
+
   .filter-summary {
     margin-top: 6px;
     padding-top: 5px;
@@ -5489,6 +5534,10 @@ tbody tr:hover td {
   letter-spacing: -0.035em;
 }
 
+.taxa-v3-print-heading {
+  display: none;
+}
+
 .dashboard-main-taxa-v2 .filters-card-top h2 { font-weight: 600; }
 .dashboard-main-taxa-v2 .card-heading h2 { font-weight: 650; letter-spacing: -0.015em; }
 .dashboard-main-taxa-v2 .card-eyebrow { font-weight: 650; }
@@ -5499,8 +5548,33 @@ tbody tr:hover td {
   overflow: visible;
 }
 
+.dashboard-main-taxa-v2 .taxa-filters-card:focus-within {
+  z-index: 120;
+}
+
 .dashboard-main-taxa-v2 .taxa-filters-card .multi-select[open] {
   z-index: 110;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-filter-content[hidden] {
+  display: none !important;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-filter-content .multi-select[data-popover-align="left"] .multi-select-popover {
+  right: auto;
+  left: 0;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-filter-content .multi-select[data-popover-align="right"] .multi-select-popover {
+  right: 0;
+  left: auto;
+}
+
+.dashboard-main-taxa-v2 .taxa-v2-filter-content .multi-select-popover {
+  width: min(max(100%, 320px), calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: min(72dvh, 520px);
+  overflow: hidden;
 }
 
 .dashboard-main-taxa-v2 .taxa-v2-summary-grid > .chart-card,
@@ -6955,6 +7029,7 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
   .dashboard-action-info { justify-content: space-between; }
   .dashboard-action-buttons { justify-content: flex-start; }
   .dashboard-action-buttons button { flex: 1 1 auto; }
+  .dashboard-main-taxa-v2 .filter-card-actions { width: 100%; justify-content: flex-start; }
 }
 
 @media (max-width: 480px) {

@@ -1976,7 +1976,17 @@ interface MultiSelectProps {
   disabled?: boolean;
   disabledLabel?: string;
   disabledReason?: string;
+  exclusiveGroup?: string;
   t: DashboardTranslator;
+}
+
+function positionMultiSelectPopover(element: HTMLDetailsElement): void {
+  if (typeof window === "undefined") return;
+  const bounds = element.getBoundingClientRect();
+  const popoverWidth = Math.min(Math.max(bounds.width, 320), Math.max(0, window.innerWidth - 32));
+  const fitsLeft = bounds.left + popoverWidth <= window.innerWidth - 16;
+  const fitsRight = bounds.right - popoverWidth >= 16;
+  element.dataset.popoverAlign = fitsLeft || !fitsRight ? "left" : "right";
 }
 
 function MultiSelect({
@@ -1994,9 +2004,11 @@ function MultiSelect({
   disabled = false,
   disabledLabel,
   disabledReason,
+  exclusiveGroup,
   t,
 }: MultiSelectProps) {
   const [query, setQuery] = useState("");
+  const detailsRef = useRef<HTMLDetailsElement>(null);
   const allSelected = allOptionsAreSelected(options, selected);
   const selectedLabel = disabled && disabledLabel ? disabledLabel : allSelected
     ? allLabel
@@ -2016,17 +2028,59 @@ function MultiSelect({
     onChange(next);
   };
 
+  useEffect(() => {
+    if (!exclusiveGroup) return undefined;
+    const closeOtherMenus = (event: Event) => {
+      const detail = (event as CustomEvent<{ group: string; element: HTMLDetailsElement }>).detail;
+      if (detail?.group === exclusiveGroup && detail.element !== detailsRef.current && detailsRef.current) {
+        detailsRef.current.open = false;
+      }
+    };
+    const closeOutside = (event: PointerEvent) => {
+      if (detailsRef.current?.open && !detailsRef.current.contains(event.target as Node)) {
+        detailsRef.current.open = false;
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && detailsRef.current?.open) {
+        detailsRef.current.open = false;
+        detailsRef.current.querySelector("summary")?.focus();
+      }
+    };
+    const repositionOpenMenu = () => {
+      if (detailsRef.current?.open) positionMultiSelectPopover(detailsRef.current);
+    };
+    document.addEventListener("dashboard-multiselect-open", closeOtherMenus);
+    document.addEventListener("pointerdown", closeOutside, true);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", repositionOpenMenu);
+    return () => {
+      document.removeEventListener("dashboard-multiselect-open", closeOtherMenus);
+      document.removeEventListener("pointerdown", closeOutside, true);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", repositionOpenMenu);
+    };
+  }, [exclusiveGroup]);
+
   return (
     <div className="filter-field">
       <span className="filter-label">{label}</span>
       <details
+        ref={detailsRef}
         className="multi-select"
         aria-disabled={disabled || undefined}
         title={disabled ? disabledReason : undefined}
         style={disabled ? { opacity: 0.65, cursor: "not-allowed" } : undefined}
-        onToggle={resetSearchOnOpen ? (event) => {
-          if (event.currentTarget.open) setQuery("");
-        } : undefined}
+        onToggle={(event) => {
+          if (!event.currentTarget.open) return;
+          if (resetSearchOnOpen) setQuery("");
+          if (exclusiveGroup) {
+            positionMultiSelectPopover(event.currentTarget);
+            document.dispatchEvent(new CustomEvent("dashboard-multiselect-open", {
+              detail: { group: exclusiveGroup, element: event.currentTarget },
+            }));
+          }
+        }}
       >
         <summary
           aria-disabled={disabled || undefined}
@@ -2936,11 +2990,9 @@ export function DashboardApp() {
   const [monitoringV2RetryKey, setMonitoringV2RetryKey] = useState(0);
   const [collectionRateV2State, setCollectionRateV2State] = useState(() => {
     const yesterday = yesterdayInSaoPaulo();
-    const today = new Date(`${yesterday}T12:00:00.000Z`);
-    today.setUTCDate(today.getUTCDate() + 1);
     return {
       status: "idle" as "idle" | "loading" | "ready" | "empty" | "error",
-      period: { dateFrom: `${yesterday.slice(0, 7)}-01`, dateTo: today.toISOString().slice(0, 10) },
+      period: { dateFrom: yesterday, dateTo: yesterday },
       loadedPeriod: null as { dateFrom: string; dateTo: string } | null,
       records: [] as CollectionRateV3Record[],
       progress: { loaded: 0, total: 0, stage: "records" as "records" | "validation" },
@@ -2981,6 +3033,7 @@ export function DashboardApp() {
   const [taxaSelectedRegions, setTaxaSelectedRegions] = useState<Set<string>>(new Set());
   const [taxaSelectedOrigins, setTaxaSelectedOrigins] = useState<Set<string>>(new Set());
   const [taxaV2Filters, setTaxaV2Filters] = useState<CollectionRateV3Filters>({});
+  const [taxaV2FiltersExpanded, setTaxaV2FiltersExpanded] = useState(false);
   const [taxaV2TableQuery, setTaxaV2TableQuery] = useState("");
   const [taxaV2Page, setTaxaV2Page] = useState(1);
   const [taxaRmAreaSelection, setTaxaRmAreaSelection] = useState<OptionSelection>({ mode: "all" });
@@ -9066,16 +9119,37 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   {collectionRateV2State.publishedAt ? <span><Layers3 size={16} /> {t("Publicação mais recente usada: {date}", { date: formatDateTime(collectionRateV2State.publishedAt) })}</span> : null}
                 </div>
               </section>
+              <div className="taxa-v3-print-heading">
+                <h1>{t("Taxa de coleta V3")}</h1>
+                <p>{t("Período:")} {collectionRateV2State.period.dateFrom || "—"} a {collectionRateV2State.period.dateTo || "—"}</p>
+              </div>
+              {dashboardActionBand}
               <section className="filters-card taxa-filters-card" aria-labelledby="taxa-v2-filters-heading">
                 <div className="filters-card-top">
                   <div>
                     <h2 id="taxa-v2-filters-heading"><Filter size={18} /> {t("Filtros operacionais")}</h2>
                     <p>{t("A consulta busca somente as datas selecionadas na publicação vigente; os demais filtros refinam o mesmo conjunto recebido.")}</p>
                   </div>
-                  <button
-                    type="button"
-                    className="reset-button"
-                    onClick={() => {
+                  <div className="filter-card-actions">
+                    <button
+                      type="button"
+                      className="reset-button filter-toggle-button"
+                      aria-expanded={taxaV2FiltersExpanded}
+                      aria-controls="taxa-v2-filter-content"
+                      onClick={() => {
+                        if (taxaV2FiltersExpanded) {
+                          document.querySelectorAll<HTMLDetailsElement>("#taxa-v2-filter-content details[open]").forEach((menu) => { menu.open = false; });
+                        }
+                        setTaxaV2FiltersExpanded((expanded) => !expanded);
+                      }}
+                    >
+                      <ChevronDown size={15} className={taxaV2FiltersExpanded ? "is-expanded" : ""} />
+                      {t(taxaV2FiltersExpanded ? "Recolher filtros" : "Expandir filtros")}
+                    </button>
+                    <button
+                      type="button"
+                      className="reset-button"
+                      onClick={() => {
                       const yesterday = yesterdayInSaoPaulo();
                       setTaxaV2Filters({});
                       setTaxaV2TableQuery("");
@@ -9087,11 +9161,13 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                         error: current.period.dateFrom !== yesterday || current.period.dateTo !== yesterday ? null : current.error,
                         period: { dateFrom: yesterday, dateTo: yesterday },
                       }));
-                    }}
-                  >
-                    <RotateCcw size={15} /> {t("Limpar filtros")}
-                  </button>
+                      }}
+                    >
+                      <RotateCcw size={15} /> {t("Limpar filtros")}
+                    </button>
+                  </div>
                 </div>
+                <div id="taxa-v2-filter-content" className="taxa-v2-filter-content" hidden={!taxaV2FiltersExpanded}>
                 <div className="filter-grid taxa-filter-grid">
                   <MultiSelect
                     label={t("Regional")}
@@ -9102,6 +9178,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("regional")}
                     plural={t("regionais")}
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9113,6 +9190,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular="RM"
                     plural="RM"
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9124,6 +9202,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular="RGM"
                     plural="RGM"
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9135,6 +9214,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("região do RM")}
                     plural={t("regiões do RM")}
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9146,6 +9226,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("base")}
                     plural={t("bases")}
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <div className="filter-field date-field">
@@ -9208,6 +9289,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("origem")}
                     plural={t("origens")}
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9219,6 +9301,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("tipo")}
                     plural={t("tipos")}
                     searchable
+                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                 </div>
@@ -9245,6 +9328,7 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                   {collectionRateV2State.status === "empty" ? <span>{t(collectionRateV2State.error ?? "Sem dados publicados para a data selecionada")}</span> : null}
                   {collectionRateV2State.status === "error" && collectionRateV2State.error ? <span>{t(collectionRateV2State.error)}</span> : null}
                   {collectionRateV2State.latestDayMayBeIncomplete ? <span className="quality-warning">{t("O último dia publicado pode estar incompleto; os valores exibidos não foram ajustados.")}</span> : null}
+                </div>
                 </div>
               </section>
               {taxaV2HasPreviousData ? <DashboardLoadingSkeleton compact t={t}
