@@ -151,6 +151,13 @@ def _require_metadata_feature() -> None:
         raise HTTPException(status_code=503, detail="data_foundation_v2_disabled")
 
 
+def _no_movement_report_staging_directory() -> Path:
+    directory = get_settings().data_import_staging_directory
+    if directory is None:
+        raise HTTPException(status_code=503, detail="no_movement_report_artifact_storage_unavailable")
+    return directory
+
+
 def _require_bot_publishing() -> None:
     settings = get_settings()
     if not settings.data_bot_publishing_enabled or not settings.data_import_enabled:
@@ -1348,6 +1355,7 @@ def no_movement_feishu_report_prepare(
         return prepare_no_movement_feishu_report(
             _engine(), publication_id=payload.publication_id, region_code=payload.region_code,
             recipient_key=payload.recipient_key, actor_user_id=admin.user.id,
+            staging_directory=_no_movement_report_staging_directory(),
         )
     except NoMovementFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
@@ -1388,6 +1396,7 @@ def no_movement_feishu_report_send(
     try:
         return send_no_movement_feishu_report(
             _engine(), report_id=report_id, actor_user_id=admin.user.id,
+            staging_directory=_no_movement_report_staging_directory(),
         )
     except NoMovementFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None

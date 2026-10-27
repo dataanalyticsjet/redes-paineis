@@ -1,3 +1,4 @@
+import hashlib
 from datetime import date, datetime, timezone
 from io import BytesIO
 
@@ -15,9 +16,13 @@ from app.services.no_movement_feishu_reports import (
     _feishu_payload,
     _make_png,
     _make_xlsx,
+    _read_prepared_artifact,
+    _remove_prepared_artifacts,
+    _store_prepared_artifacts,
     _recipient_key,
     _utc_now,
     confirm_report,
+    prepare_report,
     send_report,
 )
 from app.services.no_movement_operational_analysis import build_bilingual_analysis
@@ -198,6 +203,231 @@ def test_real_xlsx_and_png_generation_preserves_contract_rows_and_regional_scope
         rgb = image.convert("RGB")
         assert rgb.getpixel((900, 260)) == (255, 255, 255)
         assert any(color == (230, 0, 18) for _, color in rgb.getcolors(maxcolors=1_200_000) or [])
+
+
+def test_repeated_sps_xlsx_and_png_generation_is_byte_stable_for_same_input():
+    contract = get_contract("no_movement", 2)
+    row = {column.key: None for column in contract.columns}
+    row.update({
+        "source_row_no": 1, "source_base_code": "001", "source_base_name": "Base SPS",
+        "stopped_orders": 12, "stopped_over_7_days": 6, "stopped_over_14_days": 3,
+        "stopped_over_30_days": 1, "resolved_base_code": "001", "mapped_region": "SPS",
+        "mapped_base_name": "Base SPS", "mapped_rm": "Responsável fictício",
+    })
+    publication = {
+        "period_start": date(2026, 10, 26),
+        "snapshot_as_of": datetime(2026, 10, 26, 9, 15),
+        "version_no": 12,
+    }
+    first_xlsx = _make_xlsx([row], region_code="SPS", operational_date=publication["period_start"])[1]
+    second_xlsx = _make_xlsx([row], region_code="SPS", operational_date=publication["period_start"])[1]
+    first_png = _make_png([row], region_code="SPS", publication=publication, total=12)
+    second_png = _make_png([row], region_code="SPS", publication=publication, total=12)
+    assert first_xlsx == second_xlsx
+    assert first_png == second_png
+    changed_row = {**row, "stopped_orders": 13}
+    changed_xlsx = _make_xlsx([changed_row], region_code="SPS", operational_date=publication["period_start"])[1]
+    changed_png = _make_png([row], region_code="SPS", publication=publication, total=13)
+    assert hashlib.sha256(first_xlsx).digest() != hashlib.sha256(changed_xlsx).digest()
+    assert hashlib.sha256(first_png).digest() != hashlib.sha256(changed_png).digest()
+
+
+def test_prepared_sps_artifacts_are_reused_and_real_changes_or_tampering_are_rejected(tmp_path):
+    import hashlib
+    import uuid
+
+    report_id = uuid.uuid4()
+    xlsx = b"xlsx bytes prepared for SPS"
+    png = b"png bytes prepared for SPS"
+    _store_prepared_artifacts(tmp_path, report_id, xlsx, png)
+    assert _read_prepared_artifact(tmp_path, report_id, "xlsx", hashlib.sha256(xlsx).hexdigest()) == xlsx
+    assert _read_prepared_artifact(tmp_path, report_id, "png", hashlib.sha256(png).hexdigest()) == png
+
+    changed_xlsx_path = tmp_path / ".no-movement-feishu-reports" / f"{report_id.hex}.xlsx"
+    changed_xlsx_path.write_bytes(b"tampered xlsx")
+    with pytest.raises(NoMovementFeishuReportError) as xlsx_error:
+        _read_prepared_artifact(tmp_path, report_id, "xlsx", hashlib.sha256(xlsx).hexdigest())
+    assert xlsx_error.value.code == "no_movement_report_artifacts_changed"
+
+    changed_png_path = tmp_path / ".no-movement-feishu-reports" / f"{report_id.hex}.png"
+    changed_png_path.write_bytes(b"tampered png")
+    with pytest.raises(NoMovementFeishuReportError) as png_error:
+        _read_prepared_artifact(tmp_path, report_id, "png", hashlib.sha256(png).hexdigest())
+    assert png_error.value.code == "no_movement_report_artifacts_changed"
+    _remove_prepared_artifacts(tmp_path, report_id)
+    assert not changed_xlsx_path.exists() and not changed_png_path.exists()
+
+
+def test_prepare_and_confirm_sps_persists_exact_text_and_immutable_attachment_hashes(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import uuid
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE no_movement_feishu_reports (
+                report_id BLOB PRIMARY KEY, source_id TEXT, publication_id BLOB,
+                publication_version INTEGER, contract_version INTEGER, map_version_id BLOB,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
+                analysis_text TEXT, interpretation TEXT, comments TEXT, recommendations TEXT,
+                record_count INTEGER, total_stopped_orders INTEGER, dataset_sha256 BLOB,
+                rules_version TEXT, report_state TEXT, delivery_context TEXT,
+                created_at DATETIME, updated_at DATETIME, confirmed_at DATETIME, sent_at DATETIME
+            )
+        """)
+
+    publication_id = uuid.uuid4()
+    map_version_id = uuid.uuid4()
+    publication = {
+        "publication_id": publication_id.bytes, "version_no": 12, "contract_version": 2,
+        "map_version_id": map_version_id.bytes, "period_start": date(2026, 10, 26),
+        "snapshot_as_of": datetime(2026, 10, 26, 9, 15), "publication_state": "PUBLISHED",
+    }
+    xlsx, png = b"prepared SPS xlsx", b"prepared SPS png"
+    payload = {
+        "publication": publication, "regionCode": "SPS", "rows": [{"resolved_base_code": "001", "mapped_region": "SPS"}],
+        "message": "Análise SPS original", "recordCount": 1, "total": 12,
+        "datasetDigest": b"d" * 32, "fileName": "sem_movimentacao_SPS_2026-10-26.xlsx",
+        "xlsx": xlsx, "png": png, "regions": ["SPS"],
+    }
+    monkeypatch.setattr("app.services.no_movement_feishu_reports._report_payload", lambda *args, **kwargs: payload)
+    monkeypatch.setattr("app.services.no_movement_feishu_reports._current_publication", lambda *args, **kwargs: publication)
+
+    prepared = prepare_report(
+        engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
+        actor_user_id=7, staging_directory=tmp_path,
+    )
+    report_uuid = uuid.UUID(prepared["reportId"])
+    assert prepared["regionCode"] == "SPS"
+    assert (tmp_path / ".no-movement-feishu-reports" / f"{report_uuid.hex}.xlsx").read_bytes() == xlsx
+    assert (tmp_path / ".no-movement-feishu-reports" / f"{report_uuid.hex}.png").read_bytes() == png
+
+    edited = "Análise SPS editada e confirmada — texto exato"
+    confirm_report(engine, report_id=prepared["reportId"], actor_user_id=7, analysis_text=edited)
+    with engine.connect() as connection:
+        stored = connection.execute(text("SELECT analysis_text, report_state, delivery_context FROM no_movement_feishu_reports")).one()
+    context = json.loads(stored.delivery_context)
+    assert stored.analysis_text == edited and stored.report_state == "CONFIRMED"
+    assert context["artifacts"] == {
+        "xlsxSha256": hashlib.sha256(xlsx).hexdigest(),
+        "pngSha256": hashlib.sha256(png).hexdigest(),
+    }
+
+
+def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_regeneration(tmp_path, monkeypatch):
+    import uuid
+
+    from app.services import no_movement_feishu_reports as service
+
+    engine = create_engine("sqlite://")
+    publication_id, map_version_id = uuid.uuid4(), uuid.uuid4()
+    publication = {
+        "publication_id": publication_id.bytes, "version_no": 12, "contract_version": 2,
+        "map_version_id": map_version_id.bytes, "period_start": date(2026, 10, 26),
+        "snapshot_as_of": datetime(2026, 10, 26, 9, 15), "publication_state": "PUBLISHED",
+    }
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE no_movement_feishu_reports (
+                report_id BLOB PRIMARY KEY, source_id TEXT, publication_id BLOB,
+                publication_version INTEGER, contract_version INTEGER, map_version_id BLOB,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
+                analysis_text TEXT, interpretation TEXT, comments TEXT, recommendations TEXT,
+                record_count INTEGER, total_stopped_orders INTEGER, dataset_sha256 BLOB,
+                rules_version TEXT, report_state TEXT, delivery_context TEXT,
+                created_at DATETIME, updated_at DATETIME, confirmed_at DATETIME, sent_at DATETIME
+            )
+        """)
+        connection.exec_driver_sql("CREATE TABLE source_snapshot_head (source_id TEXT, publication_id BLOB)")
+        connection.exec_driver_sql("""
+            CREATE TABLE source_publications (
+                source_id TEXT, publication_id BLOB, version_no INTEGER, contract_version INTEGER,
+                map_version_id BLOB, period_start DATE, snapshot_as_of DATETIME, publication_state TEXT
+            )
+        """)
+        connection.execute(text("INSERT INTO source_snapshot_head VALUES ('no_movement', :publication_id)"), {"publication_id": publication_id.bytes})
+        connection.execute(text("""
+            INSERT INTO source_publications VALUES
+            ('no_movement', :publication_id, 12, 2, :map_id, :period_start, :snapshot_as_of, 'PUBLISHED')
+        """), {"publication_id": publication_id.bytes, "map_id": map_version_id.bytes,
+              "period_start": publication["period_start"], "snapshot_as_of": publication["snapshot_as_of"]})
+
+    xlsx, png = b"confirmed SPS workbook bytes", b"confirmed SPS image bytes"
+    digest = b"d" * 32
+    payload = {
+        "publication": publication, "regionCode": "SPS", "rows": [{"resolved_base_code": "001", "mapped_region": "SPS"}],
+        "message": "Original analysis", "recordCount": 1, "total": 12, "datasetDigest": digest,
+        "fileName": "sem_movimentacao_SPS_2026-10-26.xlsx", "xlsx": xlsx, "png": png, "regions": ["SPS"],
+    }
+    include_artifact_calls = []
+
+    def report_payload(*args, include_artifacts=True, **kwargs):
+        include_artifact_calls.append(include_artifacts)
+        return {**payload, "xlsx": xlsx if include_artifacts else None, "png": png if include_artifacts else None}
+
+    monkeypatch.setattr(service, "_report_payload", report_payload)
+    monkeypatch.setattr(service, "_current_publication", lambda *args, **kwargs: publication)
+    prepared = prepare_report(
+        engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
+        actor_user_id=7, staging_directory=tmp_path,
+    )
+    edited = "Texto SPS confirmado; enviar exatamente este conteudo"
+    confirm_report(engine, report_id=prepared["reportId"], actor_user_id=7, analysis_text=edited)
+    settings = Settings(feishu_no_movement_pilot_enabled=True, feishu_oauth_app_id="fake", feishu_oauth_app_secret="fake")
+    replaced_publication_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE source_snapshot_head SET publication_id=:new_id"), {"new_id": replaced_publication_id.bytes})
+    with pytest.raises(NoMovementFeishuReportError) as replaced_error:
+        send_report(engine, report_id=prepared["reportId"], actor_user_id=7, staging_directory=tmp_path, settings=settings)
+    assert replaced_error.value.code == "no_movement_publication_not_current"
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE source_snapshot_head SET publication_id=:old_id"), {"old_id": publication_id.bytes})
+    captured = {"uploads": {}, "messages": []}
+
+    class FakeClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, **kwargs):
+            if url == service.TOKEN_URL:
+                return _response(200, {"code": 0, "tenant_access_token": "test-token"})
+            if url == service.FILES_URL:
+                captured["uploads"]["xlsx"] = kwargs["files"]["file"][1].read()
+                return _response(200, {"code": 0, "data": {"file_key": "fake-file-key"}})
+            if url == service.IMAGES_URL:
+                captured["uploads"]["png"] = kwargs["files"]["image"][1].read()
+                return _response(200, {"code": 0, "data": {"image_key": "fake-image-key"}})
+            if url == service.MESSAGE_URL:
+                body = kwargs["json"]
+                captured["messages"].append(body)
+                return _response(200, {"code": 0, "data": {"message_id": f"message-{len(captured['messages'])}"}})
+            raise AssertionError(f"Unexpected HTTP endpoint: {url}")
+
+    monkeypatch.setattr(service.httpx, "Client", FakeClient)
+    result = send_report(
+        engine, report_id=prepared["reportId"], actor_user_id=7, staging_directory=tmp_path,
+        settings=settings,
+    )
+    assert result["state"] == "SENT"
+    assert include_artifact_calls == [True, False]
+    assert captured["uploads"] == {"xlsx": xlsx, "png": png}
+    import json
+    assert json.loads(captured["messages"][0]["content"]) == {"text": edited}
+    assert not (tmp_path / ".no-movement-feishu-reports" / f"{uuid.UUID(prepared['reportId']).hex}.xlsx").exists()
+    with pytest.raises(NoMovementFeishuReportError) as duplicate_error:
+        prepare_report(
+            engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
+            actor_user_id=7, staging_directory=tmp_path,
+        )
+    assert duplicate_error.value.code == "no_movement_report_delivery_unresolved"
+    assert list((tmp_path / ".no-movement-feishu-reports").iterdir()) == []
 
 
 def test_mysql_datetime_values_are_created_as_naive_utc():

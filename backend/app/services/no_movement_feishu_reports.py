@@ -7,21 +7,25 @@ publication's pinned DoomsDay version. No publication hook calls this module.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import json
 import logging
+import os
 import re
+import stat
 import uuid
 import zipfile
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
 from sqlalchemy import Connection, Engine, text
 
-from app.core.config import Settings, get_settings
+from app.core.config import PROJECT_ROOT, Settings, get_settings
 from app.services.data_foundation.contracts import get_contract
 from app.services.feishu_publication_notifications import RECIPIENT_EMAIL
 from app.services.no_movement_operational_analysis import build_bilingual_analysis
@@ -69,6 +73,78 @@ def _uuid_bytes(value: str) -> bytes:
         return uuid.UUID(value).bytes
     except (ValueError, TypeError, AttributeError):
         raise NoMovementFeishuReportError("no_movement_report_id_invalid", 422) from None
+
+
+def _artifact_directory(staging_directory: Path) -> Path:
+    root = staging_directory.expanduser().resolve()
+    if not root.is_absolute() or root.is_relative_to(PROJECT_ROOT.resolve()):
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503)
+    directory = root / ".no-movement-feishu-reports"
+    if directory.is_symlink():
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = directory.resolve()
+    try:
+        directory.relative_to(root)
+    except ValueError:
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503) from None
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503) from None
+    return directory
+
+
+def _artifact_path(staging_directory: Path, report_id: uuid.UUID, extension: str) -> Path:
+    if extension not in {"xlsx", "png"}:
+        raise NoMovementFeishuReportError("no_movement_report_artifact_invalid", 409)
+    return _artifact_directory(staging_directory) / f"{report_id.hex}.{extension}"
+
+
+def _store_prepared_artifacts(staging_directory: Path, report_id: uuid.UUID, xlsx: bytes, png: bytes) -> None:
+    if any(not content or len(content) > MAX_FILE_BYTES for content in (xlsx, png)):
+        raise NoMovementFeishuReportError("no_movement_report_artifact_size_invalid", 413)
+    try:
+        for extension, content in (("xlsx", xlsx), ("png", png)):
+            path = _artifact_path(staging_directory, report_id, extension)
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as artifact:
+                artifact.write(content)
+                artifact.flush()
+                os.fsync(artifact.fileno())
+            path.chmod(0o600)
+    except Exception:
+        _remove_prepared_artifacts(staging_directory, report_id)
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503) from None
+
+
+def _remove_prepared_artifacts(staging_directory: Path, report_id: uuid.UUID) -> None:
+    try:
+        for extension in ("xlsx", "png"):
+            path = _artifact_path(staging_directory, report_id, extension)
+            if not path.is_symlink():
+                path.unlink(missing_ok=True)
+    except (OSError, NoMovementFeishuReportError):
+        logger.warning("Unable to remove private Sem Movimentacao report artifacts")
+
+
+def _read_prepared_artifact(
+    staging_directory: Path, report_id: uuid.UUID, extension: str, expected_sha256: object,
+) -> bytes:
+    path = _artifact_path(staging_directory, report_id, extension)
+    try:
+        if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+            raise OSError("artifact is not a regular file")
+        if path.stat().st_size <= 0 or path.stat().st_size > MAX_FILE_BYTES:
+            raise OSError("artifact size invalid")
+        content = path.read_bytes()
+    except OSError:
+        raise NoMovementFeishuReportError("no_movement_report_artifacts_changed", 409) from None
+    if not isinstance(expected_sha256, str) or not hmac.compare_digest(
+        hashlib.sha256(content).hexdigest(), expected_sha256,
+    ):
+        raise NoMovementFeishuReportError("no_movement_report_artifacts_changed", 409)
+    return content
 
 
 @contextmanager
@@ -335,7 +411,10 @@ def _make_png(rows: list[dict[str, Any]], *, region_code: str | None, publicatio
     return content
 
 
-def _report_payload(engine: Engine, *, publication_id: str, region_code: str | None, connection: Connection | None = None) -> dict[str, Any]:
+def _report_payload(
+    engine: Engine, *, publication_id: str, region_code: str | None,
+    connection: Connection | None = None, include_artifacts: bool = True,
+) -> dict[str, Any]:
     publication = _current_publication(engine, publication_id, connection)
     map_id = bytes(publication["map_version_id"])
     regions = _region_names(engine, map_id, connection)
@@ -349,8 +428,12 @@ def _report_payload(engine: Engine, *, publication_id: str, region_code: str | N
     digest = _dataset_digest(rows, columns, map_id)
     message, total = _analysis(publication, rows, region_code)
     operational_date = publication["period_start"]
-    file_name, xlsx = _make_xlsx(rows, region_code=region_code, operational_date=operational_date)
-    png = _make_png(rows, region_code=region_code, publication=publication, total=total)
+    region_name = re.sub(r"[^A-Za-z0-9_-]+", "_", region_code or "nacional").strip("_") or "regional"
+    file_name = f"sem_movimentacao_{region_name}_{operational_date.isoformat()}.xlsx"
+    xlsx = png = None
+    if include_artifacts:
+        file_name, xlsx = _make_xlsx(rows, region_code=region_code, operational_date=operational_date)
+        png = _make_png(rows, region_code=region_code, publication=publication, total=total)
     return {
         "publication": publication, "regionCode": region_code, "rows": rows,
         "message": message, "recordCount": len(rows), "total": total,
@@ -371,63 +454,83 @@ def prepare_report(
     region_code: str | None,
     recipient_key: str,
     actor_user_id: int,
+    staging_directory: Path,
 ) -> dict[str, object]:
     _recipient_key(recipient_key)
     payload = _report_payload(engine, publication_id=publication_id, region_code=region_code)
     report_id = uuid.uuid4()
     now = _utc_now()
     context = {"xlsxSha256": hashlib.sha256(payload["xlsx"]).hexdigest(), "pngSha256": hashlib.sha256(payload["png"]).hexdigest()}
-    with engine.begin() as connection:
-        connection.execute(text("""
-            UPDATE no_movement_feishu_reports
-            SET report_state='SUPERSEDED', updated_at=:updated_at
-            WHERE actor_user_id=:actor_user_id AND publication_id=:publication_id
-              AND recipient_key=:recipient_key
-              AND report_state IN ('PREPARED','CONFIRMED')
-        """), {
-            "actor_user_id": actor_user_id,
-            "publication_id": bytes(payload["publication"]["publication_id"]),
-            "recipient_key": recipient_key,
-            "updated_at": now,
-        })
-        delivery_in_progress = connection.execute(text("""
-            SELECT report_id FROM no_movement_feishu_reports
-            WHERE publication_id=:publication_id AND region_key=:region_key
-              AND recipient_key=:recipient_key AND rules_version=:rules_version
-              AND report_state IN ('SENDING','PARTIAL','PENDING','SENT')
-            LIMIT 1
-        """), {
-            "publication_id": bytes(payload["publication"]["publication_id"]),
-            "region_key": region_code or "ALL",
-            "recipient_key": recipient_key,
-            "rules_version": RULES_VERSION,
-        }).first()
-        if delivery_in_progress:
-            raise NoMovementFeishuReportError("no_movement_report_delivery_unresolved", 409)
-        connection.execute(text("""
-            INSERT INTO no_movement_feishu_reports
-              (report_id, source_id, publication_id, publication_version, contract_version,
-               map_version_id, region_key, recipient_key, recipient_email, actor_user_id,
-               analysis_text, interpretation, comments, recommendations, record_count,
-               total_stopped_orders, dataset_sha256, rules_version, report_state,
-               delivery_context, created_at, updated_at)
-            VALUES (:report_id, :source_id, :publication_id, :publication_version, :contract_version,
-                    :map_version_id, :region_key, :recipient_key, :recipient_email, :actor_user_id,
-                    :analysis_text, '', '', '', :record_count, :total, :dataset_sha256, :rules_version,
-                    'PREPARED', :delivery_context, :created_at, :updated_at)
-        """), {
-            "report_id": report_id.bytes, "source_id": SOURCE_ID,
-            "publication_id": bytes(payload["publication"]["publication_id"]),
-            "publication_version": int(payload["publication"]["version_no"]),
-            "contract_version": CONTRACT_VERSION, "map_version_id": bytes(payload["publication"]["map_version_id"]),
-            "region_key": region_code or "ALL", "recipient_key": recipient_key,
-            "recipient_email": RECIPIENT_EMAIL, "actor_user_id": actor_user_id,
-            "analysis_text": payload["message"], "record_count": payload["recordCount"],
-            "total": payload["total"], "dataset_sha256": payload["datasetDigest"],
-            "rules_version": RULES_VERSION,
-            "delivery_context": json.dumps({"artifacts": context, "stages": {}}, separators=(",", ":")),
-            "created_at": now, "updated_at": now,
-        })
+    _store_prepared_artifacts(staging_directory, report_id, payload["xlsx"], payload["png"])
+    superseded_report_ids: list[uuid.UUID] = []
+    try:
+        with engine.begin() as connection:
+            prior_reports = connection.execute(text("""
+                SELECT report_id FROM no_movement_feishu_reports
+                WHERE actor_user_id=:actor_user_id AND publication_id=:publication_id
+                  AND recipient_key=:recipient_key
+                  AND report_state IN ('PREPARED','CONFIRMED')
+            """), {
+                "actor_user_id": actor_user_id,
+                "publication_id": bytes(payload["publication"]["publication_id"]),
+                "recipient_key": recipient_key,
+            }).scalars().all()
+            superseded_report_ids = [uuid.UUID(bytes=bytes(value)) for value in prior_reports]
+            connection.execute(text("""
+                UPDATE no_movement_feishu_reports
+                SET report_state='SUPERSEDED', updated_at=:updated_at
+                WHERE actor_user_id=:actor_user_id AND publication_id=:publication_id
+                  AND recipient_key=:recipient_key
+                  AND report_state IN ('PREPARED','CONFIRMED')
+            """), {
+                "actor_user_id": actor_user_id,
+                "publication_id": bytes(payload["publication"]["publication_id"]),
+                "recipient_key": recipient_key,
+                "updated_at": now,
+            })
+            delivery_in_progress = connection.execute(text("""
+                SELECT report_id FROM no_movement_feishu_reports
+                WHERE publication_id=:publication_id AND region_key=:region_key
+                  AND recipient_key=:recipient_key AND rules_version=:rules_version
+                  AND report_state IN ('SENDING','PARTIAL','PENDING','SENT')
+                LIMIT 1
+            """), {
+                "publication_id": bytes(payload["publication"]["publication_id"]),
+                "region_key": region_code or "ALL",
+                "recipient_key": recipient_key,
+                "rules_version": RULES_VERSION,
+            }).first()
+            if delivery_in_progress:
+                raise NoMovementFeishuReportError("no_movement_report_delivery_unresolved", 409)
+            connection.execute(text("""
+                INSERT INTO no_movement_feishu_reports
+                  (report_id, source_id, publication_id, publication_version, contract_version,
+                   map_version_id, region_key, recipient_key, recipient_email, actor_user_id,
+                   analysis_text, interpretation, comments, recommendations, record_count,
+                   total_stopped_orders, dataset_sha256, rules_version, report_state,
+                   delivery_context, created_at, updated_at)
+                VALUES (:report_id, :source_id, :publication_id, :publication_version, :contract_version,
+                        :map_version_id, :region_key, :recipient_key, :recipient_email, :actor_user_id,
+                        :analysis_text, '', '', '', :record_count, :total, :dataset_sha256, :rules_version,
+                        'PREPARED', :delivery_context, :created_at, :updated_at)
+            """), {
+                "report_id": report_id.bytes, "source_id": SOURCE_ID,
+                "publication_id": bytes(payload["publication"]["publication_id"]),
+                "publication_version": int(payload["publication"]["version_no"]),
+                "contract_version": CONTRACT_VERSION, "map_version_id": bytes(payload["publication"]["map_version_id"]),
+                "region_key": region_code or "ALL", "recipient_key": recipient_key,
+                "recipient_email": RECIPIENT_EMAIL, "actor_user_id": actor_user_id,
+                "analysis_text": payload["message"], "record_count": payload["recordCount"],
+                "total": payload["total"], "dataset_sha256": payload["datasetDigest"],
+                "rules_version": RULES_VERSION,
+                "delivery_context": json.dumps({"artifacts": context, "stages": {}}, separators=(",", ":")),
+                "created_at": now, "updated_at": now,
+            })
+    except Exception:
+        _remove_prepared_artifacts(staging_directory, report_id)
+        raise
+    for superseded_report_id in superseded_report_ids:
+        _remove_prepared_artifacts(staging_directory, superseded_report_id)
     pub = payload["publication"]
     return {
         "reportId": str(report_id), "publicationId": str(uuid.UUID(bytes=bytes(pub["publication_id"]))),
@@ -496,12 +599,17 @@ def _feishu_payload(response: httpx.Response) -> dict[str, Any]:
     return payload
 
 
-def send_report(engine: Engine, *, report_id: str, actor_user_id: int, settings: Settings | None = None) -> dict[str, object]:
+def send_report(
+    engine: Engine, *, report_id: str, actor_user_id: int,
+    staging_directory: Path | None = None, settings: Settings | None = None,
+) -> dict[str, object]:
     config = settings or get_settings()
     if not config.feishu_no_movement_pilot_enabled:
         raise NoMovementFeishuReportError("no_movement_feishu_pilot_disabled", 503)
     if not config.feishu_oauth_app_id or not config.feishu_oauth_app_secret:
         raise NoMovementFeishuReportError("feishu_application_not_configured", 503)
+    if staging_directory is None:
+        raise NoMovementFeishuReportError("no_movement_report_artifact_storage_unavailable", 503)
     report_key = _uuid_bytes(report_id)
     now = _utc_now()
     with engine.begin() as connection:
@@ -554,18 +662,21 @@ def send_report(engine: Engine, *, report_id: str, actor_user_id: int, settings:
         if bytes(publication["map_version_id"]) != bytes(row["map_version_id"]):
             raise NoMovementFeishuReportError("no_movement_report_mapping_changed", 409)
         region_code = None if row["region_key"] == "ALL" else str(row["region_key"])
-        payload = _report_payload(engine, publication_id=publication_id, region_code=region_code, connection=connection)
+        payload = _report_payload(
+            engine, publication_id=publication_id, region_code=region_code,
+            connection=connection, include_artifacts=False,
+        )
         if bytes(payload["datasetDigest"]) != bytes(row["dataset_sha256"]):
             raise NoMovementFeishuReportError("no_movement_report_data_changed", 409)
         raw_context = row["delivery_context"]
         context = raw_context if isinstance(raw_context, dict) else json.loads(raw_context or "{}")
         stages = context.setdefault("stages", {})
         artifact_hashes = context.get("artifacts", {})
-        if (
-            artifact_hashes.get("xlsxSha256") != hashlib.sha256(payload["xlsx"]).hexdigest()
-            or artifact_hashes.get("pngSha256") != hashlib.sha256(payload["png"]).hexdigest()
-        ):
-            raise NoMovementFeishuReportError("no_movement_report_artifacts_changed", 409)
+        report_uuid = uuid.UUID(bytes=report_key)
+        prepared_xlsx = _read_prepared_artifact(staging_directory, report_uuid, "xlsx", artifact_hashes.get("xlsxSha256"))
+        prepared_png = _read_prepared_artifact(staging_directory, report_uuid, "png", artifact_hashes.get("pngSha256"))
+        payload["xlsx"] = prepared_xlsx
+        payload["png"] = prepared_png
         connection.execute(text("""
             UPDATE no_movement_feishu_reports SET report_state='SENDING', updated_at=:updated_at
             WHERE report_id=:report_id AND actor_user_id=:actor_user_id
@@ -614,4 +725,5 @@ def send_report(engine: Engine, *, report_id: str, actor_user_id: int, settings:
         raise NoMovementFeishuReportError("no_movement_feishu_delivery_pending", 502) from None
 
     _save_delivery_context(engine, report_key, "SENT", context)
+    _remove_prepared_artifacts(staging_directory, uuid.UUID(bytes=report_key))
     return {"reportId": report_id, "state": "SENT", "recipient": RECIPIENT_LABEL, "messageIds": {key: value.get("messageId") for key, value in stages.items()}}
