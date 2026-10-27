@@ -3,6 +3,7 @@ from io import BytesIO
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, text
 
 from app.core.config import Settings
 from app.services.data_foundation.contracts import get_contract
@@ -16,6 +17,7 @@ from app.services.no_movement_feishu_reports import (
     _make_xlsx,
     _recipient_key,
     _utc_now,
+    confirm_report,
     send_report,
 )
 from app.services.no_movement_operational_analysis import build_bilingual_analysis
@@ -54,6 +56,40 @@ def test_disabled_pilot_blocks_send_before_database_or_http_access(monkeypatch):
         send_report(None, report_id="not-read-when-disabled", actor_user_id=1, settings=Settings(feishu_no_movement_pilot_enabled=False))
     assert error.value.status_code == 503
     assert error.value.code == "no_movement_feishu_pilot_disabled"
+
+
+def test_confirmation_persists_exact_edited_analysis_and_clears_legacy_text_fields(monkeypatch):
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE no_movement_feishu_reports (
+                report_id BLOB PRIMARY KEY, publication_id BLOB NOT NULL,
+                actor_user_id INTEGER NOT NULL, report_state TEXT NOT NULL,
+                analysis_text TEXT NOT NULL, interpretation TEXT NOT NULL,
+                comments TEXT NOT NULL, recommendations TEXT NOT NULL,
+                confirmed_at DATETIME, updated_at DATETIME
+            )
+        """)
+        connection.execute(text("""
+            INSERT INTO no_movement_feishu_reports VALUES
+            (:report_id, :publication_id, 7, 'PREPARED', 'generated', 'old', 'old', 'old', NULL, NULL)
+        """), {"report_id": bytes.fromhex("72727272727272727272727272727272"), "publication_id": b"p" * 16})
+    monkeypatch.setattr(
+        "app.services.no_movement_feishu_reports._current_publication",
+        lambda *args, **kwargs: {},
+    )
+    edited = "分析 SPS\nLinha final editada — ç"
+    result = confirm_report(engine, report_id="72727272-7272-7272-7272-727272727272", actor_user_id=7, analysis_text=edited)
+    assert result == {"reportId": "72727272-7272-7272-7272-727272727272", "state": "CONFIRMED", "messageSent": False}
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT analysis_text, interpretation, comments, recommendations FROM no_movement_feishu_reports")).one()
+    assert tuple(row) == (edited, "", "", "")
+
+
+def test_confirmation_rejects_blank_analysis_before_database_access():
+    with pytest.raises(NoMovementFeishuReportError) as error:
+        confirm_report(None, report_id="not-used", actor_user_id=7, analysis_text="   ")
+    assert error.value.code == "no_movement_report_text_required"
 
 
 def test_regional_analysis_is_scoped_while_default_national_text_is_unchanged():

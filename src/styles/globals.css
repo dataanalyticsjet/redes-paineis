@@ -6997,9 +6997,15 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
 .no-movement-feishu-dialog { width: min(760px, calc(100vw - 32px)); max-height: min(90vh, 920px); }
 .no-movement-feishu-dialog > p { line-height: 1.5; }
 .no-movement-feishu-dialog textarea { min-height: 96px; }
-.no-movement-feishu-dialog #nm-feishu-analysis { min-height: 220px; }
-.no-movement-feishu-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
-.no-movement-feishu-metrics > span { padding: 12px; border: 1px solid #e5e8ef; border-radius: 10px; background: #f8f9fb; }
+.no-movement-feishu-source { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid #ececef; border-radius: 10px; background: #fafafb; }
+.no-movement-feishu-source p { margin: 0; color: #5f6671; font-size: 12px; line-height: 1.45; }
+.no-movement-feishu-source strong { color: #343943; }
+.no-movement-feishu-dialog #nm-feishu-analysis { min-height: 300px; }
+.no-movement-feishu-attachments { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 3px 0; }
+.no-movement-feishu-attachments > span { display: inline-flex; align-items: center; gap: 7px; color: #737985; font-size: 12px; font-weight: 650; }
+.no-movement-feishu-attachments .is-ready { color: #237244; }
+.no-movement-feishu-attachments .is-ready > span { color: #168344; font-size: 16px; font-weight: 800; }
+.no-movement-feishu-attachments .is-pending > span { color: #8b919b; font-size: 14px; }
 .feishu-share-close { position: absolute; top: 14px; right: 14px; display: grid; width: 36px; height: 36px; place-items: center; border: 0; border-radius: 9px; background: transparent; color: #626975; cursor: pointer; }
 .feishu-share-close:hover { background: #f5f6f7; }
 .feishu-share-close:focus-visible,
@@ -7031,7 +7037,6 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
 }
 
 @media (max-width: 480px) {
-  .no-movement-feishu-metrics { grid-template-columns: 1fr; }
   .dashboard-report-generated { align-items: flex-start; font-size: 11px; }
   .dashboard-action-info { align-items: flex-start; flex-direction: column; }
   .dashboard-action-buttons button { min-width: 0; padding: 0 8px; font-size: 11px; }

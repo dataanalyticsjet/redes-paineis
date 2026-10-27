@@ -45,6 +45,14 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _published_at_text(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value) if value else None
+
+
 class NoMovementFeishuReportError(ValueError):
     def __init__(self, code: str, status_code: int = 422) -> None:
         super().__init__(code)
@@ -74,10 +82,15 @@ def _connection(engine: Engine, connection: Connection | None = None):
 
 def _current_publication(engine: Engine, publication_id: str, connection: Connection | None = None) -> dict[str, Any]:
     publication_key = _uuid_bytes(publication_id)
+    published_at_expression = (
+        "CONVERT_TZ(p.published_at, @@session.time_zone, 'America/Sao_Paulo')"
+        if engine.dialect.name == "mysql" else "p.published_at"
+    )
     with _connection(engine, connection) as active:
-        row = active.execute(text("""
+        row = active.execute(text(f"""
         SELECT p.publication_id, p.version_no, p.contract_version, p.map_version_id,
-               p.period_start, p.snapshot_as_of, p.publication_state
+               p.period_start, p.snapshot_as_of, p.publication_state,
+               p.published_at, {published_at_expression} AS published_at_sao_paulo
         FROM source_snapshot_head AS head
         JOIN source_publications AS p
           ON p.source_id = head.source_id AND p.publication_id = head.publication_id
@@ -118,6 +131,7 @@ def get_report_options(engine: Engine, *, publication_id: str) -> dict[str, obje
         "contractVersion": int(publication["contract_version"]),
         "mapVersionId": str(uuid.UUID(bytes=map_id)),
         "operationalDate": publication["period_start"].isoformat(),
+        "publishedAt": _published_at_text(publication.get("published_at_sao_paulo")),
         "regions": _region_names(engine, map_id),
         "recipients": [{"key": RECIPIENT_KEY, "label": RECIPIENT_LABEL}],
         "sendEnabled": bool(get_settings().feishu_no_movement_pilot_enabled),
@@ -428,10 +442,12 @@ def prepare_report(
     }
 
 
-def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, interpretation: str, comments: str, recommendations: str) -> dict[str, object]:
-    report_key = _uuid_bytes(report_id)
-    if any(len(value) > 4000 for value in (interpretation, comments, recommendations)):
+def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analysis_text: str) -> dict[str, object]:
+    if not analysis_text.strip():
+        raise NoMovementFeishuReportError("no_movement_report_text_required", 422)
+    if len(analysis_text) > 20000:
         raise NoMovementFeishuReportError("no_movement_report_text_too_long", 422)
+    report_key = _uuid_bytes(report_id)
     now = _utc_now()
     with engine.begin() as connection:
         lock = " FOR UPDATE" if engine.dialect.name == "mysql" else ""
@@ -446,11 +462,12 @@ def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, interp
         _current_publication(engine, str(uuid.UUID(bytes=bytes(report["publication_id"]))), connection)
         connection.execute(text("""
             UPDATE no_movement_feishu_reports
-            SET report_state='CONFIRMED', interpretation=:interpretation, comments=:comments, recommendations=:recommendations,
+            SET report_state='CONFIRMED', analysis_text=:analysis_text,
+                interpretation='', comments='', recommendations='',
                 confirmed_at=:confirmed_at, updated_at=:updated_at
             WHERE report_id=:report_id AND actor_user_id=:actor_user_id
         """), {
-            "interpretation": interpretation, "comments": comments, "recommendations": recommendations,
+            "analysis_text": analysis_text,
             "report_id": report_key, "actor_user_id": actor_user_id,
             "confirmed_at": now, "updated_at": now,
         })
@@ -555,15 +572,6 @@ def send_report(engine: Engine, *, report_id: str, actor_user_id: int, settings:
         """), {"report_id": report_key, "actor_user_id": actor_user_id, "updated_at": now})
 
     message = str(row["analysis_text"])
-    interpretation = str(row["interpretation"] or "").strip()
-    comments = str(row["comments"] or "").strip()
-    recommendations = str(row["recommendations"] or "").strip()
-    if interpretation:
-        message += "\n\n📝 Interpretação | 解读\n" + interpretation
-    if comments:
-        message += "\n\n💬 Comentários | 评论\n" + comments
-    if recommendations:
-        message += "\n\n🎯 Recomendações | 建议\n" + recommendations
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             token_payload = _feishu_payload(client.post(TOKEN_URL, json={"app_id": config.feishu_oauth_app_id, "app_secret": config.feishu_oauth_app_secret}))

@@ -135,9 +135,7 @@ class NoMovementFeishuPreparePayload(BaseModel):
 
 class NoMovementFeishuConfirmPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    interpretation: str = Field(default="", max_length=4000)
-    comments: str = Field(default="", max_length=4000)
-    recommendations: str = Field(default="", max_length=4000)
+    analysis_text: str = Field(alias="analysisText", min_length=1, max_length=20000)
 
 
 def _require_feature(*, imports: bool = False) -> None:
@@ -1370,7 +1368,7 @@ def no_movement_feishu_report_confirm(
     try:
         return confirm_no_movement_feishu_report(
             _engine(), report_id=report_id, actor_user_id=admin.user.id,
-            interpretation=payload.interpretation, comments=payload.comments, recommendations=payload.recommendations,
+            analysis_text=payload.analysis_text,
         )
     except NoMovementFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None

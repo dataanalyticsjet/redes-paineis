@@ -12,7 +12,7 @@ test("Sem Movimentação opens the scoped report dialog, leaving other dashboard
   assert.match(app, /noMovementFeishuDialogOpen && noMovementV2State\.status === "ready" && noMovementV2State\.identityKey === dashboardCacheIdentity[\s\S]*?viewerAuthorization && isMatrixAdminViewer/);
 });
 
-test("pilot dialog binds report, scope and recipient to backend-generated artifacts and requires confirmation", async () => {
+test("pilot dialog edits and confirms the exact analysis text without extra message fields", async () => {
   const dialog = await read("src/features/dashboards/no-movement-feishu-report-dialog.tsx");
   assert.match(dialog, /\/api\/v2\/no-movement\/feishu-report\/options/);
   assert.match(dialog, /\/api\/v2\/no-movement\/feishu-report\/prepare/);
@@ -26,12 +26,28 @@ test("pilot dialog binds report, scope and recipient to backend-generated artifa
   assert.match(dialog, /window\.confirm\(t\("Alterar regional ou destinatário/);
   assert.match(dialog, /Análise atual do painel/);
   assert.match(dialog, /attemptedScopeRef\.current = scopeKey/);
-  assert.match(dialog, /Interpretação editável/);
-  assert.match(dialog, /Comentários/);
-  assert.match(dialog, /Recomendações/);
-  assert.match(dialog, /Prévia final da mensagem/);
+  assert.match(dialog, /analysisText: analysisDraft/);
+  assert.match(dialog, /value=\{analysisDraft\}/);
+  assert.match(dialog, /Data da fonte/);
+  assert.match(dialog, /publicationDate\(options\?\.publishedAt\)/);
+  assert.match(dialog, /prepared\?\.excelBytes && prepared\.excelBytes > 0/);
+  assert.match(dialog, /prepared\?\.pngBytes && prepared\.pngBytes > 0/);
+  assert.match(dialog, /Excel pronto/);
+  assert.match(dialog, /Prévia PNG pronta/);
+  assert.doesNotMatch(dialog, /nm-feishu-interpretation|nm-feishu-comments|nm-feishu-recommendations|nm-feishu-final-message/);
   assert.match(dialog, /18 colunas oficiais/);
   assert.doesNotMatch(dialog, /DEMO_GROUPS|Demonstração — Grupo/);
+});
+
+test("backend delivers only the confirmed analysis_text and keeps the pilot disabled by default", async () => {
+  const service = await read("backend/app/services/no_movement_feishu_reports.py");
+  const api = await read("backend/app/api/data_foundation.py");
+  const config = await read("backend/app/core/config.py");
+  assert.match(api, /analysis_text: str = Field\(alias="analysisText", min_length=1, max_length=20000\)/);
+  assert.match(service, /SET report_state='CONFIRMED', analysis_text=:analysis_text/);
+  assert.match(service, /message = str\(row\["analysis_text"\]\)/);
+  assert.doesNotMatch(service, /📝 Interpretação|💬 Comentários|🎯 Recomendações/);
+  assert.match(config, /feishu_no_movement_pilot_enabled: bool = False/);
 });
 
 test("pilot uses independently disabled configuration and does not alter automatic publication notifications", async () => {
@@ -54,6 +70,7 @@ test("report generation uses the selected publication and its pinned map, not br
   assert.match(service, /Workbook\(write_only=True\)/);
   assert.match(service, /Image\.new\("RGB"/);
   assert.match(service, /dataset_sha256/);
+  assert.match(service, /CONVERT_TZ\(p\.published_at, @@session\.time_zone, 'America\/Sao_Paulo'\)/);
 });
 
 test("all pilot API routes require full effective MATRIX admin and same-origin writes", async () => {
