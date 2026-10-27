@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Bold } from "lucide-react";
 import { apiFetch } from "../../lib/api-url.ts";
+import { parseAnalysisMarkdown, serializeAnalysisRuns } from "../../lib/no-movement-analysis-editor.mjs";
 import type { DashboardTranslator } from "../../lib/i18n";
 
 type Options = {
@@ -44,6 +46,84 @@ async function requestJson<T>(path: string, authorization: string, method = "GET
   return response.json() as Promise<T>;
 }
 
+function renderAnalysisMarkdown(editor: HTMLElement, markdown: string): void {
+  editor.replaceChildren();
+  for (const run of parseAnalysisMarkdown(markdown)) {
+    if (run.text === "\n") {
+      editor.append(document.createElement("br"));
+    } else if (run.bold) {
+      const strong = document.createElement("strong");
+      strong.textContent = run.text;
+      editor.append(strong);
+    } else {
+      editor.append(document.createTextNode(run.text));
+    }
+  }
+}
+
+function collectEditorRuns(parent: Node, inheritedBold = false): Array<{ text: string; bold: boolean }> {
+  const children = Array.from(parent.childNodes);
+  const runs: Array<{ text: string; bold: boolean }> = [];
+  const append = (text: string, bold: boolean) => {
+    if (!text) return;
+    const previous = runs.at(-1);
+    if (previous && previous.bold === bold && previous.text !== "\n") previous.text += text;
+    else runs.push({ text, bold });
+  };
+
+  children.forEach((node, index) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      append(node.textContent ?? "", inheritedBold);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const element = node as HTMLElement;
+    const tag = element.tagName.toLowerCase();
+    if (tag === "br") {
+      append("\n", false);
+      return;
+    }
+    const isBlock = tag === "div" || tag === "p";
+    if (isBlock && runs.length && runs.at(-1)?.text !== "\n") append("\n", false);
+    runs.push(...collectEditorRuns(element, inheritedBold || tag === "strong" || tag === "b"));
+    if (isBlock && index < children.length - 1 && runs.at(-1)?.text !== "\n") append("\n", false);
+  });
+  return runs;
+}
+
+function serializeEditorChildren(parent: Node): string {
+  return serializeAnalysisRuns(collectEditorRuns(parent));
+}
+
+function insertPlainTextAtSelection(editor: HTMLElement, value: string): void {
+  const selection = window.getSelection();
+  if (!selection) return;
+  let range = selection.rangeCount ? selection.getRangeAt(0) : document.createRange();
+  if (!editor.contains(range.commonAncestorContainer)) {
+    editor.focus();
+    range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+  }
+  range.deleteContents();
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      const br = document.createElement("br");
+      range.insertNode(br);
+      range.setStartAfter(br);
+    }
+    if (line) {
+      const text = document.createTextNode(line);
+      range.insertNode(text);
+      range.setStartAfter(text);
+    }
+  });
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 export function NoMovementFeishuReportDialog({
   publicationId, authorization, t, onClose,
 }: { publicationId: string; authorization: string; t: DashboardTranslator; onClose: () => void }) {
@@ -55,6 +135,8 @@ export function NoMovementFeishuReportDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const analysisEditorRef = useRef<HTMLDivElement>(null);
+  const analysisDraftRef = useRef(analysisDraft);
   const attemptedScopeRef = useRef("");
   const dirty = Boolean(prepared && analysisDraft !== prepared.analysis);
 
@@ -76,6 +158,15 @@ export function NoMovementFeishuReportDialog({
     }).catch(() => { if (!controller.signal.aborted) setError("no_movement_feishu_options_unavailable"); });
     return () => controller.abort();
   }, [authorization, publicationId]);
+
+  useEffect(() => {
+    analysisDraftRef.current = analysisDraft;
+  }, [analysisDraft]);
+
+  useEffect(() => {
+    const editor = analysisEditorRef.current;
+    if (editor) renderAnalysisMarkdown(editor, prepared?.analysis ?? "");
+  }, [prepared?.reportId, prepared?.analysis]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -119,6 +210,25 @@ export function NoMovementFeishuReportDialog({
       setStatus("Relatório confirmado e registrado. Nenhuma mensagem foi enviada.");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "no_movement_feishu_request_failed"); }
     finally { setBusy(false); }
+  };
+  const updateAnalysisFromEditor = (editor: HTMLDivElement) => {
+    const next = serializeEditorChildren(editor);
+    if (next.length > 20000) {
+      renderAnalysisMarkdown(editor, analysisDraftRef.current);
+      setError("A análise não pode ultrapassar 20.000 caracteres.");
+      return;
+    }
+    analysisDraftRef.current = next;
+    setAnalysisDraft(next);
+    setError(null);
+    if (prepared?.state === "CONFIRMED") { setPrepared({ ...prepared, state: "PREPARED" }); setStatus(null); }
+  };
+  const toggleBold = () => {
+    const editor = analysisEditorRef.current;
+    if (!editor) return;
+    editor.focus();
+    document.execCommand("bold");
+    updateAnalysisFromEditor(editor);
   };
   const send = async () => {
     if (!prepared || prepared.state !== "CONFIRMED" || !options?.sendEnabled) return;
@@ -170,10 +280,32 @@ export function NoMovementFeishuReportDialog({
         </span>
       </div>
       <label htmlFor="nm-feishu-analysis">{t("Análise atual do painel")}</label>
-      <textarea id="nm-feishu-analysis" value={analysisDraft} maxLength={20000} disabled={busy || !prepared || prepared.state === "SENT"} onChange={event => {
-        setAnalysisDraft(event.target.value);
-        if (prepared?.state === "CONFIRMED") { setPrepared({ ...prepared, state: "PREPARED" }); setStatus(null); }
-      }} placeholder={t(busy ? "Preparando relatório…" : "Prepare o relatório para visualizar a análise oficial deste recorte.")} />
+      <div className="no-movement-feishu-editor-toolbar" role="toolbar" aria-label={t("Formatação da análise")}>
+        <button type="button" className="no-movement-feishu-editor-bold" aria-label={t("Negrito")} title={t("Negrito")} disabled={busy || !prepared || prepared.state === "SENT"} onMouseDown={event => event.preventDefault()} onClick={toggleBold}>
+          <Bold size={16} aria-hidden="true" />
+        </button>
+        <span>{t("Selecione o texto para aplicar ou remover negrito.")}</span>
+      </div>
+      <div
+        id="nm-feishu-analysis"
+        ref={analysisEditorRef}
+        className="no-movement-feishu-analysis-editor"
+        role="textbox"
+        aria-multiline="true"
+        aria-label={t("Análise atual do painel")}
+        aria-disabled={busy || !prepared || prepared.state === "SENT"}
+        tabIndex={prepared ? 0 : -1}
+        contentEditable={!busy && Boolean(prepared) && prepared?.state !== "SENT"}
+        suppressContentEditableWarning
+        data-placeholder={t(busy ? "Preparando relatório…" : "Prepare o relatório para visualizar a análise oficial deste recorte.")}
+        onInput={event => updateAnalysisFromEditor(event.currentTarget)}
+        onPaste={event => {
+          event.preventDefault();
+          insertPlainTextAtSelection(event.currentTarget, event.clipboardData.getData("text/plain"));
+          updateAnalysisFromEditor(event.currentTarget);
+        }}
+        onDrop={event => event.preventDefault()}
+      />
       <p className="feishu-share-demo-note">{t("Serão anexados o Excel completo das 18 colunas oficiais e uma prévia PNG gerados da mesma publicação e do mesmo recorte.")}</p>
       {prepared ? <p className="feishu-share-demo-note">{prepared.excelFileName} · {prepared.state}</p> : null}
       {error ? <p className="feishu-share-unavailable" role="alert">{t(error)}</p> : null}

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { parseAnalysisMarkdown, serializeAnalysisRuns } from "../src/lib/no-movement-analysis-editor.mjs";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -25,9 +26,18 @@ test("pilot dialog edits and confirms the exact analysis text without extra mess
   assert.match(dialog, /window\.confirm\(t\("Enviar agora/);
   assert.match(dialog, /window\.confirm\(t\("Alterar regional ou destinatário/);
   assert.match(dialog, /Análise atual do painel/);
+  assert.match(dialog, /contentEditable=\{!busy && Boolean\(prepared\) && prepared\?\.state !== "SENT"\}/);
+  assert.match(dialog, /renderAnalysisMarkdown\(editor, prepared\?\.analysis \?\? ""\)/);
+  assert.match(dialog, /serializeEditorChildren\(editor\)/);
+  assert.match(dialog, /document\.createElement\("strong"\)/);
+  assert.match(dialog, /document\.execCommand\("bold"\)/);
+  assert.match(dialog, /event\.clipboardData\.getData\("text\/plain"\)/);
+  assert.doesNotMatch(dialog, /dangerouslySetInnerHTML/);
   assert.match(dialog, /attemptedScopeRef\.current = scopeKey/);
   assert.match(dialog, /analysisText: analysisDraft/);
-  assert.match(dialog, /value=\{analysisDraft\}/);
+  assert.match(dialog, /analysisDraftRef\.current = next/);
+  assert.match(dialog, /state: "PREPARED"/);
+  assert.match(dialog, /setPrepared\(null\); setAnalysisDraft\(""\)/);
   assert.match(dialog, /Data da fonte/);
   assert.match(dialog, /publicationDate\(options\?\.publishedAt\)/);
   assert.match(dialog, /prepared\?\.excelBytes && prepared\.excelBytes > 0/);
@@ -39,13 +49,45 @@ test("pilot dialog edits and confirms the exact analysis text without extra mess
   assert.doesNotMatch(dialog, /DEMO_GROUPS|Demonstração — Grupo/);
 });
 
+test("analysis editor round-trips bold, lists, line breaks, emoji and Portuguese/Chinese text without visible Markdown markers", () => {
+  const source = "📦 **Resumo SPS**\n- Base **São Paulo**: 12\n- 网点 **深圳**: 8\nLiteral: \\*\\*não negrito\\*\\* e 2 \\* 3";
+  const runs = parseAnalysisMarkdown(source);
+
+  assert.deepEqual(runs.filter(run => run.bold).map(run => run.text), ["Resumo SPS", "São Paulo", "深圳"]);
+  assert.equal(runs.map(run => run.text).join(""), "📦 Resumo SPS\n- Base São Paulo: 12\n- 网点 深圳: 8\nLiteral: **não negrito** e 2 * 3");
+  assert.equal(serializeAnalysisRuns(runs), source);
+  assert.equal(parseAnalysisMarkdown("**Título**")[0]?.text, "Título");
+});
+
+test("edited rich-text runs serialize to confirmed Markdown and preserve bold for Feishu", () => {
+  const editedRuns = [
+    { text: "Análise SPS revisada", bold: true },
+    { text: "\nVolume: ", bold: false },
+    { text: "1.234", bold: true },
+    { text: "\nResponsável: 李伟", bold: false },
+    { text: "\nNota literal: **não é estilo**", bold: false },
+  ];
+  const serialized = serializeAnalysisRuns(editedRuns);
+
+  assert.equal(serialized, "**Análise SPS revisada**\nVolume: **1.234**\nResponsável: 李伟\nNota literal: \\*\\*não é estilo\\*\\*");
+  assert.deepEqual(parseAnalysisMarkdown(serialized).filter(run => run.bold).map(run => run.text), ["Análise SPS revisada", "1.234"]);
+});
+
+test("rich-text editor controls keep Portuguese source text and English/Chinese translations", async () => {
+  const translations = await read("src/lib/i18n.ts");
+  assert.match(translations, /"Negrito": \{ en: "Bold", zh: "粗体" \}/);
+  assert.match(translations, /"Formatação da análise": \{ en: "Analysis formatting", zh: "分析格式" \}/);
+  assert.match(translations, /"Selecione o texto para aplicar ou remover negrito\."/);
+});
+
 test("backend delivers only the confirmed analysis_text and keeps the pilot disabled by default", async () => {
   const service = await read("backend/app/services/no_movement_feishu_reports.py");
   const api = await read("backend/app/api/data_foundation.py");
   const config = await read("backend/app/core/config.py");
   assert.match(api, /analysis_text: str = Field\(alias="analysisText", min_length=1, max_length=20000\)/);
   assert.match(service, /SET report_state='CONFIRMED', analysis_text=:analysis_text/);
-  assert.match(service, /message = str\(row\["analysis_text"\]\)/);
+  assert.match(service, /message_content = _feishu_interactive_content\(str\(row\["analysis_text"\]\)\)/);
+  assert.match(service, /"msg_type": "interactive"/);
   assert.doesNotMatch(service, /📝 Interpretação|💬 Comentários|🎯 Recomendações/);
   assert.match(config, /feishu_no_movement_pilot_enabled: bool = False/);
 });
