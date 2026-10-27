@@ -41,7 +41,10 @@ FILES_URL = "https://open.feishu.cn/open-apis/im/v1/files"
 IMAGES_URL = "https://open.feishu.cn/open-apis/im/v1/images"
 MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
 MAX_FILE_BYTES = 30 * 1024 * 1024
+# Keep below Feishu's documented 30 KB create-message payload ceiling.
+MAX_FEISHU_MESSAGE_BYTES = 29_000
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+_FEISHU_BOLD_SPAN = re.compile(r"(?<!\\)\*\*(?=\S)(.+?)(?<=\S)(?<!\\)\*\*")
 
 
 def _utc_now() -> datetime:
@@ -599,6 +602,57 @@ def _feishu_payload(response: httpx.Response) -> dict[str, Any]:
     return payload
 
 
+def _escape_unformatted_asterisks(value: str) -> str:
+    """Escape literal Markdown asterisks while leaving explicit escapes intact."""
+    output: list[str] = []
+    backslashes = 0
+    for character in value:
+        if character == "*" and backslashes % 2 == 0:
+            output.append("\\*")
+        else:
+            output.append(character)
+        backslashes = backslashes + 1 if character == "\\" else 0
+    return "".join(output)
+
+
+def _feishu_markdown(analysis_text: str) -> str:
+    """Keep the confirmed text intact, translating only paired **bold** spans.
+
+    Feishu's card Markdown renderer understands paired bold markers. Literal or
+    unmatched asterisks are escaped so they remain visible as literal content.
+    Explicitly escaped asterisks supplied by the editor are left untouched.
+    """
+    rendered_lines: list[str] = []
+    for line in analysis_text.splitlines(keepends=True):
+        parts: list[str] = []
+        cursor = 0
+        for match in _FEISHU_BOLD_SPAN.finditer(line):
+            parts.append(_escape_unformatted_asterisks(line[cursor:match.start()]))
+            parts.append("**" + _escape_unformatted_asterisks(match.group(1)) + "**")
+            cursor = match.end()
+        parts.append(_escape_unformatted_asterisks(line[cursor:]))
+        rendered_lines.append("".join(parts))
+    if not rendered_lines and analysis_text:
+        return _escape_unformatted_asterisks(analysis_text)
+    return "".join(rendered_lines)
+
+
+def _feishu_interactive_content(analysis_text: str) -> str:
+    """Serialize the confirmed analysis as a Feishu interactive-card body."""
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "body": {
+            "direction": "vertical",
+            "elements": [{"tag": "markdown", "content": _feishu_markdown(analysis_text)}],
+        },
+    }
+    content = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
+    if len(content.encode("utf-8")) >= MAX_FEISHU_MESSAGE_BYTES:
+        raise NoMovementFeishuReportError("no_movement_report_message_too_large", 413)
+    return content
+
+
 def send_report(
     engine: Engine, *, report_id: str, actor_user_id: int,
     staging_directory: Path | None = None, settings: Settings | None = None,
@@ -668,6 +722,7 @@ def send_report(
         )
         if bytes(payload["datasetDigest"]) != bytes(row["dataset_sha256"]):
             raise NoMovementFeishuReportError("no_movement_report_data_changed", 409)
+        message_content = _feishu_interactive_content(str(row["analysis_text"]))
         raw_context = row["delivery_context"]
         context = raw_context if isinstance(raw_context, dict) else json.loads(raw_context or "{}")
         stages = context.setdefault("stages", {})
@@ -682,7 +737,6 @@ def send_report(
             WHERE report_id=:report_id AND actor_user_id=:actor_user_id
         """), {"report_id": report_key, "actor_user_id": actor_user_id, "updated_at": now})
 
-    message = str(row["analysis_text"])
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             token_payload = _feishu_payload(client.post(TOKEN_URL, json={"app_id": config.feishu_oauth_app_id, "app_secret": config.feishu_oauth_app_secret}))
@@ -692,7 +746,7 @@ def send_report(
             headers = {"Authorization": f"Bearer {token}"}
 
             if stages.get("text", {}).get("status") != "SENT":
-                response = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": "email"}, headers=headers, json={"receive_id": RECIPIENT_EMAIL, "msg_type": "text", "content": json.dumps({"text": message}, ensure_ascii=False)}))
+                response = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": "email"}, headers=headers, json={"receive_id": RECIPIENT_EMAIL, "msg_type": "interactive", "content": message_content}))
                 stages["text"] = {"status": "SENT", "messageId": response["data"]["message_id"]}
                 _save_delivery_context(engine, report_key, "SENDING", context)
 

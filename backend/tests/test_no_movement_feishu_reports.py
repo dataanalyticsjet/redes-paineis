@@ -13,6 +13,8 @@ from app.services.no_movement_feishu_reports import (
     RECIPIENT_KEY,
     _FeishuRejected,
     _analysis,
+    _feishu_interactive_content,
+    _feishu_markdown,
     _feishu_payload,
     _make_png,
     _make_xlsx,
@@ -50,6 +52,53 @@ def test_explicit_feishu_http_rejection_is_distinguished_from_ambiguous_server_f
 def test_feishu_api_rejection_is_detected_even_when_http_status_is_success():
     with pytest.raises(_FeishuRejected):
         _feishu_payload(_response(200, {"code": 999, "msg": "rejected"}))
+
+
+def test_feishu_markdown_formats_bold_and_preserves_operational_text_and_literal_asterisks():
+    analysis = (
+        "📦 **Resumo SPS — 22/10/2026**\n"
+        "Pedidos parados: **1.234** (12,5%)\n"
+        "- **Base São Paulo**: 12\n"
+        "- **网点 深圳**: 8\n"
+        "Responsável: João / 张伟\n"
+        "Nota literal: 2 * 3; escape: \\*não é negrito\\*; "
+        "marcadores literais: \\*\\*texto literal\\*\\*; sem par: **texto"
+    )
+
+    rendered = _feishu_markdown(analysis)
+
+    assert "**Resumo SPS — 22/10/2026**" in rendered
+    assert "**1.234**" in rendered
+    assert "- **Base São Paulo**: 12\n- **网点 深圳**: 8" in rendered
+    assert "📦" in rendered and "João / 张伟" in rendered
+    assert "2 \\* 3" in rendered
+    assert r"\*não é negrito\*" in rendered
+    assert r"\*\*texto literal\*\*" in rendered
+    assert "**texto" not in rendered
+    assert r"\*\*texto" in rendered
+
+
+def test_feishu_interactive_content_keeps_large_multilingual_message_and_line_breaks():
+    import json
+
+    analysis = "**Análise atual**\n" + ("SPS — Operação / 运营 📦\n" * 800)
+    content = _feishu_interactive_content(analysis)
+    card = json.loads(content)
+
+    assert card["schema"] == "2.0"
+    assert card["body"]["elements"][0]["tag"] == "markdown"
+    markdown = card["body"]["elements"][0]["content"]
+    assert markdown.startswith("**Análise atual**\n")
+    assert markdown.count("\n") == analysis.count("\n")
+    assert "运营 📦" in markdown
+
+
+def test_feishu_interactive_content_rejects_messages_over_platform_limit_without_truncation():
+    analysis = "SPS — operação / 运营 📦\n" * 2000
+    with pytest.raises(NoMovementFeishuReportError) as error:
+        _feishu_interactive_content(analysis)
+    assert error.value.code == "no_movement_report_message_too_large"
+    assert error.value.status_code == 413
 
 
 def test_disabled_pilot_blocks_send_before_database_or_http_access(monkeypatch):
@@ -372,7 +421,7 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
         engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
         actor_user_id=7, staging_directory=tmp_path,
     )
-    edited = "Texto SPS confirmado; enviar exatamente este conteudo"
+    edited = "**Resumo SPS**\nTexto confirmado — 内容原文 📦\nBases: **001, Base SPS**"
     confirm_report(engine, report_id=prepared["reportId"], actor_user_id=7, analysis_text=edited)
     settings = Settings(feishu_no_movement_pilot_enabled=True, feishu_oauth_app_id="fake", feishu_oauth_app_secret="fake")
     replaced_publication_id = uuid.uuid4()
@@ -419,7 +468,15 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
     assert include_artifact_calls == [True, False]
     assert captured["uploads"] == {"xlsx": xlsx, "png": png}
     import json
-    assert json.loads(captured["messages"][0]["content"]) == {"text": edited}
+    assert captured["messages"][0]["msg_type"] == "interactive"
+    card = json.loads(captured["messages"][0]["content"])
+    assert card["schema"] == "2.0"
+    assert card["body"]["elements"][0]["tag"] == "markdown"
+    assert card["body"]["elements"][0]["content"] == _feishu_markdown(edited)
+    assert "**Resumo SPS**" in card["body"]["elements"][0]["content"]
+    with engine.connect() as connection:
+        persisted_text = connection.execute(text("SELECT analysis_text FROM no_movement_feishu_reports")).scalar_one()
+    assert persisted_text == edited
     assert not (tmp_path / ".no-movement-feishu-reports" / f"{uuid.UUID(prepared['reportId']).hex}.xlsx").exists()
     with pytest.raises(NoMovementFeishuReportError) as duplicate_error:
         prepare_report(
