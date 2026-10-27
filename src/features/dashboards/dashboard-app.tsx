@@ -2640,6 +2640,7 @@ interface PddCollectionFailureV2DashboardProps {
   onPrint: () => void;
   onAnalysis: () => void;
   onShare: (filters: string[]) => void;
+  showShare: boolean;
   onPeriodChange: (period: PddCollectionFailureV2Period) => void;
   onRetry: () => void;
   t: DashboardTranslator;
@@ -2675,6 +2676,7 @@ function PddCollectionFailureV2Dashboard({
   onPrint,
   onAnalysis,
   onShare,
+  showShare,
   onPeriodChange,
   onRetry,
   t,
@@ -2835,6 +2837,7 @@ function PddCollectionFailureV2Dashboard({
           t("Base") + ": " + selectedShareFilter(selectedValues(selectedBases, options.bases), options.bases, "Todas as bases", t),
           t("Origem do pedido") + ": " + selectedShareFilter(selectedValues(selectedOrigins, options.origins), options.origins, "Todas as origens", t),
         ])}
+        showShare={showShare}
         t={t}
       />
 
@@ -3009,6 +3012,12 @@ export function DashboardApp() {
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
   const [noMovementFeishuDialogOpen, setNoMovementFeishuDialogOpen] = useState(false);
   const [operationalFeishuSource, setOperationalFeishuSource] = useState<"collection_rate" | "pdd_collection_failure" | null>(null);
+  const [operationalFeishuAvailability, setOperationalFeishuAvailability] = useState<{
+    sourceId: "collection_rate" | "pdd_collection_failure";
+    publicationId: string;
+    enabled: boolean;
+    publicationValid: boolean;
+  } | null>(null);
   const [dataSourceDialogId, setDataSourceDialogId] = useState<DashboardSourceId | null>(null);
   const [loaded, setLoaded] = useState<LoadedData | null>(null);
   const [monitoringV2Status, setMonitoringV2Status] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
@@ -3197,10 +3206,100 @@ export function DashboardApp() {
     [language],
   );
   const isMatrixAdminViewer = canReadMonitoringV2(viewerIdentity);
+  const isEffectiveMatrixAdminViewer = isMatrixAdminViewer &&
+    viewerIdentity?.organizational_scope === "matrix" &&
+    viewerIdentity?.role === "matrix" &&
+    viewerIdentity?.is_active !== false;
   const isAuthorizedDashboardViewer = canReadDashboardV2Data(viewerIdentity);
   const [mappingEpoch, setMappingEpoch] = useState(0);
   const dashboardCacheIdentity = `${dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity)}:map:${mappingEpoch}`;
   const pddDataAuthorized = pddCollectionFailureV2State.identityKey === dashboardCacheIdentity;
+  const operationalFeishuTarget = view === "taxa" && isEffectiveMatrixAdminViewer && viewerAuthorization &&
+      collectionRateV2State.status === "ready" && collectionRateV2State.publicationId
+    ? { sourceId: "collection_rate" as const, publicationId: collectionRateV2State.publicationId }
+    : view === "bipagem" && isEffectiveMatrixAdminViewer && viewerAuthorization && pddDataAuthorized &&
+        pddCollectionFailureV2State.status === "ready" && pddCollectionFailureV2State.publicationId
+      ? { sourceId: "pdd_collection_failure" as const, publicationId: pddCollectionFailureV2State.publicationId }
+      : null;
+  const operationalFeishuTargetSource = operationalFeishuTarget?.sourceId ?? null;
+  const operationalFeishuTargetPublication = operationalFeishuTarget?.publicationId ?? null;
+  const canShowCollectionRateFeishuButton = Boolean(
+    view === "taxa" && isEffectiveMatrixAdminViewer && viewerAuthorization &&
+    operationalFeishuAvailability?.sourceId === "collection_rate" &&
+    operationalFeishuAvailability.publicationId === collectionRateV2State.publicationId &&
+    operationalFeishuAvailability.enabled && operationalFeishuAvailability.publicationValid,
+  );
+  const canShowPddFeishuButton = Boolean(
+    view === "bipagem" && isEffectiveMatrixAdminViewer && viewerAuthorization &&
+    operationalFeishuAvailability?.sourceId === "pdd_collection_failure" &&
+    operationalFeishuAvailability.publicationId === pddCollectionFailureV2State.publicationId &&
+    operationalFeishuAvailability.enabled && operationalFeishuAvailability.publicationValid &&
+    pddDataAuthorized,
+  );
+  useEffect(() => {
+    if (!isEffectiveMatrixAdminViewer || !viewerAuthorization || !operationalFeishuTargetSource || !operationalFeishuTargetPublication) {
+      return undefined;
+    }
+
+    let active = true;
+    let inFlight = false;
+    let controller: AbortController | null = null;
+    const refresh = async () => {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      controller = new AbortController();
+      const headers = new Headers();
+      if (viewerAuthorization !== FEISHU_COOKIE_SESSION) headers.set("authorization", viewerAuthorization);
+      try {
+        const query = new URLSearchParams({ publicationId: operationalFeishuTargetPublication });
+        const response = await apiFetch(
+          `/api/v2/operational-feishu/${operationalFeishuTargetSource}/availability?${query.toString()}`,
+          { method: "GET", cache: "no-store", headers, signal: controller.signal },
+        );
+        if (!response.ok) throw new Error("availability_unavailable");
+        const value: unknown = await response.json();
+        const availability = value && typeof value === "object" ? value as Record<string, unknown> : {};
+        if (typeof availability.enabled !== "boolean" || typeof availability.publicationValid !== "boolean") {
+          throw new Error("availability_invalid");
+        }
+        if (!active) return;
+        setOperationalFeishuAvailability({
+          sourceId: operationalFeishuTargetSource,
+          publicationId: operationalFeishuTargetPublication,
+          enabled: availability.enabled,
+          publicationValid: availability.publicationValid,
+        });
+        if (!availability.enabled || !availability.publicationValid) {
+          setOperationalFeishuSource(current => current === operationalFeishuTargetSource ? null : current);
+        }
+      } catch {
+        if (!active || controller?.signal.aborted) return;
+        setOperationalFeishuAvailability({
+          sourceId: operationalFeishuTargetSource,
+          publicationId: operationalFeishuTargetPublication,
+          enabled: false,
+          publicationValid: false,
+        });
+        setOperationalFeishuSource(current => current === operationalFeishuTargetSource ? null : current);
+      } finally {
+        inFlight = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "hidden") void refresh();
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 30_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      controller?.abort();
+    };
+  }, [isEffectiveMatrixAdminViewer, operationalFeishuTargetPublication, operationalFeishuTargetSource, viewerAuthorization]);
   const regionalAccessPendingMessage = viewerIdentity?.region_resolution_status === "SYNC_FAILED"
     ? t("Não foi possível confirmar sua regional no Feishu. Seus dados estão temporariamente indisponíveis. Aguarde uma nova sincronização ou solicite liberação ao administrador.")
     : t("Sua regional ainda não foi identificada. Solicite a liberação ao administrador da plataforma.");
@@ -6686,12 +6785,12 @@ export function DashboardApp() {
       return;
     }
     if (view === "taxa") {
-      if (!isMatrixAdminViewer || !viewerAuthorization || collectionRateV2State.status !== "ready" || !collectionRateV2State.publicationId) return;
+      if (!canShowCollectionRateFeishuButton || !viewerAuthorization || collectionRateV2State.status !== "ready" || !collectionRateV2State.publicationId) return;
       setOperationalFeishuSource("collection_rate");
       return;
     }
     if (view === "bipagem") {
-      if (!isMatrixAdminViewer || !viewerAuthorization || !pddDataAuthorized || pddCollectionFailureV2State.status !== "ready" || !pddCollectionFailureV2State.publicationId) return;
+      if (!canShowPddFeishuButton || !viewerAuthorization || !pddDataAuthorized || pddCollectionFailureV2State.status !== "ready" || !pddCollectionFailureV2State.publicationId) return;
       setOperationalFeishuSource("pdd_collection_failure");
       return;
     }
@@ -6872,6 +6971,7 @@ export function DashboardApp() {
       onPrint={handlePrintReport}
       onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
       onShare={openPanelFeishuShare}
+      showShare={view !== "taxa" || canShowCollectionRateFeishuButton}
       onDataSource={view !== "taxa" && canManageActiveDataSource && activeDataSourceId ? () => setDataSourceDialogId(activeDataSourceId) : undefined}
       sourceLabel={view === "taxa" && taxaLoaded?.sourceType === "MANUAL_UPLOAD" ? taxaLoaded.fileName : undefined}
       t={t}
@@ -7531,7 +7631,8 @@ export function DashboardApp() {
           onClose={() => setNoMovementFeishuDialogOpen(false)}
         />
       ) : null}
-      {operationalFeishuSource && viewerAuthorization && isMatrixAdminViewer ? (
+      {operationalFeishuSource && viewerAuthorization && isEffectiveMatrixAdminViewer &&
+        (operationalFeishuSource === "collection_rate" ? canShowCollectionRateFeishuButton : canShowPddFeishuButton) ? (
         <OperationalFeishuReportDialog
           key={`${operationalFeishuSource}:${operationalFeishuSource === "collection_rate" ? collectionRateV2State.publicationId : pddCollectionFailureV2State.publicationId}`}
           sourceId={operationalFeishuSource}
@@ -7718,6 +7819,7 @@ export function DashboardApp() {
               onPrint={handlePrintReport}
               onAnalysis={() => { setAnalysisCopied(false); setAnalysisOpen(true); }}
               onShare={(filters) => { void openPanelFeishuShare(filters); }}
+              showShare={canShowPddFeishuButton}
               onPeriodChange={(period) => setPddCollectionFailureV2State((current) => ({ ...current, period, status: "loading", progress: { loaded: 0, total: 0, stage: "records" }, error: null }))}
               onRetry={() => {
                 setPddCollectionFailureV2State((current) => ({ ...current, status: "loading", error: null, progress: { loaded: 0, total: 0, stage: "records" } }));

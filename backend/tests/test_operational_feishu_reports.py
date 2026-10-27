@@ -100,7 +100,8 @@ def test_png_is_valid_image_and_reports_source_specific_metrics():
 def test_recipient_is_fixed_before_database_or_artifact_access():
     with pytest.raises(service.OperationalFeishuReportError) as recipient_error:
         service.prepare_report(None, source_id="collection_rate", publication_id="bad", region_code=None,
-                               recipient_key="arbitrary", actor_user_id=1, staging_directory=__import__("pathlib").Path("/tmp"))
+                               recipient_key="arbitrary", actor_user_id=1, staging_directory=__import__("pathlib").Path("/tmp"),
+                               settings=_enabled_settings("collection_rate"))
     assert recipient_error.value.code == "operational_feishu_recipient_invalid"
 
 
@@ -113,9 +114,12 @@ def _report_engine(source_id: str, *, database_url: str = "sqlite://", extra_row
     engine = create_engine(database_url)
     pub_id, map_id = uuid.uuid4(), uuid.uuid4()
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE source_snapshot_head(source_id TEXT, publication_id BLOB)"))
-        connection.execute(text("CREATE TABLE source_publications(source_id TEXT, publication_id BLOB, version_no INTEGER, contract_version INTEGER, map_version_id BLOB, period_start TEXT, snapshot_as_of TEXT, published_at TEXT, publication_state TEXT)"))
+        # The production sources are daily publications. Their dashboard
+        # current rules are per-date metadata / source_daily_head, with no
+        # source_snapshot_head row (the condition that caused the 409).
+        connection.execute(text("CREATE TABLE source_publications(source_id TEXT, publication_id BLOB, version_no INTEGER, contract_version INTEGER, map_version_id BLOB, period_start TEXT, period_end TEXT, row_count INTEGER, snapshot_as_of TEXT, published_at TEXT, publication_state TEXT)"))
         connection.execute(text("CREATE TABLE source_publication_dates(source_id TEXT, publication_id BLOB, data_date TEXT, row_count INTEGER)"))
+        connection.execute(text("CREATE TABLE source_daily_head(source_id TEXT, data_date TEXT, publication_id BLOB, PRIMARY KEY(source_id,data_date))"))
         connection.execute(text("CREATE TABLE base_mapping_entries(map_version_id BLOB, base_code TEXT, regional_name TEXT, base_name TEXT, rm_responsible TEXT)"))
         connection.execute(text(f"CREATE TABLE {source['table']}(source_id TEXT, publication_id BLOB, map_version_id BLOB, source_row_no INTEGER, source_sheet_name TEXT, resolved_base_code TEXT, mapping_resolution TEXT, " + ", ".join(f"`{column.key}` TEXT" for column in contract.columns) + ")"))
         connection.execute(text("""CREATE TABLE operational_feishu_reports(
@@ -123,9 +127,10 @@ def _report_engine(source_id: str, *, database_url: str = "sqlite://", extra_row
           map_version_id BLOB, region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
           analysis_text TEXT, record_count INTEGER, dataset_sha256 BLOB, rules_version TEXT, report_state TEXT,
           delivery_context TEXT, created_at TEXT, updated_at TEXT, confirmed_at TEXT, sent_at TEXT)"""))
-        connection.execute(text("INSERT INTO source_snapshot_head VALUES (:s,:p)"), {"s": source_id, "p": pub_id.bytes})
-        connection.execute(text("INSERT INTO source_publications VALUES (:s,:p,5,:cv,:m,'2026-10-22','2026-10-22','2026-10-22 12:00:00','PUBLISHED')"), {"s": source_id, "p": pub_id.bytes, "cv": source["contract"], "m": map_id.bytes})
+        connection.execute(text("INSERT INTO source_publications VALUES (:s,:p,5,:cv,:m,'2026-10-22','2026-10-22',:count,'2026-10-22','2026-10-22 12:00:00','PUBLISHED')"), {"s": source_id, "p": pub_id.bytes, "cv": source["contract"], "m": map_id.bytes, "count": extra_rows + 2})
         connection.execute(text("INSERT INTO source_publication_dates VALUES (:s,:p,'2026-10-22',:count)"), {"s": source_id, "p": pub_id.bytes, "count": extra_rows + 2})
+        if source_id == "pdd_collection_failure":
+            connection.execute(text("INSERT INTO source_daily_head VALUES (:s,'2026-10-22',:p)"), {"s": source_id, "p": pub_id.bytes})
         connection.execute(text("INSERT INTO base_mapping_entries VALUES (:m,'001','SPS','Base SPS','RM SPS')"), {"m": map_id.bytes})
         connection.execute(text("INSERT INTO base_mapping_entries VALUES (:m,'002','SPE','Base SPE','RM SPE')"), {"m": map_id.bytes})
         values = {column.key: None for column in contract.columns}
@@ -178,6 +183,148 @@ def test_regional_payload_is_exactly_scoped_by_the_publication_mapping(source_id
     assert len(regional["rows"]) == 1
     assert {row["mapped_region"] for row in regional["rows"]} == {"SPS"}
     assert {row["resolved_base_code"] for row in regional["rows"]} == {"001"}
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_current_daily_publication_does_not_require_snapshot_head_and_rejects_superseded(source_id: str):
+    from sqlalchemy import text
+
+    engine, publication_id, map_id = _report_engine(source_id)
+    current = service._publication(engine, source_id, publication_id)
+    assert current["version_no"] == 5
+    assert bytes(current["map_version_id"]) == map_id.bytes
+
+    newer_id = uuid.uuid4()
+    contract_version = service._source(source_id)["contract"]
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO source_publications VALUES (:s,:p,6,:cv,:m,'2026-10-22','2026-10-22',2,'2026-10-22','2026-10-23 12:00:00','PUBLISHED')"),
+                           {"s": source_id, "p": newer_id.bytes, "cv": contract_version, "m": map_id.bytes})
+        connection.execute(text("INSERT INTO source_publication_dates VALUES (:s,:p,'2026-10-22',2)"),
+                           {"s": source_id, "p": newer_id.bytes})
+        if source_id == "pdd_collection_failure":
+            connection.execute(text("UPDATE source_daily_head SET publication_id=:new WHERE source_id=:s AND data_date='2026-10-22'"),
+                               {"s": source_id, "new": newer_id.bytes})
+
+    assert service._publication(engine, source_id, str(newer_id))["version_no"] == 6
+    with pytest.raises(service.OperationalFeishuReportError) as old_publication:
+        service._publication(engine, source_id, publication_id)
+    assert old_publication.value.code == "operational_feishu_publication_not_current"
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+@pytest.mark.parametrize("mutation", ["wrong_contract", "unpublished", "inconsistent_metadata"])
+def test_current_daily_publication_requires_exact_contract_and_published_state(source_id: str, mutation: str):
+    from sqlalchemy import text
+
+    engine, publication_id, _ = _report_engine(source_id)
+    column, value = {
+        "wrong_contract": ("contract_version", 99),
+        "unpublished": ("publication_state", "PREPARED"),
+        "inconsistent_metadata": ("row_count", 99),
+    }[mutation]
+    with engine.begin() as connection:
+        connection.execute(text(f"UPDATE source_publications SET {column}=:value WHERE publication_id=:p"),
+                           {"value": value, "p": uuid.UUID(publication_id).bytes})
+    with pytest.raises(service.OperationalFeishuReportError) as invalid:
+        service._publication(engine, source_id, publication_id)
+    assert invalid.value.code == "operational_feishu_publication_not_current"
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+@pytest.mark.parametrize("field,changed_value,error_code", [
+    ("version_no", 6, "operational_feishu_publication_not_current"),
+    ("map_version_id", uuid.UUID(int=999).bytes, "operational_feishu_mapping_changed"),
+])
+def test_confirmation_rejects_publication_version_or_mapping_changed_after_preparation(
+    tmp_path: Path, source_id: str, field: str, changed_value: object, error_code: str,
+):
+    from sqlalchemy import text
+
+    engine, publication_id, _ = _report_engine(source_id)
+    prepared = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
+        recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
+    )
+    with engine.begin() as connection:
+        connection.execute(text(f"UPDATE source_publications SET {field}=:value WHERE publication_id=:p"),
+                           {"value": changed_value, "p": uuid.UUID(publication_id).bytes})
+    with pytest.raises(service.OperationalFeishuReportError) as changed:
+        service.confirm_report(
+            engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=prepared["analysis"],
+            source_id=source_id, settings=_enabled_settings(source_id),
+        )
+    assert changed.value.code == error_code
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_report_source_id_isolation_rejects_publication_from_another_source(source_id: str):
+    engine, publication_id, _ = _report_engine(source_id)
+    other_source = "pdd_collection_failure" if source_id == "collection_rate" else "collection_rate"
+    with pytest.raises(service.OperationalFeishuReportError) as wrong_source:
+        service._publication(engine, other_source, publication_id)
+    assert wrong_source.value.code == "operational_feishu_publication_not_current"
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_send_revalidates_daily_current_publication_before_any_feishu_request(
+    tmp_path: Path, monkeypatch, source_id: str,
+):
+    from sqlalchemy import text
+
+    engine, publication_id, map_id = _report_engine(source_id)
+    fake = _FakeFeishuClient()
+    monkeypatch.setattr(service.httpx, "Client", lambda **_kwargs: fake)
+    prepared = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
+        recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
+    )
+    service.confirm_report(
+        engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=prepared["analysis"],
+        source_id=source_id, settings=_enabled_settings(source_id),
+    )
+    newer_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO source_publications VALUES (:s,:p,6,:cv,:m,'2026-10-22','2026-10-22',2,'2026-10-22','2026-10-23 12:00:00','PUBLISHED')"),
+                           {"s": source_id, "p": newer_id.bytes, "cv": service._source(source_id)["contract"], "m": map_id.bytes})
+        connection.execute(text("INSERT INTO source_publication_dates VALUES (:s,:p,'2026-10-22',2)"),
+                           {"s": source_id, "p": newer_id.bytes})
+        if source_id == "pdd_collection_failure":
+            connection.execute(text("UPDATE source_daily_head SET publication_id=:new WHERE source_id=:s AND data_date='2026-10-22'"),
+                               {"s": source_id, "new": newer_id.bytes})
+
+    with pytest.raises(service.OperationalFeishuReportError) as replaced:
+        service.send_report(
+            engine, source_id=source_id, report_id=prepared["reportId"], actor_user_id=71,
+            staging_directory=tmp_path, settings=_enabled_settings(source_id),
+        )
+    assert replaced.value.code == "operational_feishu_publication_not_current"
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_disabled_source_flag_blocks_options_prepare_confirm_and_send_before_publication_lookup(source_id: str, tmp_path: Path):
+    disabled = Settings(_env_file=None)
+    with pytest.raises(service.OperationalFeishuReportError) as options_error:
+        service.get_options(None, source_id=source_id, publication_id=str(uuid.uuid4()), settings=disabled)
+    assert options_error.value.code == "operational_feishu_send_disabled"
+
+    with pytest.raises(service.OperationalFeishuReportError) as prepare_error:
+        service.prepare_report(None, source_id=source_id, publication_id=str(uuid.uuid4()), region_code=None,
+                               recipient_key=service.RECIPIENT_KEY, actor_user_id=1,
+                               staging_directory=tmp_path, settings=disabled)
+    assert prepare_error.value.code == "operational_feishu_send_disabled"
+
+    with pytest.raises(service.OperationalFeishuReportError) as confirm_error:
+        service.confirm_report(None, report_id=str(uuid.uuid4()), actor_user_id=1,
+                               analysis_text="confirmed", source_id=source_id, settings=disabled)
+    assert confirm_error.value.code == "operational_feishu_send_disabled"
+
+    with pytest.raises(service.OperationalFeishuReportError) as send_error:
+        service.send_report(None, source_id=source_id, report_id=str(uuid.uuid4()), actor_user_id=1,
+                            staging_directory=tmp_path, settings=disabled)
+    assert send_error.value.code == "operational_feishu_send_disabled"
 
 
 @pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
@@ -236,7 +383,8 @@ def test_generation_timeout_leaves_no_report_or_partial_artifact(tmp_path: Path,
     monkeypatch.setattr(service, "MAX_GENERATION_SECONDS", 0.0)
     with pytest.raises(service.OperationalFeishuReportError) as error:
         service.prepare_report(engine, source_id=source_id, publication_id=publication_id, region_code=None,
-                              recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path)
+                              recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+                              settings=_enabled_settings(source_id))
     assert error.value.code == "operational_feishu_generation_timeout"
     assert error.value.status_code == 504
     with engine.connect() as connection:
@@ -250,7 +398,8 @@ def test_prepare_confirm_and_disabled_send_use_same_publication_map_and_immutabl
     engine, publication_id, map_id = _report_engine(source_id)
     monkeypatch.setattr(service, "get_settings", lambda: Settings(_env_file=None))
     prepared = service.prepare_report(engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
-                                     recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path)
+                                     recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+                                     settings=_enabled_settings(source_id))
     assert prepared["state"] == "PREPARED"
     assert prepared["regionCode"] == "SPS"
     assert prepared["mapVersionId"] == str(map_id)
@@ -264,7 +413,8 @@ def test_prepare_confirm_and_disabled_send_use_same_publication_map_and_immutabl
         assert (private.stat().st_mode & 0o777) == 0o700
         assert ((private / f"{report_uuid.hex}.xlsx").stat().st_mode & 0o777) == 0o600
     edited = prepared["analysis"] + "\n**Revisado pelo administrador**"
-    confirmed = service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=edited, source_id=source_id)
+    confirmed = service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=edited,
+                                       source_id=source_id, settings=_enabled_settings(source_id))
     assert confirmed["state"] == "CONFIRMED"
     with engine.connect() as connection:
         row = connection.execute(__import__("sqlalchemy").text("SELECT analysis_text,report_state FROM operational_feishu_reports WHERE report_id=:id"), {"id": report_uuid.bytes}).first()
@@ -318,6 +468,79 @@ def _enabled_settings(source_id: str) -> Settings:
     )
 
 
+@pytest.mark.parametrize("collection_enabled,pdd_enabled", [
+    (False, False), (True, False), (False, True), (True, True),
+])
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_availability_is_source_specific_and_validates_the_current_publication(
+    source_id: str, collection_enabled: bool, pdd_enabled: bool,
+):
+    engine, publication_id, _ = _report_engine(source_id)
+    settings = Settings(
+        _env_file=None,
+        feishu_collection_rate_report_enabled=collection_enabled,
+        feishu_pdd_collection_failure_report_enabled=pdd_enabled,
+    )
+    expected_enabled = collection_enabled if source_id == "collection_rate" else pdd_enabled
+    result = service.get_availability(
+        engine if expected_enabled else None,
+        source_id=source_id,
+        publication_id=publication_id,
+        settings=settings,
+    )
+    assert result == {"enabled": expected_enabled, "publicationValid": expected_enabled}
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_availability_fails_closed_for_unavailable_publication_and_tracks_runtime_flag_changes(source_id: str):
+    engine, publication_id, _ = _report_engine(source_id)
+    flag_name = service._source(source_id)["flag"]
+    disabled = Settings(_env_file=None, **{flag_name: False})
+    enabled = Settings(_env_file=None, **{flag_name: True})
+
+    assert service.get_availability(None, source_id=source_id, publication_id=publication_id, settings=disabled) == {
+        "enabled": False, "publicationValid": False,
+    }
+    assert service.get_availability(engine, source_id=source_id, publication_id=publication_id, settings=enabled) == {
+        "enabled": True, "publicationValid": True,
+    }
+    assert service.get_availability(None, source_id=source_id, publication_id=publication_id, settings=disabled) == {
+        "enabled": False, "publicationValid": False,
+    }
+    invalid = str(uuid.uuid4())
+    assert service.get_availability(engine, source_id=source_id, publication_id=invalid, settings=enabled) == {
+        "enabled": True, "publicationValid": False,
+    }
+
+
+def test_availability_endpoint_requires_effective_matrix_admin_and_returns_only_booleans(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from app.api import data_foundation as api
+
+    route = next(route for route in api.router.routes if getattr(route, "path", "") == "/v2/operational-feishu/{source_id}/availability")
+    assert any(dependency.call is api.require_matrix_admin for dependency in route.dependant.dependencies)
+    monkeypatch.setattr(api, "_require_feature", lambda: None)
+    monkeypatch.setattr(api, "_engine", lambda: object())
+    monkeypatch.setattr(api, "get_operational_feishu_report_availability", lambda *args, **kwargs: {
+        "enabled": True, "publicationValid": True,
+    })
+    matrix_admin = SimpleNamespace(
+        user=SimpleNamespace(platform_role="ADMIN"),
+        identity={"administrative_scope": "matrix", "organizational_scope": "matrix", "role": "matrix"},
+    )
+    assert api.operational_feishu_report_availability(
+        "collection_rate", str(uuid.uuid4()), matrix_admin,
+    ) == {"enabled": True, "publicationValid": True}
+    regional_admin = SimpleNamespace(
+        user=SimpleNamespace(platform_role="ADMIN"),
+        identity={"administrative_scope": "matrix", "organizational_scope": "regional", "role": "regional"},
+    )
+    with pytest.raises(HTTPException) as forbidden:
+        api.operational_feishu_report_availability("collection_rate", str(uuid.uuid4()), regional_admin)
+    assert forbidden.value.status_code == 403
+
+
 @pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
 def test_send_uses_confirmed_analysis_and_same_immutable_artifacts_without_real_network(tmp_path: Path, monkeypatch, source_id: str):
     engine, publication_id, _ = _report_engine(source_id)
@@ -326,9 +549,11 @@ def test_send_uses_confirmed_analysis_and_same_immutable_artifacts_without_real_
     prepared = service.prepare_report(
         engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
         recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
     )
     edited = prepared["analysis"] + "\n**Conferido manualmente**"
-    service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=edited, source_id=source_id)
+    service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=edited,
+                           source_id=source_id, settings=_enabled_settings(source_id))
 
     result = service.send_report(
         engine, source_id=source_id, report_id=prepared["reportId"], actor_user_id=71,
@@ -369,9 +594,11 @@ def test_send_rejects_modified_artifact_after_confirmation(tmp_path: Path, monke
     prepared = service.prepare_report(
         engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
         recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
     )
     service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71,
-                           analysis_text=prepared["analysis"], source_id=source_id)
+                           analysis_text=prepared["analysis"], source_id=source_id,
+                           settings=_enabled_settings(source_id))
     artifact = tmp_path / ".operational-feishu-reports" / f"{uuid.UUID(prepared['reportId']).hex}.xlsx"
     artifact.write_bytes(artifact.read_bytes() + b"tampered")
     with pytest.raises(service.OperationalFeishuReportError) as changed:
@@ -393,9 +620,11 @@ def test_partial_or_ambiguous_delivery_is_not_retried_automatically(tmp_path: Pa
     prepared = service.prepare_report(
         engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
         recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
     )
     service.confirm_report(engine, report_id=prepared["reportId"], actor_user_id=71,
-                           analysis_text=prepared["analysis"], source_id=source_id)
+                           analysis_text=prepared["analysis"], source_id=source_id,
+                           settings=_enabled_settings(source_id))
     expected_state = "PENDING" if ambiguous else "PARTIAL"
     expected_error = "operational_feishu_delivery_pending" if ambiguous else "operational_feishu_partial_delivery"
     with pytest.raises(service.OperationalFeishuReportError) as failure:

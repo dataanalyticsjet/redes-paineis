@@ -9,6 +9,7 @@ export function DashboardActionBand({
   onPrint,
   onAnalysis,
   onShare,
+  showShare = true,
   onDataSource,
   sourceLabel,
   t,
@@ -18,6 +19,7 @@ export function DashboardActionBand({
   onPrint: () => void;
   onAnalysis: () => void;
   onShare: () => void;
+  showShare?: boolean;
   onDataSource?: () => void;
   sourceLabel?: string;
   t: DashboardTranslator;
@@ -33,7 +35,7 @@ export function DashboardActionBand({
         {onDataSource ? <button type="button" onClick={onDataSource}><Database size={16} /> {t("Fonte de dados")}</button> : null}
         <button type="button" onClick={onPrint}><Printer size={16} /> {t("Gerar PDF")}</button>
         <button type="button" onClick={onAnalysis}><Sparkles size={16} /> {t("Análise IA")}</button>
-        <button type="button" onClick={onShare}><Send size={15} /> {t("Enviar para Feishu")}</button>
+        {showShare ? <button type="button" onClick={onShare}><Send size={15} /> {t("Enviar para Feishu")}</button> : null}
       </div>
     </section>
   );

@@ -94,6 +94,11 @@ def _feature_enabled(source_id: str, settings: Settings) -> bool:
     return bool(getattr(settings, _source(source_id)["flag"], False))
 
 
+def _require_feature_enabled(source_id: str, settings: Settings) -> None:
+    if not _feature_enabled(source_id, settings):
+        raise OperationalFeishuReportError("operational_feishu_send_disabled", 503)
+
+
 def _artifact_root(staging_directory: Path) -> Path:
     root = staging_directory.expanduser().resolve()
     if not root.is_absolute() or root.is_relative_to(PROJECT_ROOT.resolve()):
@@ -183,13 +188,89 @@ def _publication(engine: Engine, source_id: str, publication_id: str, connection
     if connection is None:
         with engine.connect() as active:
             return _publication(engine, source_id, publication_id, active)
-    row = connection.execute(text("""
+    # These are daily sources. The dashboards do not use source_snapshot_head:
+    # collection_rate resolves the current publication per date by greatest
+    # published version, while PDD reads the source_daily_head pointer per date.
+    # Accept a publication only when every non-empty date it owns is still the
+    # active partition under that same source-specific rule. This also rejects
+    # a superseded publication without requiring a snapshot-level head row.
+    if source_id == "collection_rate":
+        current_partition = """
+            NOT EXISTS (
+                SELECT 1
+                FROM source_publication_dates AS candidate_date
+                WHERE candidate_date.source_id = p.source_id
+                  AND candidate_date.publication_id = p.publication_id
+                  AND candidate_date.row_count > 0
+                  AND EXISTS (
+                      SELECT 1
+                      FROM source_publications AS newer
+                      JOIN source_publication_dates AS newer_date
+                        ON newer_date.source_id = newer.source_id
+                       AND newer_date.publication_id = newer.publication_id
+                       AND newer_date.data_date = candidate_date.data_date
+                       AND newer_date.row_count > 0
+                      WHERE newer.source_id = p.source_id
+                        AND newer.contract_version = p.contract_version
+                        AND newer.publication_state = 'PUBLISHED'
+                        AND newer.version_no > p.version_no
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM source_publication_dates AS active_date
+                WHERE active_date.source_id = p.source_id
+                  AND active_date.publication_id = p.publication_id
+                  AND active_date.row_count > 0
+            )
+        """
+    else:
+        current_partition = """
+            NOT EXISTS (
+                SELECT 1
+                FROM source_publication_dates AS candidate_date
+                WHERE candidate_date.source_id = p.source_id
+                  AND candidate_date.publication_id = p.publication_id
+                  AND candidate_date.row_count > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM source_daily_head AS active_head
+                      WHERE active_head.source_id = candidate_date.source_id
+                        AND active_head.data_date = candidate_date.data_date
+                        AND active_head.publication_id = candidate_date.publication_id
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM source_publication_dates AS active_date
+                JOIN source_daily_head AS active_head
+                  ON active_head.source_id = active_date.source_id
+                 AND active_head.data_date = active_date.data_date
+                 AND active_head.publication_id = active_date.publication_id
+                WHERE active_date.source_id = p.source_id
+                  AND active_date.publication_id = p.publication_id
+                  AND active_date.row_count > 0
+            )
+        """
+    row = connection.execute(text(f"""
         SELECT p.publication_id, p.version_no, p.contract_version, p.map_version_id,
                p.period_start, p.snapshot_as_of, p.published_at, p.publication_state
-        FROM source_snapshot_head h
-        JOIN source_publications p ON p.source_id=h.source_id AND p.publication_id=h.publication_id
-        WHERE h.source_id=:source_id AND h.publication_id=:publication_id
+        FROM source_publications AS p
+        WHERE p.source_id=:source_id AND p.publication_id=:publication_id
           AND p.publication_state='PUBLISHED' AND p.contract_version=:contract_version
+          AND p.row_count = (
+              SELECT COALESCE(SUM(metadata.row_count), 0)
+              FROM source_publication_dates AS metadata
+              WHERE metadata.source_id=p.source_id AND metadata.publication_id=p.publication_id
+          )
+          AND p.period_start = (
+              SELECT MIN(metadata.data_date)
+              FROM source_publication_dates AS metadata
+              WHERE metadata.source_id=p.source_id AND metadata.publication_id=p.publication_id
+          )
+          AND p.period_end = (
+              SELECT MAX(metadata.data_date)
+              FROM source_publication_dates AS metadata
+              WHERE metadata.source_id=p.source_id AND metadata.publication_id=p.publication_id
+          )
+          AND {current_partition}
     """), {"source_id": source_id, "publication_id": binary_id, "contract_version": source["contract"]}).mappings().first()
     if row is None:
         raise OperationalFeishuReportError("operational_feishu_publication_not_current", 409)
@@ -199,6 +280,16 @@ def _publication(engine: Engine, source_id: str, publication_id: str, connection
         raise OperationalFeishuReportError("operational_feishu_publication_mapping_invalid", 409)
     result["map_version_id"] = map_id
     return result
+
+
+def _assert_report_publication_matches(report: Any, publication: dict[str, Any]) -> None:
+    if (
+        int(report["publication_version"]) != int(publication["version_no"])
+        or int(report["contract_version"]) != int(publication["contract_version"])
+    ):
+        raise OperationalFeishuReportError("operational_feishu_publication_not_current", 409)
+    if bytes(report["map_version_id"]) != bytes(publication["map_version_id"]):
+        raise OperationalFeishuReportError("operational_feishu_mapping_changed", 409)
 
 
 def _regions(engine: Engine, map_id: bytes, connection: Connection | None = None) -> list[str]:
@@ -281,6 +372,7 @@ def _digest_rows(connection: Connection, engine: Engine, source_id: str, publica
 
 def get_options(engine: Engine, *, source_id: str, publication_id: str, settings: Settings | None = None) -> dict[str, object]:
     config = settings or get_settings()
+    _require_feature_enabled(source_id, config)
     publication = _publication(engine, source_id, publication_id)
     source = _source(source_id)
     published_at = publication.get("published_at")
@@ -294,8 +386,30 @@ def get_options(engine: Engine, *, source_id: str, publication_id: str, settings
         "mapVersionId": str(uuid.UUID(bytes=bytes(publication["map_version_id"]))),
         "publishedAt": published_text, "regions": _regions(engine, bytes(publication["map_version_id"])),
         "recipients": [{"key": RECIPIENT_KEY, "label": RECIPIENT_LABEL}],
-        "sendEnabled": _feature_enabled(source_id, config),
+        "sendEnabled": True,
     }
+
+
+def get_availability(
+    engine: Engine | None,
+    *,
+    source_id: str,
+    publication_id: str,
+    settings: Settings | None = None,
+) -> dict[str, bool]:
+    """Expose only per-source send availability to authorized dashboard UI."""
+    config = settings or get_settings()
+    enabled = _feature_enabled(source_id, config)
+    if not enabled:
+        # Fail closed without querying publication metadata while disabled.
+        return {"enabled": False, "publicationValid": False}
+    try:
+        if engine is None:
+            raise OperationalFeishuReportError("operational_feishu_publication_not_current", 409)
+        _publication(engine, source_id, publication_id)
+    except OperationalFeishuReportError:
+        return {"enabled": True, "publicationValid": False}
+    return {"enabled": True, "publicationValid": True}
 
 
 def _stable(value: object) -> object:
@@ -808,6 +922,7 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
                    settings: Settings | None = None) -> dict[str, object]:
     config = settings or get_settings()
     _source(source_id)
+    _require_feature_enabled(source_id, config)
     if recipient_key != RECIPIENT_KEY:
         raise OperationalFeishuReportError("operational_feishu_recipient_invalid", 403)
     report_id = uuid.uuid4()
@@ -863,10 +978,14 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
             "recipientLabel": RECIPIENT_LABEL, "analysis": payload["analysis"],
             "recordCount": payload["recordCount"], "excelFileName": payload["fileName"],
             "excelBytes": payload["xlsxBytes"], "pngBytes": payload["pngBytes"], "state": "PREPARED",
-            "sendEnabled": _feature_enabled(source_id, config)}
+            "sendEnabled": True}
 
 
-def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analysis_text: str, source_id: str) -> dict[str, object]:
+def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analysis_text: str, source_id: str,
+                   settings: Settings | None = None) -> dict[str, object]:
+    config = settings or get_settings()
+    _source(source_id)
+    _require_feature_enabled(source_id, config)
     if not analysis_text.strip():
         raise OperationalFeishuReportError("operational_feishu_text_required", 422)
     if len(analysis_text) > 20000:
@@ -874,14 +993,15 @@ def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analys
     key, now = _uuid(report_id), _now()
     with engine.begin() as connection:
         lock = " FOR UPDATE" if engine.dialect.name == "mysql" else ""
-        row = connection.execute(text(f"SELECT report_id,source_id,publication_id,report_state FROM {TABLE} WHERE report_id=:id AND actor_user_id=:actor" + lock), {"id": key, "actor": actor_user_id}).mappings().first()
+        row = connection.execute(text(f"SELECT report_id,source_id,publication_id,publication_version,contract_version,map_version_id,report_state FROM {TABLE} WHERE report_id=:id AND actor_user_id=:actor" + lock), {"id": key, "actor": actor_user_id}).mappings().first()
         if row is None:
             raise OperationalFeishuReportError("operational_feishu_report_not_found", 404)
         if str(row["source_id"]) != source_id:
             raise OperationalFeishuReportError("operational_feishu_report_not_found", 404)
         if row["report_state"] not in {"PREPARED", "CONFIRMED"}:
             raise OperationalFeishuReportError("operational_feishu_confirmation_invalid", 409)
-        _publication(engine, str(row["source_id"]), str(uuid.UUID(bytes=bytes(row["publication_id"]))), connection)
+        publication = _publication(engine, str(row["source_id"]), str(uuid.UUID(bytes=bytes(row["publication_id"]))), connection)
+        _assert_report_publication_matches(row, publication)
         connection.execute(text(f"UPDATE {TABLE} SET report_state='CONFIRMED',analysis_text=:analysis,confirmed_at=:now,updated_at=:now WHERE report_id=:id AND actor_user_id=:actor"), {"analysis": analysis_text, "now": now, "id": key, "actor": actor_user_id})
     return {"reportId": report_id, "state": "CONFIRMED", "messageSent": False}
 
@@ -896,6 +1016,8 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
                 settings: Settings | None = None) -> dict[str, object]:
     config = settings or get_settings()
     requested_source_id = source_id
+    _source(requested_source_id)
+    _require_feature_enabled(requested_source_id, config)
     key, now = _uuid(report_id), _now()
     with engine.begin() as connection:
         lock = " FOR UPDATE" if engine.dialect.name == "mysql" else ""
@@ -914,11 +1036,8 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
         if row["report_state"] != "CONFIRMED":
             raise OperationalFeishuReportError("operational_feishu_report_not_confirmed", 409)
         publication_id = str(uuid.UUID(bytes=bytes(row["publication_id"])))
-        if engine.dialect.name == "mysql":
-            connection.execute(text("SELECT publication_id FROM source_snapshot_head WHERE source_id=:source AND publication_id=:id FOR UPDATE"), {"source": source_id, "id": bytes(row["publication_id"])}).first()
         publication = _publication(engine, source_id, publication_id, connection)
-        if bytes(publication["map_version_id"]) != bytes(row["map_version_id"]):
-            raise OperationalFeishuReportError("operational_feishu_mapping_changed", 409)
+        _assert_report_publication_matches(row, publication)
         duplicate = connection.execute(text(f"SELECT report_id FROM {TABLE} WHERE source_id=:source AND publication_id=:pub AND region_key=:region AND recipient_key=:recipient AND rules_version=:rules AND report_id<>:id AND report_state IN ('SENDING','PARTIAL','PENDING','SENT') LIMIT 1" + lock), {"source": source_id, "pub": bytes(row["publication_id"]), "region": row["region_key"], "recipient": row["recipient_key"], "rules": row["rules_version"], "id": key}).first()
         if duplicate:
             raise OperationalFeishuReportError("operational_feishu_report_already_sent_or_unresolved", 409)

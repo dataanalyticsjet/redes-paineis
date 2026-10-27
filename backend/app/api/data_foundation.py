@@ -95,6 +95,7 @@ from app.services.no_movement_feishu_reports import (
 from app.services.operational_feishu_reports import (
     OperationalFeishuReportError,
     confirm_report as confirm_operational_feishu_report,
+    get_availability as get_operational_feishu_report_availability,
     get_options as get_operational_feishu_report_options,
     prepare_report as prepare_operational_feishu_report,
     send_report as send_operational_feishu_report,
@@ -1440,6 +1441,24 @@ def operational_feishu_report_options(
     _require_effective_matrix_admin(admin)
     try:
         return get_operational_feishu_report_options(_engine(), source_id=source_id, publication_id=publication_id)
+    except OperationalFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/operational-feishu/{source_id}/availability")
+def operational_feishu_report_availability(
+    source_id: Literal["collection_rate", "pdd_collection_failure"],
+    publication_id: str = Query(alias="publicationId", min_length=36, max_length=36),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, bool]:
+    _require_feature()
+    _require_effective_matrix_admin(admin)
+    try:
+        return get_operational_feishu_report_availability(
+            _engine(), source_id=source_id, publication_id=publication_id,
+        )
     except OperationalFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:

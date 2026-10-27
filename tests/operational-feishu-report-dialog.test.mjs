@@ -46,5 +46,5 @@ test("recipient choices come from the fixed server list and real send remains se
 test("the two report dialogs are opened only for a ready published snapshot and matrix admin", () => {
   assert.match(app, /collectionRateV2State\.status !== "ready" \|\| !collectionRateV2State\.publicationId/);
   assert.match(app, /pddCollectionFailureV2State\.status !== "ready" \|\| !pddCollectionFailureV2State\.publicationId/);
-  assert.match(app, /operationalFeishuSource && viewerAuthorization && isMatrixAdminViewer/);
+  assert.match(app, /operationalFeishuSource && viewerAuthorization && isEffectiveMatrixAdminViewer/);
 });
