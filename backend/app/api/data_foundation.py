@@ -85,6 +85,13 @@ from app.services.no_movement_operational_analysis import (
     generate_publication_analysis,
     get_analysis_history,
 )
+from app.services.no_movement_feishu_reports import (
+    NoMovementFeishuReportError,
+    confirm_report as confirm_no_movement_feishu_report,
+    get_report_options as get_no_movement_feishu_report_options,
+    prepare_report as prepare_no_movement_feishu_report,
+    send_report as send_no_movement_feishu_report,
+)
 from app.services.collection_rate_operational_analysis import (
     generate_publication_analysis as generate_collection_rate_operational_analysis,
     get_analysis_history as get_collection_rate_analysis_history,
@@ -117,6 +124,20 @@ class NetworkDirectoryActivationPayload(BaseModel):
 
     expected_official_map_version_id: str = Field(alias="expectedOfficialMapVersionId", min_length=36, max_length=36)
     review_sha256: str = Field(alias="reviewSha256", min_length=64, max_length=64)
+
+
+class NoMovementFeishuPreparePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    publication_id: str = Field(alias="publicationId", min_length=36, max_length=36)
+    region_code: str | None = Field(default=None, alias="regionCode", max_length=64)
+    recipient_key: str = Field(alias="recipientKey", min_length=1, max_length=64)
+
+
+class NoMovementFeishuConfirmPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    interpretation: str = Field(default="", max_length=4000)
+    comments: str = Field(default="", max_length=4000)
+    recommendations: str = Field(default="", max_length=4000)
 
 
 def _require_feature(*, imports: bool = False) -> None:
@@ -207,6 +228,17 @@ def _same_origin(request: Request) -> None:
     expected = str(get_settings().frontend_base_url).rstrip("/")
     if not origin or origin.rstrip("/") != expected:
         raise HTTPException(status_code=403, detail="same_origin_required")
+
+
+def _require_effective_matrix_admin(viewer: AuthenticatedViewer) -> None:
+    identity = viewer.identity
+    if not (
+        viewer.user.platform_role == "ADMIN"
+        and identity.get("administrative_scope") == "matrix"
+        and identity.get("organizational_scope") == "matrix"
+        and identity.get("role") == "matrix"
+    ):
+        raise HTTPException(status_code=403, detail="matrix_scope_required")
 
 
 def _safe_upload_name(name: str | None) -> str:
@@ -1286,6 +1318,81 @@ def no_movement_operational_analysis(
         raise HTTPException(status_code=403, detail="matrix_scope_required")
     try:
         return get_analysis_history(_engine(), limit=limit)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/no-movement/feishu-report/options")
+def no_movement_feishu_report_options(
+    publication_id: str = Query(alias="publicationId", min_length=36, max_length=36),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _require_effective_matrix_admin(admin)
+    try:
+        return get_no_movement_feishu_report_options(_engine(), publication_id=publication_id)
+    except NoMovementFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/no-movement/feishu-report/prepare")
+def no_movement_feishu_report_prepare(
+    payload: NoMovementFeishuPreparePayload,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return prepare_no_movement_feishu_report(
+            _engine(), publication_id=payload.publication_id, region_code=payload.region_code,
+            recipient_key=payload.recipient_key, actor_user_id=admin.user.id,
+        )
+    except NoMovementFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/no-movement/feishu-report/{report_id}/confirm")
+def no_movement_feishu_report_confirm(
+    report_id: str,
+    payload: NoMovementFeishuConfirmPayload,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return confirm_no_movement_feishu_report(
+            _engine(), report_id=report_id, actor_user_id=admin.user.id,
+            interpretation=payload.interpretation, comments=payload.comments, recommendations=payload.recommendations,
+        )
+    except NoMovementFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/no-movement/feishu-report/{report_id}/send")
+def no_movement_feishu_report_send(
+    report_id: str,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return send_no_movement_feishu_report(
+            _engine(), report_id=report_id, actor_user_id=admin.user.id,
+        )
+    except NoMovementFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 

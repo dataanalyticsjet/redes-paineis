@@ -6,3 +6,5 @@ pydantic-settings
 pytest
 httpx
 python-multipart
+openpyxl>=3.1.0
+Pillow>=10.0.0

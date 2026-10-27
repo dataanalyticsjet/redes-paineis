@@ -4,6 +4,7 @@ import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revisi
 
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
+import { NoMovementFeishuReportDialog } from "./no-movement-feishu-report-dialog.tsx";
 import { CollectionRateOperationalAnalysis } from "./collection-rate-operational-analysis.tsx";
 import { PddCollectionFailureOperationalAnalysis } from "./pdd-collection-failure-operational-analysis.tsx";
 
@@ -3005,6 +3006,7 @@ export function DashboardApp() {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisCopied, setAnalysisCopied] = useState(false);
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
+  const [noMovementFeishuDialogOpen, setNoMovementFeishuDialogOpen] = useState(false);
   const [dataSourceDialogId, setDataSourceDialogId] = useState<DashboardSourceId | null>(null);
   const [loaded, setLoaded] = useState<LoadedData | null>(null);
   const [monitoringV2Status, setMonitoringV2Status] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
@@ -6676,6 +6678,11 @@ export function DashboardApp() {
     ];
   };
   const openPanelFeishuShare = async (filterOverride?: string[]) => {
+    if (view === "movimentacao") {
+      if (!isMatrixAdminViewer || !viewerAuthorization || noMovementV2State.status !== "ready" || noMovementV2State.identityKey !== dashboardCacheIdentity || !noMovementV2State.publicationId) return;
+      setNoMovementFeishuDialogOpen(true);
+      return;
+    }
     const panelTitle = dashboardCards.find((card) => card.id === view)?.title ?? "Monitoramento de coleta";
     let panelContent = analysisText;
     if (view === "bipagem") {
@@ -7522,6 +7529,15 @@ export function DashboardApp() {
       ) : null}
 
       <FeishuShareDialog preview={feishuSharePreview} onClose={() => setFeishuSharePreview(null)} t={t} />
+      {noMovementFeishuDialogOpen && noMovementV2State.status === "ready" && noMovementV2State.identityKey === dashboardCacheIdentity && noMovementV2State.publicationId && viewerAuthorization && isMatrixAdminViewer ? (
+        <NoMovementFeishuReportDialog
+          key={noMovementV2State.publicationId}
+          publicationId={noMovementV2State.publicationId}
+          authorization={viewerAuthorization}
+          t={t}
+          onClose={() => setNoMovementFeishuDialogOpen(false)}
+        />
+      ) : null}
       {responsibilitySourceDialogOpen ? <ResponsibilitySourceDialog
         onClose={() => {
           setResponsibilitySourceDialogOpen(false);

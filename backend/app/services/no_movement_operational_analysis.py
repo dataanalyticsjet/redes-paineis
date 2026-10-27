@@ -47,6 +47,7 @@ def build_bilingual_analysis(
     generated_at: datetime | None = None,
     region_limit: int = 5,
     base_limit: int = 5,
+    region_scope: str | None = None,
 ) -> str:
     now = generated_at or datetime.now(SAO_PAULO)
     if now.tzinfo is None:
@@ -71,12 +72,15 @@ def build_bilingual_analysis(
         assert isinstance(bases, list)
         bases.append({**group, "total": amount})
 
-    lines = [greeting_pt, greeting_zh, "", "📊 **SEM MOVIMENTAÇÃO | 无流转**", "",
+    scope_title = f" — REGIONAL {region_scope} | 区域 {region_scope}" if region_scope else ""
+    volume_label_pt = "Volume regional" if region_scope else "Volume nacional"
+    volume_label_zh = "区域无流转订单总量" if region_scope else "全国无流转订单总量"
+    lines = [greeting_pt, greeting_zh, "", f"📊 **SEM MOVIMENTAÇÃO | 无流转{scope_title}**", "",
              f"📅 Data operacional: {operational_date.strftime('%d/%m/%Y')}",
              f"🕒 Exportação: {export_label}",
              f"📄 Publicação: v{publication_version}",
-             f"📦 Volume nacional: {total:,} pacotes".replace(",", "."),
-             f"全国无流转订单总量：**{total:,} 单**".replace(",", "."), "",
+             f"📦 {volume_label_pt}: {total:,} pacotes".replace(",", "."),
+             f"{volume_label_zh}：**{total:,} 单**".replace(",", "."), "",
              "⚠️ **REGIONAIS EM ATENÇÃO | 重点关注区域**"]
     ranked = sorted(regions.items(), key=lambda item: (-_integer(item[1]["total"]), item[0]))
     for region, bucket in ranked[:max(1, region_limit)]:
