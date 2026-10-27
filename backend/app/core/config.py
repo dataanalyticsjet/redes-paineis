@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     feishu_excel_test_delivery_enabled: bool = False
     # Manual no-movement Feishu pilot is independent from publication notices.
     feishu_no_movement_pilot_enabled: bool = False
+    # Operational report delivery is independently opt-in per published source.
+    feishu_collection_rate_report_enabled: bool = False
+    feishu_pdd_collection_failure_report_enabled: bool = False
     feishu_oauth_authorize_url: AnyHttpUrl = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
     feishu_oauth_token_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
     feishu_oauth_userinfo_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v1/user_info"

@@ -92,6 +92,13 @@ from app.services.no_movement_feishu_reports import (
     prepare_report as prepare_no_movement_feishu_report,
     send_report as send_no_movement_feishu_report,
 )
+from app.services.operational_feishu_reports import (
+    OperationalFeishuReportError,
+    confirm_report as confirm_operational_feishu_report,
+    get_options as get_operational_feishu_report_options,
+    prepare_report as prepare_operational_feishu_report,
+    send_report as send_operational_feishu_report,
+)
 from app.services.collection_rate_operational_analysis import (
     generate_publication_analysis as generate_collection_rate_operational_analysis,
     get_analysis_history as get_collection_rate_analysis_history,
@@ -138,6 +145,18 @@ class NoMovementFeishuConfirmPayload(BaseModel):
     analysis_text: str = Field(alias="analysisText", min_length=1, max_length=20000)
 
 
+class OperationalFeishuPreparePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    publication_id: str = Field(alias="publicationId", min_length=36, max_length=36)
+    region_code: str | None = Field(default=None, alias="regionCode", max_length=64)
+    recipient_key: str = Field(alias="recipientKey", min_length=1, max_length=64)
+
+
+class OperationalFeishuConfirmPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    analysis_text: str = Field(alias="analysisText", min_length=1, max_length=20000)
+
+
 def _require_feature(*, imports: bool = False) -> None:
     settings = get_settings()
     enabled = settings.data_import_enabled if imports else settings.data_queries_enabled
@@ -155,6 +174,13 @@ def _no_movement_report_staging_directory() -> Path:
     directory = get_settings().data_import_staging_directory
     if directory is None:
         raise HTTPException(status_code=503, detail="no_movement_report_artifact_storage_unavailable")
+    return directory
+
+
+def _operational_report_staging_directory() -> Path:
+    directory = get_settings().data_import_staging_directory
+    if directory is None:
+        raise HTTPException(status_code=503, detail="operational_feishu_storage_unavailable")
     return directory
 
 
@@ -1399,6 +1425,84 @@ def no_movement_feishu_report_send(
             staging_directory=_no_movement_report_staging_directory(),
         )
     except NoMovementFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/operational-feishu/{source_id}/options")
+def operational_feishu_report_options(
+    source_id: Literal["collection_rate", "pdd_collection_failure"],
+    publication_id: str = Query(alias="publicationId", min_length=36, max_length=36),
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _require_effective_matrix_admin(admin)
+    try:
+        return get_operational_feishu_report_options(_engine(), source_id=source_id, publication_id=publication_id)
+    except OperationalFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/operational-feishu/{source_id}/prepare")
+def operational_feishu_report_prepare(
+    source_id: Literal["collection_rate", "pdd_collection_failure"],
+    payload: OperationalFeishuPreparePayload,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return prepare_operational_feishu_report(
+            _engine(), source_id=source_id, publication_id=payload.publication_id,
+            region_code=payload.region_code, recipient_key=payload.recipient_key,
+            actor_user_id=admin.user.id, staging_directory=_operational_report_staging_directory(),
+        )
+    except OperationalFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/operational-feishu/{source_id}/{report_id}/confirm")
+def operational_feishu_report_confirm(
+    source_id: Literal["collection_rate", "pdd_collection_failure"],
+    report_id: str,
+    payload: OperationalFeishuConfirmPayload,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return confirm_operational_feishu_report(_engine(), report_id=report_id, actor_user_id=admin.user.id, analysis_text=payload.analysis_text, source_id=source_id)
+    except OperationalFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/operational-feishu/{source_id}/{report_id}/send")
+def operational_feishu_report_send(
+    source_id: Literal["collection_rate", "pdd_collection_failure"],
+    report_id: str,
+    request: Request,
+    admin: AuthenticatedViewer = Depends(require_matrix_admin),
+) -> dict[str, object]:
+    _require_feature()
+    _same_origin(request)
+    _require_effective_matrix_admin(admin)
+    try:
+        return send_operational_feishu_report(
+            _engine(), source_id=source_id, report_id=report_id, actor_user_id=admin.user.id,
+            staging_directory=_operational_report_staging_directory(),
+        )
+    except OperationalFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None

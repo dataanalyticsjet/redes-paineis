@@ -117,7 +117,7 @@ test("report generation uses the selected publication and its pinned map, not br
 
 test("all pilot API routes require full effective MATRIX admin and same-origin writes", async () => {
   const api = await read("backend/app/api/data_foundation.py");
-  const routes = api.slice(api.indexOf('@router.get("/no-movement/feishu-report/options")'), api.indexOf('@router.get("/collection-rate/operational-analysis")'));
+  const routes = api.slice(api.indexOf('@router.get("/no-movement/feishu-report/options")'), api.indexOf('@router.get("/operational-feishu/{source_id}/options")'));
   assert.equal((routes.match(/Depends\(require_matrix_admin\)/g) ?? []).length, 4);
   assert.equal((routes.match(/_require_effective_matrix_admin\(admin\)/g) ?? []).length, 4);
   assert.equal((routes.match(/_same_origin\(request\)/g) ?? []).length, 3);

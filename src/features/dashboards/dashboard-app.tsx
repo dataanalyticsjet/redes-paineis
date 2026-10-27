@@ -5,6 +5,7 @@ import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revisi
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
 import { NoMovementFeishuReportDialog } from "./no-movement-feishu-report-dialog.tsx";
+import { OperationalFeishuReportDialog } from "./operational-feishu-report-dialog.tsx";
 import { CollectionRateOperationalAnalysis } from "./collection-rate-operational-analysis.tsx";
 import { PddCollectionFailureOperationalAnalysis } from "./pdd-collection-failure-operational-analysis.tsx";
 
@@ -3007,6 +3008,7 @@ export function DashboardApp() {
   const [analysisCopied, setAnalysisCopied] = useState(false);
   const [feishuSharePreview, setFeishuSharePreview] = useState<FeishuSharePreview | null>(null);
   const [noMovementFeishuDialogOpen, setNoMovementFeishuDialogOpen] = useState(false);
+  const [operationalFeishuSource, setOperationalFeishuSource] = useState<"collection_rate" | "pdd_collection_failure" | null>(null);
   const [dataSourceDialogId, setDataSourceDialogId] = useState<DashboardSourceId | null>(null);
   const [loaded, setLoaded] = useState<LoadedData | null>(null);
   const [monitoringV2Status, setMonitoringV2Status] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
@@ -6683,27 +6685,18 @@ export function DashboardApp() {
       setNoMovementFeishuDialogOpen(true);
       return;
     }
-    const panelTitle = dashboardCards.find((card) => card.id === view)?.title ?? "Monitoramento de coleta";
-    let panelContent = analysisText;
-    if (view === "bipagem") {
-      panelContent = "";
-      if (viewerAuthorization && viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix") {
-        try {
-          const headers = new Headers();
-          if (viewerAuthorization !== "feishu-cookie-session") headers.set("authorization", viewerAuthorization);
-          const response = await apiFetch("/api/v2/pdd-collection-failure/operational-analysis?limit=1", {
-            cache: "no-store",
-            headers,
-          });
-          if (response.ok) {
-            const payload = await response.json() as { analyses?: Array<{ state: string; message: string | null }> };
-            panelContent = payload.analyses?.find((item) => item.state === "READY" && item.message)?.message ?? "";
-          }
-        } catch {
-          panelContent = "";
-        }
-      }
+    if (view === "taxa") {
+      if (!isMatrixAdminViewer || !viewerAuthorization || collectionRateV2State.status !== "ready" || !collectionRateV2State.publicationId) return;
+      setOperationalFeishuSource("collection_rate");
+      return;
     }
+    if (view === "bipagem") {
+      if (!isMatrixAdminViewer || !viewerAuthorization || !pddDataAuthorized || pddCollectionFailureV2State.status !== "ready" || !pddCollectionFailureV2State.publicationId) return;
+      setOperationalFeishuSource("pdd_collection_failure");
+      return;
+    }
+    const panelTitle = dashboardCards.find((card) => card.id === view)?.title ?? "Monitoramento de coleta";
+    const panelContent = analysisText;
     const contentAvailable = ["taxa", "movimentacao", "sellers", "bipagem"].includes(view) && Boolean(panelContent.trim());
     setFeishuSharePreview({
       title: t(panelTitle),
@@ -7536,6 +7529,16 @@ export function DashboardApp() {
           authorization={viewerAuthorization}
           t={t}
           onClose={() => setNoMovementFeishuDialogOpen(false)}
+        />
+      ) : null}
+      {operationalFeishuSource && viewerAuthorization && isMatrixAdminViewer ? (
+        <OperationalFeishuReportDialog
+          key={`${operationalFeishuSource}:${operationalFeishuSource === "collection_rate" ? collectionRateV2State.publicationId : pddCollectionFailureV2State.publicationId}`}
+          sourceId={operationalFeishuSource}
+          publicationId={operationalFeishuSource === "collection_rate" ? collectionRateV2State.publicationId ?? "" : pddCollectionFailureV2State.publicationId ?? ""}
+          authorization={viewerAuthorization}
+          t={t}
+          onClose={() => setOperationalFeishuSource(null)}
         />
       ) : null}
       {responsibilitySourceDialogOpen ? <ResponsibilitySourceDialog
