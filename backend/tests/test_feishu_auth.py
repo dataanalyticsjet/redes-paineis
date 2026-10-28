@@ -246,6 +246,9 @@ def test_authorized_login_creates_local_session_and_logout_revokes_it(
         "is_active": True,
         "organizational_region_code": None,
         "region_resolution_status": "UNKNOWN",
+        "organizational_scope_reason": "legacy_policy",
+        "organizational_scope_policy": "LEGACY",
+        "organizational_scope_v2_enabled": False,
     }
 
     from sqlalchemy import select

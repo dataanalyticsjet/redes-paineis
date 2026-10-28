@@ -70,3 +70,82 @@ def test_conflicting_specific_regions_are_ambiguous():
 
 def test_unmapped_sr_is_not_inferred():
     assert resolve_organizational_region([["sr-department-id"]]).status == "UNKNOWN"
+
+
+# Phase 2 confirmed organization IDs and path-specific precedence.
+JT = "od-33e90ac1a93b12c1b65347320e648498"
+MN = "od-930a0c1d13f1c393e942a8153e560641"
+NORTHWEST = "od-bdac7b2d6ec6c2d295fd84033751573d"
+V2_BA = "od-9fbc67c37122cd6e7460b6dc20c3f2cd"
+V2_SPS = "od-3ce772781fd5edda748adff1face448e"
+V2_SPE = "od-5fac219620d9274fcdd7631895ef59d3"
+V2_SR = "od-bd07f18f063d7c4f8bc387114a993786"
+V2_MG = "od-7d5b679dc3564de403ddf11270a3f4ea"
+V2_SPN = "od-3099c86c91c4819fe25065ddc059690f"
+V2_PA = "od-efec880285b9a9d7efce49c5563f52ac"
+V2_GP = "od-489b1cc18987c2142d40aa16220a2bb8"
+REGION_CHILD = "operational-child"
+
+
+@pytest.mark.parametrize(
+    ("department_id", "expected"),
+    [
+        (V2_BA, "BA"),
+        (V2_SPS, "SPS"),
+        (V2_SPE, "SPE"),
+        (V2_SR, "SR"),
+        (V2_MG, "MG"),
+        (V2_SPN, "SPN"),
+        (V2_GP, "GP"),
+        (V2_PA, "PA"),
+    ],
+)
+def test_v2_confirmed_department_ids_resolve_under_complete_jt_path(department_id, expected):
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    result = resolve_organizational_region_v2([[JT, department_id, REGION_CHILD]])
+    assert (result.region_code, result.status) == (expected, "RESOLVED")
+
+
+def test_v2_northwest_defaults_to_gp_but_pa_descendant_overrides_it():
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    assert resolve_organizational_region_v2([[JT, NORTHWEST, REGION_CHILD]]).region_code == "GP"
+    assert resolve_organizational_region_v2([[JT, NORTHWEST, V2_PA, REGION_CHILD]]).region_code == "PA"
+    assert resolve_organizational_region_v2([[JT, NORTHWEST, V2_GP, REGION_CHILD]]).region_code == "GP"
+
+
+@pytest.mark.parametrize(("child", "expected"), [(V2_MG, "MG"), (V2_SPN, "SPN")])
+def test_v2_mn_specific_children_resolve_but_direct_and_unmapped_mn_are_pending(child, expected):
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    assert resolve_organizational_region_v2([[JT, MN, child, REGION_CHILD]]).region_code == expected
+    direct = resolve_organizational_region_v2([[JT, MN]])
+    functional = resolve_organizational_region_v2([[JT, MN, "unmapped-functional-child"]])
+    assert direct.status == "UNKNOWN" and direct.reason == "mn_rule_pending"
+    assert functional.status == "UNKNOWN" and functional.reason == "mn_rule_pending"
+
+
+def test_v2_matrix_requires_only_the_confirmed_corporate_root_path():
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    assert resolve_organizational_region_v2([[JT]]).region_code == "MATRIZ"
+    assert resolve_organizational_region_v2([[JT, "unmapped-hq-department"]]).status == "UNKNOWN"
+
+
+def test_v2_memberships_preserve_path_boundaries_and_reject_conflicts():
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    assert resolve_organizational_region_v2([[JT, V2_SPS], [JT, V2_SPS, REGION_CHILD]]).region_code == "SPS"
+    assert resolve_organizational_region_v2([[JT], [JT, V2_SPS]]).status == "AMBIGUOUS"
+    assert resolve_organizational_region_v2([[JT, V2_MG], [JT, V2_SPN]]).status == "AMBIGUOUS"
+    assert resolve_organizational_region_v2([[JT, V2_SPS], ["external", V2_SPS]]).status == "UNKNOWN"
+    assert resolve_organizational_region_v2([[JT, REGIONAL_SPONSOR_ID, V2_SPS]]).region_code is None
+
+
+def test_v2_incomplete_and_duplicate_paths_fail_closed():
+    from app.services.feishu_regions import resolve_organizational_region_v2
+
+    assert resolve_organizational_region_v2([[]]).status == "UNKNOWN"
+    assert resolve_organizational_region_v2([[V2_SPS]]).status == "UNKNOWN"
+    assert resolve_organizational_region_v2([[JT, V2_SPS, JT]]).status == "UNKNOWN"

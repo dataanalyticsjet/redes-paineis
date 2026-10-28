@@ -237,6 +237,8 @@ async def responsibility_workbook_metadata(
         if not stored:
             return JSONResponse({"source": None}, headers={"Cache-Control": "no-store"})
         metadata, parsed = stored
+        if _viewer.identity.get("organizational_scope_policy") == "V2" and _viewer.identity.get("organizational_scope") != "matrix":
+            return _error("viewer_scope_unavailable", 403)
         stats = validate_responsibility_workbook(parsed)
         return JSONResponse({
             "source": _responsibility_source_payload(metadata, parsed, stats)
@@ -317,9 +319,20 @@ async def read_workbook(
             return JSONResponse({"workbook": None}, headers={"Cache-Control": "no-store"})
         metadata, parsed = stored
         if kind in HISTORY_KINDS and not part:
+            history_parts = metadata["historyParts"]
+            if identity.get("organizational_scope_policy") == "V2" and identity.get("organizational_scope") != "matrix":
+                visible_parts: list[str] = []
+                for version_id in history_parts:
+                    history_entry = get_workbook(root, kind, version_id)
+                    if not history_entry:
+                        continue
+                    scoped_history = _scope_kind(history_entry[1], kind, identity)
+                    if scoped_history.get("rows"):
+                        visible_parts.append(version_id)
+                history_parts = visible_parts
             return JSONResponse({
                 "workbook": None,
-                "historyParts": metadata["historyParts"],
+                "historyParts": history_parts,
                 "fileName": metadata["fileName"],
                 "updatedAt": metadata["updatedAt"],
             }, headers={"Cache-Control": "no-store"})

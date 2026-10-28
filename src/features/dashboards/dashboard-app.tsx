@@ -735,10 +735,13 @@ interface ViewerIdentity {
   administrative_scope?: "matrix" | "regional" | "base" | "unknown";
   can_manage_users?: boolean;
   organizational_scope?: "matrix" | "regional" | "base" | "unknown";
-  data_scope_source?: "feishu" | "admin_grant" | "none";
+  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "none";
   home_region?: string | null;
   organizational_region_code?: string | null;
   region_resolution_status?: OrganizationalRegionStatus;
+  organizational_scope_reason?: string | null;
+  organizational_scope_policy?: "LEGACY" | "V2";
+  organizational_scope_v2_enabled?: boolean;
   home_base?: string | null;
   additional_regions?: string[];
   effective_regions?: string[] | null;
@@ -762,6 +765,9 @@ function sameViewerIdentity(left: ViewerIdentity | null, right: ViewerIdentity):
     left.home_region === right.home_region &&
     left.organizational_region_code === right.organizational_region_code &&
     left.region_resolution_status === right.region_resolution_status &&
+    left.organizational_scope_reason === right.organizational_scope_reason &&
+    left.organizational_scope_policy === right.organizational_scope_policy &&
+    left.organizational_scope_v2_enabled === right.organizational_scope_v2_enabled &&
     left.home_base === right.home_base &&
     left.is_active === right.is_active &&
     sameArray(left.effective_regions, right.effective_regions) &&
@@ -785,6 +791,8 @@ function dashboardIdentityCacheKey(sessionId: string, identity: ViewerIdentity |
     identity.additional_regions,
     identity.organizational_region_code,
     identity.region_resolution_status,
+    identity.organizational_scope_reason,
+    identity.organizational_scope_policy,
   ]);
 }
 
@@ -2422,6 +2430,15 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
     t("Regional não identificada"),
     identity.data_scope_source,
   );
+  const scopeDisplay = identity.organizational_scope_policy === "V2"
+    ? identity.organizational_scope_reason === "mn_rule_pending"
+      ? t("Vínculo organizacional pendente de validação")
+      : identity.organizational_scope === "matrix"
+        ? t("MATRIZ — Visão Nacional")
+        : identity.organizational_scope === "regional" && region !== t("Regional não identificada")
+          ? t("REGIONAL {region}", { region })
+          : t("Vínculo organizacional pendente de validação")
+    : region;
   const nameParts = fullName.split(/\s+/).filter(Boolean);
   const initials = nameParts.length > 1
     ? `${Array.from(nameParts[0])[0] ?? ""}${Array.from(nameParts.at(-1) ?? "")[0] ?? ""}`
@@ -2494,7 +2511,7 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
         <span className="profile-avatar" aria-hidden="true">{renderAvatar(18)}</span>
         <span className="profile-trigger-copy">
           <strong>{displayName}</strong>
-          <small>{region}</small>
+          <small>{scopeDisplay}</small>
         </span>
         <ChevronDown className={`profile-menu-chevron${open ? " is-open" : ""}`} size={16} aria-hidden="true" />
       </button>
@@ -2502,7 +2519,7 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
         <div className="profile-menu-popover" id="profile-menu-options" role="menu" aria-label={t("Perfil do colaborador")}>
           <div className="profile-menu-identity">
             <span className="profile-avatar profile-avatar-large" aria-hidden="true">{renderAvatar(22)}</span>
-            <span><strong>{fullName}</strong><small>{region}</small></span>
+            <span><strong>{fullName}</strong><small>{scopeDisplay}</small></span>
           </div>
           <div className="profile-menu-separator" role="separator" />
           {adminActionCount > 0 ? <>

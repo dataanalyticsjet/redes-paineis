@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models import PlatformUserFeishuProfile
 from app.services.feishu_contacts import FeishuOrganizationalProfile
-from app.services.feishu_regions import resolve_organizational_region
+from app.services.feishu_regions import resolve_organizational_region, resolve_organizational_region_v2
+
+logger = logging.getLogger(__name__)
 
 
 def persist_successful_feishu_profile(
@@ -22,7 +25,23 @@ def persist_successful_feishu_profile(
         record = db.get(PlatformUserFeishuProfile, user_id)
         if record is None:
             record = PlatformUserFeishuProfile(user_id=user_id)
+        previous_v2 = resolve_organizational_region_v2(record.department_paths) if record.last_successful_sync_at else None
         resolution = resolve_organizational_region(profile.department_paths)
+        next_v2 = resolve_organizational_region_v2(profile.department_paths)
+        if previous_v2 and (
+            previous_v2.region_code != next_v2.region_code
+            or previous_v2.status != next_v2.status
+            or previous_v2.reason != next_v2.reason
+        ):
+            logger.info(
+                "Feishu organizational scope changed (user_id=%s rules=v2 old_scope=%s old_status=%s new_scope=%s new_status=%s reason=%s)",
+                user_id,
+                previous_v2.region_code or "UNKNOWN",
+                previous_v2.status,
+                next_v2.region_code or "UNKNOWN",
+                next_v2.status,
+                next_v2.reason,
+            )
         union_id = profile.union_id or fallback_union_id
         avatar_url = profile.avatar_url or fallback_avatar_url
         if union_id:

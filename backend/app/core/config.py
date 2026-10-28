@@ -5,7 +5,7 @@ import re
 
 from typing import Any
 
-from pydantic import AnyHttpUrl, model_validator
+from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     data_sources_enabled: bool = False
     regional_user_administration_enabled: bool = False
+    # New hierarchy policy stays opt-in; existing policy remains unchanged while disabled.
+    feishu_org_scope_v2_enabled: bool = False
+    feishu_org_scope_profile_ttl_seconds: int = Field(default=900, ge=60, le=604800)
 
     db_host: str | None = None
     db_port: int = 3306

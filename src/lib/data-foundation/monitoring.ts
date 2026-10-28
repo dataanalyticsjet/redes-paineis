@@ -14,7 +14,7 @@ export interface MonitoringViewerAuthorization {
   home_base?: string | null;
   effective_regions?: readonly string[] | null;
   additional_regions?: readonly string[] | null;
-  data_scope_source?: "feishu" | "admin_grant" | "none" | null;
+  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "none" | null;
   region_resolution_status?: "RESOLVED" | "UNKNOWN" | "AMBIGUOUS" | "SYNC_FAILED" | string | null;
   is_active?: boolean;
 }

@@ -319,6 +319,9 @@ async def current_user(
             **public_identity,
             "organizational_region_code": identity.get("organizational_region_code"),
             "region_resolution_status": identity.get("region_resolution_status", "UNKNOWN"),
+            "organizational_scope_reason": identity.get("organizational_scope_reason"),
+            "organizational_scope_policy": identity.get("organizational_scope_policy", "LEGACY"),
+            "organizational_scope_v2_enabled": bool(identity.get("organizational_scope_policy") == "V2"),
         },
         headers={"Cache-Control": "no-store"},
     )

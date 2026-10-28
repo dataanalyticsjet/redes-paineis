@@ -32,6 +32,15 @@ def test_development_keeps_the_existing_data_directory_fallback() -> None:
     assert settings.data_directory == DEFAULT_DATA_DIRECTORY
 
 
+def test_feishu_org_scope_v2_is_disabled_by_default_and_ttl_is_bounded() -> None:
+    from pydantic import ValidationError
+    settings = Settings(_env_file=None)
+    assert settings.feishu_org_scope_v2_enabled is False
+    assert settings.feishu_org_scope_profile_ttl_seconds == 900
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, feishu_org_scope_profile_ttl_seconds=30)
+
+
 def test_data_sources_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATA_SOURCES_ENABLED", raising=False)
 

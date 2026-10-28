@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -8,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import PlatformUser, PlatformUserFeishuProfile, Region, UserAccessAudit, UserRegionAccess
-from app.services.feishu_regions import DEPARTMENT_REGION_IDS, MATRIX_REGION_CODE
+from app.services.feishu_regions import (
+    DEPARTMENT_REGION_IDS,
+    MATRIX_REGION_CODE,
+    resolve_organizational_region_v2,
+)
 
 
 class UserAccessError(Exception):
@@ -110,25 +115,78 @@ def _recent_feishu_region(profile: PlatformUserFeishuProfile | None) -> tuple[st
     return code, "feishu"
 
 
+def _profile_sync_is_fresh(
+    profile: PlatformUserFeishuProfile | None,
+    *,
+    ttl_seconds: int,
+    now: datetime,
+) -> bool:
+    if profile is None or profile.last_successful_sync_at is None:
+        return False
+    if str(profile.region_resolution_status or "").upper() == "SYNC_FAILED":
+        return False
+    synced_at = profile.last_successful_sync_at
+    if synced_at.tzinfo is None:
+        synced_at = synced_at.replace(tzinfo=timezone.utc)
+    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    age_seconds = (current - synced_at).total_seconds()
+    return 0 <= age_seconds < ttl_seconds
+
+
 def identity_for_user(
     db: Session,
     user: PlatformUser,
     *,
     force_feishu_sync_failed: bool = False,
+    org_scope_v2_enabled: bool | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
+    use_v2 = settings.feishu_org_scope_v2_enabled if org_scope_v2_enabled is None else org_scope_v2_enabled
     extras = additional_regions_for_user(db, user.id)
     administrative_scope = str(user.organizational_scope or "").strip().lower()
     profile = None
     try:
         profile = db.get(PlatformUserFeishuProfile, user.id)
     except SQLAlchemyError:
-        # Feishu profile storage is complementary. A database failure must not
-        # broaden access; existing explicit assignments remain authoritative.
+        # A profile-store failure must never broaden access.
         db.rollback()
 
-    organizational_region_code = profile.organizational_region_code if profile else None
-    region_resolution_status = "SYNC_FAILED" if force_feishu_sync_failed else profile.region_resolution_status if profile else "UNKNOWN"
-    feishu_region_code, scope_source = (None, "none") if force_feishu_sync_failed else _recent_feishu_region(profile)
+    scope_reason = "legacy_policy"
+    if use_v2:
+        current_time = now or datetime.now(timezone.utc)
+        organizational_region_code = None
+        if force_feishu_sync_failed:
+            region_resolution_status = "SYNC_FAILED"
+            scope_reason = "contacts_sync_failed"
+            resolution_code = None
+        elif not _profile_sync_is_fresh(
+            profile,
+            ttl_seconds=settings.feishu_org_scope_profile_ttl_seconds,
+            now=current_time,
+        ):
+            region_resolution_status = "UNKNOWN"
+            scope_reason = "profile_expired"
+            resolution_code = None
+        else:
+            resolution = resolve_organizational_region_v2(profile.department_paths if profile else None)
+            organizational_region_code = resolution.region_code
+            region_resolution_status = resolution.status
+            scope_reason = resolution.reason
+            resolution_code = resolution.region_code
+        feishu_region_code = resolution_code
+        scope_source = "feishu_v2" if feishu_region_code else "none"
+    else:
+        organizational_region_code = profile.organizational_region_code if profile else None
+        region_resolution_status = (
+            "SYNC_FAILED" if force_feishu_sync_failed
+            else profile.region_resolution_status if profile
+            else "UNKNOWN"
+        )
+        feishu_region_code, scope_source = (
+            (None, "none") if force_feishu_sync_failed else _recent_feishu_region(profile)
+        )
+
     if feishu_region_code and feishu_region_code != MATRIX_REGION_CODE:
         try:
             active_region = db.scalar(
@@ -143,11 +201,13 @@ def identity_for_user(
         if not active_region:
             feishu_region_code = None
             scope_source = "none"
+            if use_v2:
+                organizational_region_code = None
+                region_resolution_status = "UNKNOWN"
+                scope_reason = "region_not_active"
 
-    # Data visibility follows the current trusted Feishu resolution. If that
-    # resolution is unavailable (including SYNC_FAILED), explicit audited
-    # region grants are the only fallback; platform role and administrative
-    # scope never turn into national data scope by themselves.
+    # Under V2 an unresolved hierarchy never falls back to manual grants.
+    # With V2 disabled, the established audited-grant fallback is unchanged.
     if feishu_region_code == MATRIX_REGION_CODE:
         scope = "matrix"
         home_region = None
@@ -156,7 +216,7 @@ def identity_for_user(
         scope = "regional"
         home_region = feishu_region_code
         home_base = None
-    elif extras:
+    elif not use_v2 and extras:
         scope = "regional"
         home_region = None
         home_base = None
@@ -167,14 +227,15 @@ def identity_for_user(
         home_base = None
 
     role = "matrix" if scope == "matrix" else "regional" if scope == "regional" else "unknown"
-    effective_regions: list[str] | None
     if scope == "matrix":
-        effective_regions = None  # null means unrestricted/national.
+        effective_regions: list[str] | None = None
     else:
-        # A resolved Feishu regional assignment is the complete data scope.
-        # Manual grants are a fail-safe only when no trusted Feishu region is
-        # available; they must not expand a regional Feishu profile.
-        authorized_regions = [home_region] if scope_source == "feishu" else extras
+        if scope_source in {"feishu", "feishu_v2"}:
+            authorized_regions = [home_region]
+        elif not use_v2:
+            authorized_regions = extras
+        else:
+            authorized_regions = []
         effective_regions = sorted({region for region in authorized_regions if region})
     identity = {
         "user_id": user.id,
@@ -192,6 +253,8 @@ def identity_for_user(
         "is_active": bool(user.is_active),
         "organizational_region_code": organizational_region_code,
         "region_resolution_status": region_resolution_status,
+        "organizational_scope_reason": scope_reason,
+        "organizational_scope_policy": "V2" if use_v2 else "LEGACY",
         "data_scope_source": scope_source,
     }
     delegated_regions = _delegated_administration_regions(identity)
@@ -210,7 +273,7 @@ def _delegated_administration_regions(identity: dict[str, Any]) -> list[str] | N
     regions = set(identity["additional_regions"] or [])
     if (
         identity["organizational_scope"] == "regional"
-        and identity["data_scope_source"] == "feishu"
+        and identity["data_scope_source"] in {"feishu", "feishu_v2"}
         and identity["home_region"]
     ):
         regions.add(identity["home_region"])

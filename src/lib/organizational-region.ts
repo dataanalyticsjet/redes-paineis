@@ -14,7 +14,7 @@ export function organizationalRegionLabel(
   if (
     code &&
     status === "RESOLVED" &&
-    (!dataScopeSource || dataScopeSource === "feishu")
+    (!dataScopeSource || dataScopeSource === "feishu" || dataScopeSource === "feishu_v2")
   ) return code;
   return unknownLabel;
 }
