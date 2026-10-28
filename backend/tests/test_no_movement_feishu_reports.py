@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.core.config import Settings
+from app.services import no_movement_feishu_reports as service
 from app.services.data_foundation.contracts import get_contract
 from app.services.no_movement_feishu_reports import (
     NoMovementFeishuReportError,
@@ -118,6 +119,8 @@ def test_confirmation_persists_exact_edited_analysis_and_clears_legacy_text_fiel
         connection.exec_driver_sql("""
             CREATE TABLE no_movement_feishu_reports (
                 report_id BLOB PRIMARY KEY, publication_id BLOB NOT NULL,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT,
+                recipient_type TEXT, recipient_identifier TEXT, recipient_name TEXT,
                 actor_user_id INTEGER NOT NULL, report_state TEXT NOT NULL,
                 analysis_text TEXT NOT NULL, interpretation TEXT NOT NULL,
                 comments TEXT NOT NULL, recommendations TEXT NOT NULL,
@@ -125,9 +128,13 @@ def test_confirmation_persists_exact_edited_analysis_and_clears_legacy_text_fiel
             )
         """)
         connection.execute(text("""
-            INSERT INTO no_movement_feishu_reports VALUES
-            (:report_id, :publication_id, 7, 'PREPARED', 'generated', 'old', 'old', 'old', NULL, NULL)
-        """), {"report_id": bytes.fromhex("72727272727272727272727272727272"), "publication_id": b"p" * 16})
+            INSERT INTO no_movement_feishu_reports
+              (report_id,publication_id,region_key,recipient_key,recipient_email,actor_user_id,report_state,
+               analysis_text,interpretation,comments,recommendations,confirmed_at,updated_at)
+            VALUES (:report_id,:publication_id,'ALL','PHELIPPE_PRIVATE',:recipient_email,7,'PREPARED',
+                    'generated','old','old','old',NULL,NULL)
+        """), {"report_id": bytes.fromhex("72727272727272727272727272727272"), "publication_id": b"p" * 16,
+              "recipient_email": service.RECIPIENT_EMAIL})
     monkeypatch.setattr(
         "app.services.no_movement_feishu_reports._current_publication",
         lambda *args, **kwargs: {},
@@ -318,7 +325,8 @@ def test_prepare_and_confirm_sps_persists_exact_text_and_immutable_attachment_ha
             CREATE TABLE no_movement_feishu_reports (
                 report_id BLOB PRIMARY KEY, source_id TEXT, publication_id BLOB,
                 publication_version INTEGER, contract_version INTEGER, map_version_id BLOB,
-                region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT, recipient_type TEXT,
+                recipient_identifier TEXT, recipient_name TEXT, actor_user_id INTEGER,
                 analysis_text TEXT, interpretation TEXT, comments TEXT, recommendations TEXT,
                 record_count INTEGER, total_stopped_orders INTEGER, dataset_sha256 BLOB,
                 rules_version TEXT, report_state TEXT, delivery_context TEXT,
@@ -364,7 +372,13 @@ def test_prepare_and_confirm_sps_persists_exact_text_and_immutable_attachment_ha
     }
 
 
-def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_regeneration(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("recipient_key", "region_code", "receive_type", "receive_id", "recipient_flag", "recipient_name"), [
+    (RECIPIENT_KEY, "SPS", "email", service.RECIPIENT_EMAIL, None, "Phelippe · Pessoa / 个人"),
+    ("MG_COLLECTION_GROUP", "MG", "chat_id", "oc_d3ef49bb0698066065c5556ce484c6ed", "feishu_report_recipient_mg_enabled", "MG 揽收沟通群 · Coordenação de Coleta First Mile"),
+])
+def test_send_uses_confirmed_artifacts_and_allowlisted_destination_without_regeneration(
+    tmp_path, monkeypatch, recipient_key, region_code, receive_type, receive_id, recipient_flag, recipient_name,
+):
     import uuid
 
     from app.services import no_movement_feishu_reports as service
@@ -381,7 +395,8 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
             CREATE TABLE no_movement_feishu_reports (
                 report_id BLOB PRIMARY KEY, source_id TEXT, publication_id BLOB,
                 publication_version INTEGER, contract_version INTEGER, map_version_id BLOB,
-                region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT, recipient_type TEXT,
+                recipient_identifier TEXT, recipient_name TEXT, actor_user_id INTEGER,
                 analysis_text TEXT, interpretation TEXT, comments TEXT, recommendations TEXT,
                 record_count INTEGER, total_stopped_orders INTEGER, dataset_sha256 BLOB,
                 rules_version TEXT, report_state TEXT, delivery_context TEXT,
@@ -405,9 +420,9 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
     xlsx, png = b"confirmed SPS workbook bytes", b"confirmed SPS image bytes"
     digest = b"d" * 32
     payload = {
-        "publication": publication, "regionCode": "SPS", "rows": [{"resolved_base_code": "001", "mapped_region": "SPS"}],
+        "publication": publication, "regionCode": region_code, "rows": [{"resolved_base_code": "001", "mapped_region": region_code}],
         "message": "Original analysis", "recordCount": 1, "total": 12, "datasetDigest": digest,
-        "fileName": "sem_movimentacao_SPS_2026-10-26.xlsx", "xlsx": xlsx, "png": png, "regions": ["SPS"],
+        "fileName": f"sem_movimentacao_{region_code}_2026-10-26.xlsx", "xlsx": xlsx, "png": png, "regions": [region_code],
     }
     include_artifact_calls = []
 
@@ -417,13 +432,29 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
 
     monkeypatch.setattr(service, "_report_payload", report_payload)
     monkeypatch.setattr(service, "_current_publication", lambda *args, **kwargs: publication)
+    settings_values = {recipient_flag: True} if recipient_flag else {}
+    settings = Settings(feishu_no_movement_pilot_enabled=True, feishu_oauth_app_id="fake", feishu_oauth_app_secret="fake", **settings_values)
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    from app.services import feishu_report_recipients
+    monkeypatch.setattr(feishu_report_recipients, "get_settings", lambda: settings)
     prepared = prepare_report(
-        engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
+        engine, publication_id=str(publication_id), region_code=region_code, recipient_key=recipient_key,
         actor_user_id=7, staging_directory=tmp_path,
     )
-    edited = "**Resumo SPS**\nTexto confirmado — 内容原文 📦\nBases: **001, Base SPS**"
+    with engine.connect() as connection:
+        audit_destination = connection.execute(text("""
+            SELECT recipient_key, recipient_email, recipient_type, recipient_identifier, recipient_name
+            FROM no_movement_feishu_reports WHERE report_id=:report_id
+        """), {"report_id": uuid.UUID(prepared["reportId"]).bytes}).one()
+    assert audit_destination == (
+        recipient_key,
+        receive_id if receive_type == "email" else None,
+        receive_type,
+        receive_id,
+        recipient_name,
+    )
+    edited = f"**Resumo {region_code}**\nTexto confirmado — 内容原文 📦\nBases: **001, Base {region_code}**"
     confirm_report(engine, report_id=prepared["reportId"], actor_user_id=7, analysis_text=edited)
-    settings = Settings(feishu_no_movement_pilot_enabled=True, feishu_oauth_app_id="fake", feishu_oauth_app_secret="fake")
     replaced_publication_id = uuid.uuid4()
     with engine.begin() as connection:
         connection.execute(text("UPDATE source_snapshot_head SET publication_id=:new_id"), {"new_id": replaced_publication_id.bytes})
@@ -432,7 +463,7 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
     assert replaced_error.value.code == "no_movement_publication_not_current"
     with engine.begin() as connection:
         connection.execute(text("UPDATE source_snapshot_head SET publication_id=:old_id"), {"old_id": publication_id.bytes})
-    captured = {"uploads": {}, "messages": []}
+    captured = {"uploads": {}, "messages": [], "targets": []}
 
     class FakeClient:
         def __init__(self, timeout=None):
@@ -456,6 +487,7 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
             if url == service.MESSAGE_URL:
                 body = kwargs["json"]
                 captured["messages"].append(body)
+                captured["targets"].append((kwargs["params"]["receive_id_type"], body["receive_id"]))
                 return _response(200, {"code": 0, "data": {"message_id": f"message-{len(captured['messages'])}"}})
             raise AssertionError(f"Unexpected HTTP endpoint: {url}")
 
@@ -465,6 +497,7 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
         settings=settings,
     )
     assert result["state"] == "SENT"
+    assert captured["targets"] == [(receive_type, receive_id)] * 3
     assert include_artifact_calls == [True, False]
     assert captured["uploads"] == {"xlsx": xlsx, "png": png}
     import json
@@ -473,14 +506,14 @@ def test_send_uses_confirmed_sps_artifact_bytes_and_exact_edited_text_without_re
     assert card["schema"] == "2.0"
     assert card["body"]["elements"][0]["tag"] == "markdown"
     assert card["body"]["elements"][0]["content"] == _feishu_markdown(edited)
-    assert "**Resumo SPS**" in card["body"]["elements"][0]["content"]
+    assert f"**Resumo {region_code}**" in card["body"]["elements"][0]["content"]
     with engine.connect() as connection:
         persisted_text = connection.execute(text("SELECT analysis_text FROM no_movement_feishu_reports")).scalar_one()
     assert persisted_text == edited
     assert not (tmp_path / ".no-movement-feishu-reports" / f"{uuid.UUID(prepared['reportId']).hex}.xlsx").exists()
     with pytest.raises(NoMovementFeishuReportError) as duplicate_error:
         prepare_report(
-            engine, publication_id=str(publication_id), region_code="SPS", recipient_key=RECIPIENT_KEY,
+            engine, publication_id=str(publication_id), region_code=region_code, recipient_key=recipient_key,
             actor_user_id=7, staging_directory=tmp_path,
         )
     assert duplicate_error.value.code == "no_movement_report_delivery_unresolved"

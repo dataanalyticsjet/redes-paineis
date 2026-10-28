@@ -33,6 +33,7 @@ from app.services.collection_rate_operational_analysis import (
 )
 from app.services.data_foundation.contracts import get_contract
 from app.services.feishu_publication_notifications import RECIPIENT_EMAIL
+from app.services.feishu_report_recipients import recipient_from_audit, recipient_options, resolve_recipient
 from app.services.no_movement_feishu_reports import (
     FILES_URL, HTTP_TIMEOUT, IMAGES_URL, MAX_FEISHU_MESSAGE_BYTES,
     MAX_FILE_BYTES, MESSAGE_URL, RECIPIENT_KEY, RECIPIENT_LABEL, TOKEN_URL,
@@ -370,7 +371,7 @@ def _digest_rows(connection: Connection, engine: Engine, source_id: str, publica
     return digest.digest(), count
 
 
-def get_options(engine: Engine, *, source_id: str, publication_id: str, settings: Settings | None = None) -> dict[str, object]:
+def get_options(engine: Engine, *, source_id: str, publication_id: str, region_code: str | None = None, settings: Settings | None = None) -> dict[str, object]:
     config = settings or get_settings()
     _require_feature_enabled(source_id, config)
     publication = _publication(engine, source_id, publication_id)
@@ -380,12 +381,16 @@ def get_options(engine: Engine, *, source_id: str, publication_id: str, settings
         published_text = published_at.isoformat(sep=" ") if isinstance(published_at, datetime) else published_at.isoformat()
     else:
         published_text = str(published_at) if published_at else None
+    regions = _regions(engine, bytes(publication["map_version_id"]))
+    if region_code is not None and region_code not in regions:
+        raise OperationalFeishuReportError("operational_feishu_region_invalid", 422)
     return {
         "sourceId": source_id, "publicationId": str(uuid.UUID(bytes=bytes(publication["publication_id"]))),
         "publicationVersion": int(publication["version_no"]), "contractVersion": int(publication["contract_version"]),
         "mapVersionId": str(uuid.UUID(bytes=bytes(publication["map_version_id"]))),
-        "publishedAt": published_text, "regions": _regions(engine, bytes(publication["map_version_id"])),
-        "recipients": [{"key": RECIPIENT_KEY, "label": RECIPIENT_LABEL}],
+        "publishedAt": published_text, "regions": regions,
+        "scopeRegionCode": region_code,
+        "recipients": recipient_options(region_code, config),
         "sendEnabled": True,
     }
 
@@ -923,8 +928,11 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
     config = settings or get_settings()
     _source(source_id)
     _require_feature_enabled(source_id, config)
-    if recipient_key != RECIPIENT_KEY:
-        raise OperationalFeishuReportError("operational_feishu_recipient_invalid", 403)
+    try:
+        recipient = resolve_recipient(recipient_key, region_code, config)
+    except ValueError as error:
+        code = "operational_feishu_recipient_invalid" if str(error) == "feishu_report_recipient_invalid" else str(error)
+        raise OperationalFeishuReportError(code, 403) from None
     report_id = uuid.uuid4()
     payload = _stream_payload(engine, source_id=source_id, publication_id=publication_id,
                               region_code=region_code, staging_directory=staging_directory, report_id=report_id)
@@ -944,10 +952,12 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
             connection.execute(text(f"""
                 INSERT INTO {TABLE}
                   (report_id,source_id,publication_id,publication_version,contract_version,map_version_id,
-                   region_key,recipient_key,recipient_email,actor_user_id,analysis_text,record_count,
+                   region_key,recipient_key,recipient_email,recipient_type,recipient_identifier,recipient_name,
+                   actor_user_id,analysis_text,record_count,
                    dataset_sha256,rules_version,report_state,delivery_context,created_at,updated_at)
                 VALUES (:report_id,:source_id,:publication_id,:publication_version,:contract_version,:map_version_id,
-                   :region_key,:recipient_key,:recipient_email,:actor_user_id,:analysis_text,:record_count,
+                   :region_key,:recipient_key,:recipient_email,:recipient_type,:recipient_identifier,:recipient_name,
+                   :actor_user_id,:analysis_text,:record_count,
                    :dataset_sha256,:rules_version,'PREPARED',:delivery_context,:created_at,:updated_at)
             """), {"report_id": report_id.bytes, "source_id": source_id,
                   "publication_id": bytes(payload["publication"]["publication_id"]),
@@ -955,7 +965,9 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
                   "contract_version": int(payload["publication"]["contract_version"]),
                   "map_version_id": bytes(payload["publication"]["map_version_id"]),
                   "region_key": region_code or "ALL", "recipient_key": recipient_key,
-                  "recipient_email": RECIPIENT_EMAIL, "actor_user_id": actor_user_id,
+                  "recipient_email": recipient.identifier if recipient.kind == "email" else None,
+                  "recipient_type": recipient.kind, "recipient_identifier": recipient.identifier,
+                  "recipient_name": recipient.label, "actor_user_id": actor_user_id,
                   "analysis_text": payload["analysis"], "record_count": payload["recordCount"],
                   "dataset_sha256": payload["digest"], "rules_version": RULES_VERSION,
                   "delivery_context": json.dumps({"artifacts": hashes, "fileName": payload["fileName"], "stages": {}}, separators=(",", ":")),
@@ -974,8 +986,8 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
             "mapVersionId": str(uuid.UUID(bytes=bytes(pub["map_version_id"]))),
             "publishedAt": pub.get("published_at").isoformat(sep=" ") if isinstance(pub.get("published_at"), datetime) else str(pub.get("published_at") or ""),
             "operationalDate": payload["operationalDate"].isoformat(), "regionCode": region_code,
-            "regionLabel": region_code or "Todas as regionais", "recipientKey": RECIPIENT_KEY,
-            "recipientLabel": RECIPIENT_LABEL, "analysis": payload["analysis"],
+            "regionLabel": region_code or "Todas as regionais", "recipientKey": recipient.key,
+            "recipientLabel": recipient.label, "recipientType": recipient.kind, "analysis": payload["analysis"],
             "recordCount": payload["recordCount"], "excelFileName": payload["fileName"],
             "excelBytes": payload["xlsxBytes"], "pngBytes": payload["pngBytes"], "state": "PREPARED",
             "sendEnabled": True}
@@ -993,13 +1005,22 @@ def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analys
     key, now = _uuid(report_id), _now()
     with engine.begin() as connection:
         lock = " FOR UPDATE" if engine.dialect.name == "mysql" else ""
-        row = connection.execute(text(f"SELECT report_id,source_id,publication_id,publication_version,contract_version,map_version_id,report_state FROM {TABLE} WHERE report_id=:id AND actor_user_id=:actor" + lock), {"id": key, "actor": actor_user_id}).mappings().first()
+        row = connection.execute(text(f"SELECT report_id,source_id,publication_id,publication_version,contract_version,map_version_id,region_key,recipient_key,recipient_email,recipient_type,recipient_identifier,recipient_name,report_state FROM {TABLE} WHERE report_id=:id AND actor_user_id=:actor" + lock), {"id": key, "actor": actor_user_id}).mappings().first()
         if row is None:
             raise OperationalFeishuReportError("operational_feishu_report_not_found", 404)
         if str(row["source_id"]) != source_id:
             raise OperationalFeishuReportError("operational_feishu_report_not_found", 404)
         if row["report_state"] not in {"PREPARED", "CONFIRMED"}:
             raise OperationalFeishuReportError("operational_feishu_confirmation_invalid", 409)
+        region_code = None if row["region_key"] == "ALL" else str(row["region_key"])
+        try:
+            recipient_from_audit(
+                str(row["recipient_key"]), region_code,
+                row.get("recipient_type"), row.get("recipient_identifier"), row.get("recipient_name"),
+                row.get("recipient_email"), config,
+            )
+        except ValueError as error:
+            raise OperationalFeishuReportError(str(error), 409) from None
         publication = _publication(engine, str(row["source_id"]), str(uuid.UUID(bytes=bytes(row["publication_id"]))), connection)
         _assert_report_publication_matches(row, publication)
         connection.execute(text(f"UPDATE {TABLE} SET report_state='CONFIRMED',analysis_text=:analysis,confirmed_at=:now,updated_at=:now WHERE report_id=:id AND actor_user_id=:actor"), {"analysis": analysis_text, "now": now, "id": key, "actor": actor_user_id})
@@ -1027,8 +1048,15 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
         source_id = str(row["source_id"])
         if source_id != requested_source_id:
             raise OperationalFeishuReportError("operational_feishu_report_not_found", 404)
-        if str(row["recipient_key"]) != RECIPIENT_KEY or str(row["recipient_email"]) != RECIPIENT_EMAIL:
-            raise OperationalFeishuReportError("operational_feishu_recipient_invalid", 403)
+        report_region = None if row["region_key"] == "ALL" else str(row["region_key"])
+        try:
+            recipient = recipient_from_audit(
+                str(row["recipient_key"]), report_region,
+                row.get("recipient_type"), row.get("recipient_identifier"), row.get("recipient_name"),
+                row.get("recipient_email"), config,
+            )
+        except ValueError as error:
+            raise OperationalFeishuReportError(str(error), 409) from None
         if not _feature_enabled(source_id, config):
             raise OperationalFeishuReportError("operational_feishu_send_disabled", 503)
         if not config.feishu_oauth_app_id or not config.feishu_oauth_app_secret:
@@ -1068,7 +1096,7 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
                 raise RuntimeError("feishu_token_unavailable")
             headers = {"Authorization": f"Bearer {token}"}
             if stages.get("text", {}).get("status") != "SENT":
-                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": "email"}, headers=headers, json={"receive_id": RECIPIENT_EMAIL, "msg_type": "interactive", "content": message_content}))
+                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": recipient.kind}, headers=headers, json={"receive_id": recipient.identifier, "msg_type": "interactive", "content": message_content}))
                 stages["text"] = {"status": "SENT", "messageId": result["data"]["message_id"]}
                 _save_context(engine, key, "SENDING", context)
             xlsx_stage = stages.setdefault("xlsx", {})
@@ -1078,7 +1106,7 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
                         result = _feishu_payload(client.post(FILES_URL, headers=headers, data={"file_type": "stream", "file_name": file_name}, files={"file": (file_name, xlsx_file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}))
                     xlsx_stage["fileKey"] = result["data"]["file_key"]
                     _save_context(engine, key, "SENDING", context)
-                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": "email"}, headers=headers, json={"receive_id": RECIPIENT_EMAIL, "msg_type": "file", "content": json.dumps({"file_key": xlsx_stage["fileKey"]})}))
+                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": recipient.kind}, headers=headers, json={"receive_id": recipient.identifier, "msg_type": "file", "content": json.dumps({"file_key": xlsx_stage["fileKey"]})}))
                 xlsx_stage.update({"status": "SENT", "messageId": result["data"]["message_id"]})
                 _save_context(engine, key, "SENDING", context)
             png_stage = stages.setdefault("png", {})
@@ -1088,7 +1116,7 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
                         result = _feishu_payload(client.post(IMAGES_URL, headers=headers, data={"image_type": "message"}, files={"image": ("operational_preview.png", png_file, "image/png")}))
                     png_stage["imageKey"] = result["data"]["image_key"]
                     _save_context(engine, key, "SENDING", context)
-                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": "email"}, headers=headers, json={"receive_id": RECIPIENT_EMAIL, "msg_type": "image", "content": json.dumps({"image_key": png_stage["imageKey"]})}))
+                result = _feishu_payload(client.post(MESSAGE_URL, params={"receive_id_type": recipient.kind}, headers=headers, json={"receive_id": recipient.identifier, "msg_type": "image", "content": json.dumps({"image_key": png_stage["imageKey"]})}))
                 png_stage.update({"status": "SENT", "messageId": result["data"]["message_id"]})
                 _save_context(engine, key, "SENDING", context)
     except _FeishuRejected as error:
@@ -1104,4 +1132,4 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
             _artifact_path(staging_directory, uuid.UUID(bytes=key), ext).unlink(missing_ok=True)
         except OSError:
             logger.warning("Unable to remove successfully delivered operational report artifact")
-    return {"reportId": report_id, "state": "SENT", "recipient": RECIPIENT_LABEL, "messageIds": {name: stage.get("messageId") for name, stage in stages.items()}}
+    return {"reportId": report_id, "state": "SENT", "recipient": recipient.label, "messageIds": {name: stage.get("messageId") for name, stage in stages.items()}}

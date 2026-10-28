@@ -1357,12 +1357,13 @@ def no_movement_operational_analysis(
 @router.get("/no-movement/feishu-report/options")
 def no_movement_feishu_report_options(
     publication_id: str = Query(alias="publicationId", min_length=36, max_length=36),
+    region_code: str | None = Query(default=None, alias="regionCode", max_length=64),
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
     _require_feature()
     _require_effective_matrix_admin(admin)
     try:
-        return get_no_movement_feishu_report_options(_engine(), publication_id=publication_id)
+        return get_no_movement_feishu_report_options(_engine(), publication_id=publication_id, region_code=region_code)
     except NoMovementFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:
@@ -1435,12 +1436,13 @@ def no_movement_feishu_report_send(
 def operational_feishu_report_options(
     source_id: Literal["collection_rate", "pdd_collection_failure"],
     publication_id: str = Query(alias="publicationId", min_length=36, max_length=36),
+    region_code: str | None = Query(default=None, alias="regionCode", max_length=64),
     admin: AuthenticatedViewer = Depends(require_matrix_admin),
 ) -> dict[str, object]:
     _require_feature()
     _require_effective_matrix_admin(admin)
     try:
-        return get_operational_feishu_report_options(_engine(), source_id=source_id, publication_id=publication_id)
+        return get_operational_feishu_report_options(_engine(), source_id=source_id, publication_id=publication_id, region_code=region_code)
     except OperationalFeishuReportError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:

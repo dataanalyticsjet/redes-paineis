@@ -19,11 +19,11 @@ test("pilot dialog edits and confirms the exact analysis text without extra mess
   assert.match(dialog, /\/api\/v2\/no-movement\/feishu-report\/prepare/);
   assert.match(dialog, /\/\$\{prepared\.reportId\}\/confirm/);
   assert.match(dialog, /\/\$\{prepared\.reportId\}\/send/);
-  assert.match(dialog, /recipientKey: recipient/);
+  assert.match(dialog, /recipientKey: activeRecipient/);
   assert.match(dialog, /useState\("PHELIPPE_PRIVATE"\)/);
   assert.match(dialog, /useState\(""\)/);
-  assert.match(dialog, /disabled=\{busy \|\| !options\?\.sendEnabled\}/);
-  assert.match(dialog, /window\.confirm\(t\("Enviar agora/);
+  assert.match(dialog, /disabled=\{busy \|\| !scopedOptions\?\.sendEnabled\}/);
+  assert.match(dialog, /window\.confirm\(`\$\{t\("Confirmar envio para"\)\}/);
   assert.match(dialog, /window\.confirm\(t\("Alterar regional ou destinatário/);
   assert.match(dialog, /Análise atual do painel/);
   assert.match(dialog, /contentEditable=\{!busy && Boolean\(prepared\) && prepared\?\.state !== "SENT"\}/);
@@ -39,7 +39,7 @@ test("pilot dialog edits and confirms the exact analysis text without extra mess
   assert.match(dialog, /state: "PREPARED"/);
   assert.match(dialog, /setPrepared\(null\); setAnalysisDraft\(""\)/);
   assert.match(dialog, /Data da fonte/);
-  assert.match(dialog, /publicationDate\(options\?\.publishedAt\)/);
+  assert.match(dialog, /publicationDate\(scopedOptions\?\.publishedAt\)/);
   assert.match(dialog, /prepared\?\.excelBytes && prepared\.excelBytes > 0/);
   assert.match(dialog, /prepared\?\.pngBytes && prepared\.pngBytes > 0/);
   assert.match(dialog, /Excel pronto/);
@@ -100,7 +100,25 @@ test("pilot uses independently disabled configuration and does not alter automat
   assert.match(example, /FEISHU_NO_MOVEMENT_PILOT_ENABLED=false/);
   assert.match(service, /if not config\.feishu_no_movement_pilot_enabled/);
   assert.match(service, /RECIPIENT_EMAIL/);
-  assert.doesNotMatch(service, /receive_id_type=.{0,20}chat_id/);
+  assert.match(service, /params=\{"receive_id_type": recipient\.kind\}/);
+  assert.match(service, /"receive_id": recipient\.identifier/);
+});
+
+test("recipient selectors use scoped backend allowlists and never embed destination IDs in the UI", async () => {
+  const dialog = await read("src/features/dashboards/no-movement-feishu-report-dialog.tsx");
+  const service = await read("backend/app/services/feishu_report_recipients.py");
+  const noMovement = await read("backend/app/services/no_movement_feishu_reports.py");
+  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "email"\)/);
+  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "chat_id"\)/);
+  assert.match(dialog, /disabled=\{!item\.available\}/);
+  assert.match(dialog, /regionCode=\$\{encodeURIComponent\(region\)\}/);
+  assert.match(dialog, /prepared\.recipientType/);
+  assert.match(service, /"SR_COLLECTION_GROUP"/);
+  assert.match(service, /region_code="SR"/);
+  assert.match(noMovement, /recipient_options\(region_code\)/);
+  assert.match(dialog, /const scopedOptions = options\?\.scopeRegionCode === \(region \|\| null\) \? options : null/);
+  assert.match(dialog, /const activeRecipient = selectedOption\?\.key/);
+  assert.doesNotMatch(dialog, /oc_[a-f0-9]{20,}|marcos\.sjunior@|alan\.vicente@/);
 });
 
 test("report generation uses the selected publication and its pinned map, not browser pagination", async () => {

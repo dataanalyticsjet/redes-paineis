@@ -6,13 +6,15 @@ import { apiFetch } from "../../lib/api-url.ts";
 import { parseAnalysisMarkdown, serializeAnalysisRuns } from "../../lib/no-movement-analysis-editor.mjs";
 import type { DashboardTranslator } from "../../lib/i18n";
 
+type RecipientOption = { key: string; label: string; type: "email" | "chat_id"; available: boolean; unavailableReason: string | null; regionCode: string | null };
 type Options = {
   publicationId: string;
   publicationVersion: number;
   operationalDate: string;
   publishedAt: string | null;
   regions: string[];
-  recipients: Array<{ key: string; label: string }>;
+  scopeRegionCode: string | null;
+  recipients: RecipientOption[];
   sendEnabled: boolean;
 };
 type Prepared = {
@@ -23,7 +25,9 @@ type Prepared = {
   operationalDate: string;
   regionCode: string | null;
   regionLabel: string;
+  recipientKey: string;
   recipientLabel: string;
+  recipientType: "email" | "chat_id";
   analysis: string;
   recordCount: number;
   totalStoppedOrders: number;
@@ -139,6 +143,12 @@ export function NoMovementFeishuReportDialog({
   const analysisDraftRef = useRef(analysisDraft);
   const attemptedScopeRef = useRef("");
   const dirty = Boolean(prepared && analysisDraft !== prepared.analysis);
+  const scopedOptions = options?.scopeRegionCode === (region || null) ? options : null;
+  const selectedOption = scopedOptions?.recipients.find(item => item.key === recipient && item.available);
+  const activeRecipient = selectedOption?.key
+    ?? scopedOptions?.recipients.find(item => item.key === "PHELIPPE_PRIVATE" && item.available)?.key
+    ?? scopedOptions?.recipients.find(item => item.available)?.key
+    ?? "";
 
   const publicationDate = (value: string | null | undefined) => {
     const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -149,7 +159,8 @@ export function NoMovementFeishuReportDialog({
     const controller = new AbortController();
     const headers = new Headers();
     if (authorization !== "feishu-cookie-session") headers.set("authorization", authorization);
-    void apiFetch(`/api/v2/no-movement/feishu-report/options?publicationId=${encodeURIComponent(publicationId)}`, {
+    const regionQuery = region ? `&regionCode=${encodeURIComponent(region)}` : "";
+    void apiFetch(`/api/v2/no-movement/feishu-report/options?publicationId=${encodeURIComponent(publicationId)}${regionQuery}`, {
       headers, cache: "no-store", signal: controller.signal,
     }).then(async response => {
       if (!response.ok) throw new Error("no_movement_feishu_options_unavailable");
@@ -157,7 +168,7 @@ export function NoMovementFeishuReportDialog({
       if (!controller.signal.aborted) setOptions(value);
     }).catch(() => { if (!controller.signal.aborted) setError("no_movement_feishu_options_unavailable"); });
     return () => controller.abort();
-  }, [authorization, publicationId]);
+  }, [authorization, publicationId, region]);
 
   useEffect(() => {
     analysisDraftRef.current = analysisDraft;
@@ -187,20 +198,21 @@ export function NoMovementFeishuReportDialog({
     setBusy(true); setError(null); setStatus(null);
     try {
       const value = await requestJson<Prepared>("/api/v2/no-movement/feishu-report/prepare", authorization, "POST", {
-        publicationId, regionCode: region || null, recipientKey: recipient,
+        publicationId, regionCode: region || null, recipientKey: activeRecipient,
       });
       setPrepared(value);
       setAnalysisDraft(value.analysis);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "no_movement_feishu_request_failed"); }
     finally { setBusy(false); }
-  }, [authorization, publicationId, region, recipient]);
+  }, [activeRecipient, authorization, publicationId, region]);
+
   useEffect(() => {
-    if (!options) return;
-    const scopeKey = `${publicationId}|${region}|${recipient}`;
+    if (!scopedOptions || !activeRecipient) return;
+    const scopeKey = `${publicationId}|${region}|${activeRecipient}`;
     if (attemptedScopeRef.current === scopeKey) return;
     attemptedScopeRef.current = scopeKey;
     void prepare();
-  }, [options, prepare, publicationId, recipient, region]);
+  }, [activeRecipient, prepare, publicationId, region, scopedOptions]);
   const confirm = async () => {
     if (!prepared) return;
     setBusy(true); setError(null);
@@ -231,8 +243,9 @@ export function NoMovementFeishuReportDialog({
     updateAnalysisFromEditor(editor);
   };
   const send = async () => {
-    if (!prepared || prepared.state !== "CONFIRMED" || !options?.sendEnabled) return;
-    if (!window.confirm(t("Enviar agora a análise e os dois anexos ao destinatário privado de teste?"))) return;
+    if (!prepared || prepared.state !== "CONFIRMED" || !scopedOptions?.sendEnabled) return;
+    const recipientLabel = prepared.recipientLabel;
+    if (!window.confirm(`${t("Confirmar envio para")} ${recipientLabel}?`)) return;
     setBusy(true); setError(null);
     try {
       await requestJson(`/api/v2/no-movement/feishu-report/${prepared.reportId}/send`, authorization, "POST");
@@ -258,16 +271,22 @@ export function NoMovementFeishuReportDialog({
       <p><strong>{t("Sem Movimentação")}</strong></p>
       <div className="no-movement-feishu-source">
         <p><strong>{t("Fonte:")}</strong> {t("Sem Movimentação")}</p>
-        <p><strong>{t("Data da fonte:")}</strong> {publicationDate(options?.publishedAt)}</p>
+        <p><strong>{t("Data da fonte:")}</strong> {publicationDate(scopedOptions?.publishedAt)}</p>
+        {prepared ? <p><strong>{t("Destino confirmado:")}</strong> {prepared.recipientLabel} · {prepared.recipientType === "email" ? t("Pessoa · e-mail") : t("Grupo · chat Feishu")}</p> : null}
       </div>
       <label htmlFor="nm-feishu-region">{t("Regional do relatório")}</label>
-      <select id="nm-feishu-region" value={region} disabled={!options || busy} onChange={event => changeScope(event.target.value, recipient)}>
+      <select id="nm-feishu-region" value={region} disabled={!scopedOptions || busy} onChange={event => changeScope(event.target.value, activeRecipient)}>
         <option value="">{t("Todas as regionais")}</option>
-        {options?.regions.map(item => <option key={item} value={item}>{item}</option>)}
+        {scopedOptions?.regions.map(item => <option key={item} value={item}>{item}</option>)}
       </select>
       <label htmlFor="nm-feishu-recipient">{t("Destinatário")}</label>
-      <select id="nm-feishu-recipient" value={recipient} disabled={!options || busy} onChange={event => changeScope(region, event.target.value)}>
-        {options?.recipients.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
+      <select id="nm-feishu-recipient" value={activeRecipient} disabled={!scopedOptions || busy} onChange={event => changeScope(region, event.target.value)}>
+        <optgroup label={t("Pessoas")}>
+          {scopedOptions?.recipients.filter(item => item.type === "email").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+        </optgroup>
+        <optgroup label={t("Grupos regionais")}>
+          {scopedOptions?.recipients.filter(item => item.type === "chat_id").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+        </optgroup>
       </select>
       <div className="no-movement-feishu-attachments" aria-live="polite">
         <span className={prepared?.excelBytes && prepared.excelBytes > 0 ? "is-ready" : "is-pending"}>
@@ -312,9 +331,9 @@ export function NoMovementFeishuReportDialog({
       {status ? <p className="feishu-share-success" role="status">{t(status)}</p> : null}
       <div className="feishu-share-actions">
         <button className="feishu-share-cancel" type="button" disabled={busy} onClick={onClose}>{t("Cancelar")}</button>
-        {!prepared && error && options ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => void prepare()}>{t(busy ? "Preparando…" : "Tentar novamente")}</button> : null}
+        {!prepared && error && scopedOptions ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => void prepare()}>{t(busy ? "Preparando…" : "Tentar novamente")}</button> : null}
         {prepared?.state === "PREPARED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !analysisDraft.trim()} onClick={() => void confirm()}>{t("Confirmar preparação")}</button> : null}
-        {prepared?.state === "CONFIRMED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !options?.sendEnabled} onClick={() => void send()}>{t(options?.sendEnabled ? "Enviar agora" : "Envio desativado")}</button> : null}
+        {prepared?.state === "CONFIRMED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !scopedOptions?.sendEnabled} onClick={() => void send()}>{t(scopedOptions?.sendEnabled ? "Enviar agora" : "Envio desativado")}</button> : null}
       </div>
     </section>
   </div>;

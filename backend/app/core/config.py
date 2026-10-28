@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     # Operational report delivery is independently opt-in per published source.
     feishu_collection_rate_report_enabled: bool = False
     feishu_pdd_collection_failure_report_enabled: bool = False
+    # Recipient-level switches are independent of each report's panel flag.
+    # Preserve the established private destination and the two specifically
+    # requested people; regional groups require an explicit operational release.
+    feishu_report_recipient_phelippe_enabled: bool = True
+    feishu_report_recipient_marcos_enabled: bool = True
+    feishu_report_recipient_alan_enabled: bool = True
+    feishu_report_recipient_sr_enabled: bool = False
+    feishu_report_recipient_mg_enabled: bool = False
+    feishu_report_recipient_ce_hq_enabled: bool = False
+    feishu_report_recipient_spn_enabled: bool = False
+    feishu_report_recipient_pr_enabled: bool = False
     feishu_oauth_authorize_url: AnyHttpUrl = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
     feishu_oauth_token_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
     feishu_oauth_userinfo_url: AnyHttpUrl = "https://open.feishu.cn/open-apis/authen/v1/user_info"

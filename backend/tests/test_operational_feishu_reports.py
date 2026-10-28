@@ -124,7 +124,8 @@ def _report_engine(source_id: str, *, database_url: str = "sqlite://", extra_row
         connection.execute(text(f"CREATE TABLE {source['table']}(source_id TEXT, publication_id BLOB, map_version_id BLOB, source_row_no INTEGER, source_sheet_name TEXT, resolved_base_code TEXT, mapping_resolution TEXT, " + ", ".join(f"`{column.key}` TEXT" for column in contract.columns) + ")"))
         connection.execute(text("""CREATE TABLE operational_feishu_reports(
           report_id BLOB, source_id TEXT, publication_id BLOB, publication_version INTEGER, contract_version INTEGER,
-          map_version_id BLOB, region_key TEXT, recipient_key TEXT, recipient_email TEXT, actor_user_id INTEGER,
+          map_version_id BLOB, region_key TEXT, recipient_key TEXT, recipient_email TEXT, recipient_type TEXT,
+          recipient_identifier TEXT, recipient_name TEXT, actor_user_id INTEGER,
           analysis_text TEXT, record_count INTEGER, dataset_sha256 BLOB, rules_version TEXT, report_state TEXT,
           delivery_context TEXT, created_at TEXT, updated_at TEXT, confirmed_at TEXT, sent_at TEXT)"""))
         connection.execute(text("INSERT INTO source_publications VALUES (:s,:p,5,:cv,:m,'2026-10-22','2026-10-22',:count,'2026-10-22','2026-10-22 12:00:00','PUBLISHED')"), {"s": source_id, "p": pub_id.bytes, "cv": source["contract"], "m": map_id.bytes, "count": extra_rows + 2})
@@ -584,6 +585,75 @@ def test_send_uses_confirmed_analysis_and_same_immutable_artifacts_without_real_
         )
     assert duplicate.value.code == "operational_feishu_report_not_confirmed"
     assert len(fake.calls) == call_count
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_send_routes_all_three_stages_to_the_server_allowlisted_regional_chat_id(tmp_path: Path, monkeypatch, source_id: str):
+    from sqlalchemy import text
+
+    engine, publication_id, _ = _report_engine(source_id)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE base_mapping_entries SET regional_name='MG'"))
+    fake = _FakeFeishuClient()
+    monkeypatch.setattr(service.httpx, "Client", lambda **_kwargs: fake)
+    settings = _enabled_settings(source_id).model_copy(update={"feishu_report_recipient_mg_enabled": True})
+    prepared = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code="MG",
+        recipient_key="MG_COLLECTION_GROUP", actor_user_id=71, staging_directory=tmp_path,
+        settings=settings,
+    )
+    with engine.connect() as connection:
+        audit_destination = connection.execute(text("""
+            SELECT recipient_key,recipient_email,recipient_type,recipient_identifier,recipient_name
+            FROM operational_feishu_reports WHERE report_id=:report_id
+        """), {"report_id": uuid.UUID(prepared["reportId"]).bytes}).one()
+    assert audit_destination == (
+        "MG_COLLECTION_GROUP", None, "chat_id", "oc_d3ef49bb0698066065c5556ce484c6ed",
+        "MG 揽收沟通群 · Coordenação de Coleta First Mile",
+    )
+    service.confirm_report(
+        engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=prepared["analysis"],
+        source_id=source_id, settings=settings,
+    )
+    result = service.send_report(
+        engine, source_id=source_id, report_id=prepared["reportId"], actor_user_id=71,
+        staging_directory=tmp_path, settings=settings,
+    )
+    destinations = [kwargs for url, kwargs in fake.calls if url == service.MESSAGE_URL]
+    assert result["state"] == "SENT"
+    assert len(destinations) == 3
+    assert all(call["params"] == {"receive_id_type": "chat_id"} for call in destinations)
+    assert all(call["json"]["receive_id"] == "oc_d3ef49bb0698066065c5556ce484c6ed" for call in destinations)
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_sr_group_options_require_sr_in_the_publications_pinned_mapping(source_id: str, monkeypatch):
+    from sqlalchemy import text
+
+    engine, publication_id, sr_map_id = _report_engine(source_id)
+    other_map_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO base_mapping_entries VALUES (:map,'003','SR','Base SR','RM SR')"), {"map": other_map_id.bytes})
+
+    settings = _enabled_settings(source_id).model_copy(update={"feishu_report_recipient_sr_enabled": True})
+    with pytest.raises(service.OperationalFeishuReportError) as missing_sr:
+        service.get_options(engine, source_id=source_id, publication_id=publication_id, region_code="SR", settings=settings)
+    assert missing_sr.value.code == "operational_feishu_region_invalid"
+
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO base_mapping_entries VALUES (:map,'003','SR','Base SR','RM SR')"), {"map": sr_map_id.bytes})
+    mapped = service.get_options(engine, source_id=source_id, publication_id=publication_id, region_code="SR", settings=settings)
+    assert mapped["mapVersionId"] == str(sr_map_id)
+    assert next(item for item in mapped["recipients"] if item["key"] == "SR_COLLECTION_GROUP")["available"] is True
+
+    national = service.get_options(engine, source_id=source_id, publication_id=publication_id, settings=settings)
+    assert next(item for item in national["recipients"] if item["key"] == "SR_COLLECTION_GROUP")["available"] is False
+
+    disabled = settings.model_copy(update={"feishu_report_recipient_sr_enabled": False})
+    scoped_but_disabled = service.get_options(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SR", settings=disabled,
+    )
+    assert next(item for item in scoped_but_disabled["recipients"] if item["key"] == "SR_COLLECTION_GROUP")["available"] is False
 
 
 def test_send_rejects_modified_artifact_after_confirmation(tmp_path: Path, monkeypatch):

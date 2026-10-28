@@ -35,10 +35,15 @@ test("regional changes require confirmation and discard prior preparation", () =
 });
 
 test("recipient choices come from the fixed server list and real send remains separately gated", () => {
-  assert.match(dialog, /options\?\.recipients\.map/);
+  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "email"\)/);
+  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "chat_id"\)/);
+  assert.match(dialog, /disabled=\{!item\.available\}/);
+  assert.match(dialog, /scopeRegionCode/);
   assert.match(dialog, /prepared\?\.state === "CONFIRMED"/);
-  assert.match(dialog, /!options\?\.sendEnabled/);
-  assert.match(dialog, /window\.confirm\(t\("Enviar agora a análise e os dois anexos ao destinatário privado autorizado\?"\)\)/);
+  assert.match(dialog, /!scopedOptions\?\.sendEnabled/);
+  assert.match(dialog, /const activeRecipient = selectedOption\?\.key/);
+  assert.match(dialog, /Confirmar envio para/);
+  assert.match(dialog, /prepared\.recipientType/);
   assert.match(settings, /feishu_collection_rate_report_enabled: bool = False/);
   assert.match(settings, /feishu_pdd_collection_failure_report_enabled: bool = False/);
 });
