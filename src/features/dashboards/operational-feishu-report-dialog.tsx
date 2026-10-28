@@ -9,7 +9,7 @@ import type { DashboardTranslator } from "../../lib/i18n";
 type OperationalSource = "collection_rate" | "pdd_collection_failure";
 type RecipientOption = { key: string; label: string; type: "email" | "chat_id"; available: boolean; unavailableReason: string | null; regionCode: string | null };
 type Options = { sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; regions: string[]; scopeRegionCode: string | null; recipients: RecipientOption[]; sendEnabled: boolean };
-type Prepared = { reportId: string; sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; operationalDate: string; regionCode: string | null; regionLabel: string; recipientKey: string; recipientLabel: string; recipientType: "email" | "chat_id"; analysis: string; recordCount: number; excelFileName: string; excelBytes: number; pngBytes: number; state: "PREPARED" | "CONFIRMED" | "PARTIAL" | "PENDING" | "SENT"; sendEnabled: boolean };
+type Prepared = { reportId: string; sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; operationalDate: string; regionCode: string | null; regionLabel: string; recipientKey: string; recipientLabel: string; recipientType: "email" | "chat_id"; analysis: string; recordCount: number; excelFileName: string; excelBytes: number; pngBytes: number; state: "PREPARED" | "CONFIRMED" | "PARTIAL" | "PENDING" | "SENT"; sendEnabled: boolean; previouslySent?: boolean };
 
 async function requestJson<T>(path: string, authorization: string, method = "GET", body?: object, signal?: AbortSignal): Promise<T> {
   const headers = new Headers();
@@ -191,8 +191,11 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
         <optgroup label={t("Pessoas")}>
           {scopedOptions?.recipients.filter(item => item.type === "email").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
         </optgroup>
+        <optgroup label={t("Grupos nacionais")}>
+          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode === null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+        </optgroup>
         <optgroup label={t("Grupos regionais")}>
-          {scopedOptions?.recipients.filter(item => item.type === "chat_id").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode !== null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
         </optgroup>
       </select>
       <div className="no-movement-feishu-attachments" aria-live="polite">
@@ -206,6 +209,7 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
       </div>
       <div id="operational-feishu-analysis" ref={editorRef} className="no-movement-feishu-analysis-editor" role="textbox" aria-multiline="true" aria-label={t("Análise atual do painel")} aria-disabled={busy || !prepared || prepared.state === "SENT"} tabIndex={prepared ? 0 : -1} contentEditable={!busy && Boolean(prepared) && prepared?.state !== "SENT"} suppressContentEditableWarning data-placeholder={t(busy ? "Preparando relatório…" : "Prepare o relatório para visualizar a análise oficial deste recorte.")} onInput={event => updateEditor(event.currentTarget)} onPaste={event => { event.preventDefault(); pastePlainText(event.currentTarget, event.clipboardData.getData("text/plain")); updateEditor(event.currentTarget); }} onDrop={event => event.preventDefault()} />
       {prepared ? <p className="feishu-share-demo-note">{prepared.excelFileName} · {prepared.state}</p> : null}
+      {prepared?.previouslySent ? <p className="feishu-share-demo-note" role="status">{t("Este relatório já foi enviado anteriormente. Você pode preparar um novo envio.")}</p> : null}
       {scopedOptions && !scopedOptions.sendEnabled ? <p className="feishu-share-demo-note">{t("Envio desativado por configuração; a preparação e a confirmação não enviam mensagens.")}</p> : null}
       {error ? <p className="feishu-share-unavailable" role="alert">{t(error)}</p> : null}
       {status ? <p className="feishu-share-success" role="status">{t(status)}</p> : null}
@@ -214,6 +218,7 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
         {!prepared && error && scopedOptions ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => { attempted.current = ""; void prepare(); }}>{t("Tentar novamente")}</button> : null}
         {prepared?.state === "PREPARED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !analysis.trim()} onClick={() => void confirm()}>{t("Confirmar preparação")}</button> : null}
         {prepared?.state === "CONFIRMED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !scopedOptions?.sendEnabled} onClick={() => void send()}>{t(scopedOptions?.sendEnabled ? "Enviar agora" : "Envio desativado")}</button> : null}
+        {prepared?.state === "SENT" ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => { setPrepared(null); setAnalysis(""); analysisRef.current = ""; setStatus(null); setError(null); void prepare(); }}>{t("Preparar novo envio")}</button> : null}
       </div>
     </section>
   </div>;

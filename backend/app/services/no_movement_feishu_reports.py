@@ -474,16 +474,30 @@ def prepare_report(
     context = {"xlsxSha256": hashlib.sha256(payload["xlsx"]).hexdigest(), "pngSha256": hashlib.sha256(payload["png"]).hexdigest()}
     _store_prepared_artifacts(staging_directory, report_id, payload["xlsx"], payload["png"])
     superseded_report_ids: list[uuid.UUID] = []
+    previously_sent = False
     try:
         with engine.begin() as connection:
+            if engine.dialect.name == "mysql":
+                # Serialize preparations and sends for the same published snapshot.
+                current_head = connection.execute(text("""
+                    SELECT publication_id FROM source_snapshot_head
+                    WHERE source_id=:source_id AND publication_id=:publication_id
+                    FOR UPDATE
+                """), {
+                    "source_id": SOURCE_ID,
+                    "publication_id": bytes(payload["publication"]["publication_id"]),
+                }).first()
+                if current_head is None:
+                    raise NoMovementFeishuReportError("no_movement_publication_not_current", 409)
             prior_reports = connection.execute(text("""
                 SELECT report_id FROM no_movement_feishu_reports
                 WHERE actor_user_id=:actor_user_id AND publication_id=:publication_id
-                  AND recipient_key=:recipient_key
+                  AND region_key=:region_key AND recipient_key=:recipient_key
                   AND report_state IN ('PREPARED','CONFIRMED')
             """), {
                 "actor_user_id": actor_user_id,
                 "publication_id": bytes(payload["publication"]["publication_id"]),
+                "region_key": region_code or "ALL",
                 "recipient_key": recipient_key,
             }).scalars().all()
             superseded_report_ids = [uuid.UUID(bytes=bytes(value)) for value in prior_reports]
@@ -491,19 +505,21 @@ def prepare_report(
                 UPDATE no_movement_feishu_reports
                 SET report_state='SUPERSEDED', updated_at=:updated_at
                 WHERE actor_user_id=:actor_user_id AND publication_id=:publication_id
-                  AND recipient_key=:recipient_key
+                  AND region_key=:region_key AND recipient_key=:recipient_key
                   AND report_state IN ('PREPARED','CONFIRMED')
             """), {
                 "actor_user_id": actor_user_id,
                 "publication_id": bytes(payload["publication"]["publication_id"]),
+                "region_key": region_code or "ALL",
                 "recipient_key": recipient_key,
                 "updated_at": now,
             })
-            delivery_in_progress = connection.execute(text("""
-                SELECT report_id FROM no_movement_feishu_reports
+            prior_delivery = connection.execute(text("""
+                SELECT report_state FROM no_movement_feishu_reports
                 WHERE publication_id=:publication_id AND region_key=:region_key
                   AND recipient_key=:recipient_key AND rules_version=:rules_version
                   AND report_state IN ('SENDING','PARTIAL','PENDING','SENT')
+                ORDER BY CASE WHEN report_state IN ('SENDING','PARTIAL','PENDING') THEN 0 ELSE 1 END
                 LIMIT 1
             """), {
                 "publication_id": bytes(payload["publication"]["publication_id"]),
@@ -511,8 +527,11 @@ def prepare_report(
                 "recipient_key": recipient_key,
                 "rules_version": RULES_VERSION,
             }).first()
-            if delivery_in_progress:
-                raise NoMovementFeishuReportError("no_movement_report_delivery_unresolved", 409)
+            if prior_delivery is not None:
+                prior_state = str(prior_delivery[0])
+                if prior_state in {"SENDING", "PARTIAL", "PENDING"}:
+                    raise NoMovementFeishuReportError("no_movement_report_delivery_unresolved", 409)
+                previously_sent = prior_state == "SENT"
             connection.execute(text("""
                 INSERT INTO no_movement_feishu_reports
                   (report_id, source_id, publication_id, publication_version, contract_version,
@@ -534,7 +553,7 @@ def prepare_report(
                 "region_key": region_code or "ALL", "recipient_key": recipient_key,
                 "recipient_email": recipient.identifier if recipient.kind == "email" else None,
                 "recipient_type": recipient.kind, "recipient_identifier": recipient.identifier,
-                "recipient_name": recipient.label, "actor_user_id": actor_user_id,
+                "recipient_name": recipient.audit_name or recipient.label, "actor_user_id": actor_user_id,
                 "analysis_text": payload["message"], "record_count": payload["recordCount"],
                 "total": payload["total"], "dataset_sha256": payload["datasetDigest"],
                 "rules_version": RULES_VERSION,
@@ -556,7 +575,7 @@ def prepare_report(
         "recordCount": payload["recordCount"], "totalStoppedOrders": payload["total"],
         "baseCount": len({str(row["resolved_base_code"]) for row in payload["rows"] if row.get("mapped_region") and row.get("resolved_base_code")}),
         "excelFileName": payload["fileName"], "excelBytes": len(payload["xlsx"]),
-        "pngBytes": len(payload["png"]), "state": "PREPARED",
+        "pngBytes": len(payload["png"]), "state": "PREPARED", "previouslySent": previously_sent,
     }
 
 
@@ -736,7 +755,7 @@ def send_report(
             SELECT report_id FROM no_movement_feishu_reports
             WHERE publication_id=:publication_id AND region_key=:region_key
               AND recipient_key=:recipient_key AND rules_version=:rules_version
-              AND report_id<>:report_id AND report_state IN ('SENDING','PARTIAL','PENDING','SENT')
+              AND report_id<>:report_id AND report_state IN ('SENDING','PARTIAL','PENDING')
             LIMIT 1
         """ + lock), {
             "publication_id": bytes(row["publication_id"]),
@@ -744,7 +763,7 @@ def send_report(
             "report_id": report_key,
         }).first()
         if duplicate:
-            raise NoMovementFeishuReportError("no_movement_report_already_sent", 409)
+            raise NoMovementFeishuReportError("no_movement_report_delivery_unresolved", 409)
         if bytes(publication["map_version_id"]) != bytes(row["map_version_id"]):
             raise NoMovementFeishuReportError("no_movement_report_mapping_changed", 409)
         payload = _report_payload(

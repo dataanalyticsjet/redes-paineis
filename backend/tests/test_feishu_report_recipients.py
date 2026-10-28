@@ -9,6 +9,7 @@ def _settings(**overrides):
         "feishu_report_recipient_phelippe_enabled": True,
         "feishu_report_recipient_marcos_enabled": True,
         "feishu_report_recipient_alan_enabled": True,
+        "feishu_report_recipient_national_rms_enabled": True,
         "feishu_report_recipient_sr_enabled": True,
         "feishu_report_recipient_mg_enabled": True,
         "feishu_report_recipient_ce_hq_enabled": True,
@@ -19,22 +20,53 @@ def _settings(**overrides):
     return Settings(**values)
 
 
-def test_allowlist_contains_three_people_and_five_fixed_groups():
+def test_allowlist_contains_three_people_a_national_group_and_five_fixed_groups():
     assert [item.key for item in RECIPIENTS] == [
-        "PHELIPPE_PRIVATE", "MARCOS_PRIVATE", "ALAN_PRIVATE", "SR_COLLECTION_GROUP",
+        "PHELIPPE_PRIVATE", "MARCOS_PRIVATE", "ALAN_PRIVATE", "NATIONAL_RMS", "SR_COLLECTION_GROUP",
         "MG_COLLECTION_GROUP", "CE_HQ_COLLECTION_GROUP", "SPN_COLLECTION_GROUP", "PR_COLLECTION_GROUP",
     ]
     assert RECIPIENTS[1].identifier == "marcos.sjunior@jtexpress.com.br"
     assert RECIPIENTS[2].identifier == "alan.vicente@jtexpress.com.br"
+    assert RECIPIENTS[3].identifier == "oc_8474b27a4b40adb3ecb8c6577773d222"
+    assert RECIPIENTS[3].label == "Grupo Nacional de RMs 全国RM — MATRIZ / Todas as regionais"
+    assert RECIPIENTS[3].audit_name == "Grupo Nacional de RMs 全国RM"
+    assert RECIPIENTS[3].national_only is True
     assert all(item.kind == "chat_id" for item in RECIPIENTS[3:])
-    assert all("揽收沟通" in item.label for item in RECIPIENTS[3:])
+    assert all("揽收沟通" in item.label for item in RECIPIENTS[4:])
 
 
-def test_national_scope_exposes_people_and_keeps_all_groups_unavailable():
+def test_national_scope_exposes_people_and_only_the_enabled_national_group():
     options = recipient_options(None, _settings())
     assert all(item["available"] for item in options[:3])
-    assert all(not item["available"] for item in options[3:])
-    assert all(item["unavailableReason"] in {"recipient_mapping_pending", "recipient_region_unavailable"} for item in options[3:])
+    assert options[3]["available"] is True
+    assert all(not item["available"] for item in options[4:])
+    assert all(item["unavailableReason"] == "recipient_region_unavailable" for item in options[4:])
+
+
+def test_national_group_is_explicitly_flagged_and_cannot_receive_regional_scope():
+    from app.services.feishu_report_recipients import resolve_recipient
+
+    group = resolve_recipient("NATIONAL_RMS", None, _settings())
+    assert group.kind == "chat_id"
+    assert group.identifier == "oc_8474b27a4b40adb3ecb8c6577773d222"
+    assert group.region_code is None and group.national_only
+    assert recipient_from_audit(group.key, None, group.kind, group.identifier, group.audit_name, None, _settings()) == group
+    for region in ("SPS", "SR", "MG"):
+        option = next(item for item in recipient_options(region, _settings()) if item["key"] == "NATIONAL_RMS")
+        assert option["available"] is False
+        with pytest.raises(ValueError, match="feishu_report_recipient_region_mismatch"):
+            resolve_recipient("NATIONAL_RMS", region, _settings())
+
+    disabled = _settings(feishu_report_recipient_national_rms_enabled=False)
+    option = next(item for item in recipient_options(None, disabled) if item["key"] == "NATIONAL_RMS")
+    assert option["available"] is False
+    assert option["unavailableReason"] == "recipient_disabled_by_configuration"
+    with pytest.raises(ValueError, match="feishu_report_recipient_disabled"):
+        resolve_recipient("NATIONAL_RMS", None, disabled)
+
+
+def test_national_recipient_flag_defaults_off():
+    assert Settings(_env_file=None).feishu_report_recipient_national_rms_enabled is False
 
 
 @pytest.mark.parametrize(("region", "key"), [

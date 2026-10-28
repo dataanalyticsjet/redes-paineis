@@ -586,6 +586,151 @@ def test_send_uses_confirmed_analysis_and_same_immutable_artifacts_without_real_
     assert duplicate.value.code == "operational_feishu_report_not_confirmed"
     assert len(fake.calls) == call_count
 
+    second = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
+        recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
+    )
+    assert second["previouslySent"] is True
+    assert second["reportId"] != prepared["reportId"]
+    service.confirm_report(
+        engine, report_id=second["reportId"], actor_user_id=71, analysis_text=second["analysis"],
+        source_id=source_id, settings=_enabled_settings(source_id),
+    )
+    resent = service.send_report(
+        engine, source_id=source_id, report_id=second["reportId"], actor_user_id=71,
+        staging_directory=tmp_path, settings=_enabled_settings(source_id),
+    )
+    assert resent["state"] == "SENT"
+    assert len([kwargs for url, kwargs in fake.calls if url == service.MESSAGE_URL]) == 6
+    with engine.connect() as connection:
+        states = connection.execute(
+            __import__("sqlalchemy").text("SELECT report_state FROM operational_feishu_reports")
+        ).scalars().all()
+    assert states.count("SENT") == 2
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_national_rms_can_receive_full_publication_including_unmapped_rows(source_id: str, tmp_path: Path, monkeypatch):
+    from sqlalchemy import text
+    from app.services.data_foundation.contracts import get_contract
+
+    engine, publication_id, map_id = _report_engine(source_id)
+    source = service._source(source_id)
+    contract = get_contract(source_id, source["contract"])
+    values = {column.key: None for column in contract.columns}
+    if source_id == "collection_rate":
+        values.update({"deadline_at": "2026-10-22 12:00:00", "order_quantity": "5",
+                       "quantity_to_collect": "4", "collected_quantity": "3"})
+    else:
+        values.update({"data_date": "2026-10-22", "total_orders": "5",
+                       "orders_unscanned_at_collection": "2"})
+    keys = ["source_id", "publication_id", "map_version_id", "source_row_no", "source_sheet_name",
+            "resolved_base_code", "mapping_resolution"] + [column.key for column in contract.columns]
+    parameters = {"source_id": source_id, "publication_id": uuid.UUID(publication_id).bytes,
+                  "map_version_id": map_id.bytes, "source_row_no": 4,
+                  "source_sheet_name": "2026-10-22" if source["sheet_mode"] == "daily" else None,
+                  "resolved_base_code": None, "mapping_resolution": "UNMAPPED", **values}
+    with engine.begin() as connection:
+        connection.execute(text(f"INSERT INTO {source['table']} ({','.join(f'`{key}`' for key in keys)}) VALUES ({','.join(':'+key for key in keys)})"), parameters)
+        connection.execute(text("UPDATE source_publications SET row_count=3 WHERE publication_id=:p"),
+                           {"p": uuid.UUID(publication_id).bytes})
+        connection.execute(text("UPDATE source_publication_dates SET row_count=3 WHERE publication_id=:p"),
+                           {"p": uuid.UUID(publication_id).bytes})
+
+    settings = _enabled_settings(source_id).model_copy(update={"feishu_report_recipient_national_rms_enabled": True})
+    options = service.get_options(engine, source_id=source_id, publication_id=publication_id, settings=settings)
+    national_option = next(item for item in options["recipients"] if item["key"] == "NATIONAL_RMS")
+    assert national_option["available"] is True
+    assert national_option["regionCode"] is None
+    regional_options = service.get_options(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SPS", settings=settings,
+    )
+    assert next(item for item in regional_options["recipients"] if item["key"] == "NATIONAL_RMS")["available"] is False
+
+    fake = _FakeFeishuClient()
+    monkeypatch.setattr(service.httpx, "Client", lambda **_kwargs: fake)
+    prepared = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code=None,
+        recipient_key="NATIONAL_RMS", actor_user_id=71, staging_directory=tmp_path, settings=settings,
+    )
+    assert prepared["recordCount"] == 3
+    assert prepared["regionCode"] is None
+    assert prepared["previouslySent"] is False
+    with engine.connect() as connection:
+        audit = connection.execute(text("""
+            SELECT region_key,recipient_email,recipient_type,recipient_identifier,recipient_name,report_state
+            FROM operational_feishu_reports WHERE report_id=:id
+        """), {"id": uuid.UUID(prepared["reportId"]).bytes}).one()
+    assert audit == ("ALL", None, "chat_id", "oc_8474b27a4b40adb3ecb8c6577773d222",
+                     "Grupo Nacional de RMs 全国RM", "PREPARED")
+    service.confirm_report(
+        engine, report_id=prepared["reportId"], actor_user_id=71, analysis_text=prepared["analysis"],
+        source_id=source_id, settings=settings,
+    )
+    result = service.send_report(
+        engine, source_id=source_id, report_id=prepared["reportId"], actor_user_id=71,
+        staging_directory=tmp_path, settings=settings,
+    )
+    assert result["state"] == "SENT"
+    messages = [kwargs for url, kwargs in fake.calls if url == service.MESSAGE_URL]
+    assert len(messages) == 3
+    assert all(call["params"] == {"receive_id_type": "chat_id"} for call in messages)
+    assert all(call["json"]["receive_id"] == "oc_8474b27a4b40adb3ecb8c6577773d222" for call in messages)
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+@pytest.mark.parametrize("prior_state", ["SENDING", "PARTIAL", "PENDING"])
+def test_prepare_blocks_unresolved_delivery_for_the_same_source_scope(source_id: str, prior_state: str, tmp_path: Path):
+    from sqlalchemy import text
+
+    engine, publication_id, _ = _report_engine(source_id)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO operational_feishu_reports
+              (report_id,source_id,publication_id,region_key,recipient_key,rules_version,report_state)
+            VALUES (:id,:source,:publication,'SPS',:recipient,:rules,:state)
+        """), {"id": uuid.uuid4().bytes, "source": source_id,
+              "publication": uuid.UUID(publication_id).bytes, "recipient": service.RECIPIENT_KEY,
+              "rules": service.RULES_VERSION, "state": prior_state})
+    with pytest.raises(service.OperationalFeishuReportError) as failure:
+        service.prepare_report(
+            engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
+            recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+            settings=_enabled_settings(source_id),
+        )
+    assert failure.value.code == "operational_feishu_delivery_unresolved"
+
+
+@pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
+def test_prepare_after_sent_uses_new_report_id_and_preserves_sent_history(source_id: str, tmp_path: Path):
+    from sqlalchemy import text
+
+    engine, publication_id, _ = _report_engine(source_id)
+    prior_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO operational_feishu_reports
+              (report_id,source_id,publication_id,region_key,recipient_key,rules_version,report_state)
+            VALUES (:id,:source,:publication,'SPS',:recipient,:rules,'SENT')
+        """), {"id": prior_id.bytes, "source": source_id,
+              "publication": uuid.UUID(publication_id).bytes, "recipient": service.RECIPIENT_KEY,
+              "rules": service.RULES_VERSION})
+    prepared = service.prepare_report(
+        engine, source_id=source_id, publication_id=publication_id, region_code="SPS",
+        recipient_key=service.RECIPIENT_KEY, actor_user_id=71, staging_directory=tmp_path,
+        settings=_enabled_settings(source_id),
+    )
+    assert uuid.UUID(prepared["reportId"]) != prior_id
+    assert prepared["previouslySent"] is True
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT report_id,report_state FROM operational_feishu_reports ORDER BY report_id"
+        )).all()
+    assert len(rows) == 2
+    assert sum(row.report_state == "SENT" for row in rows) == 1
+    assert sum(row.report_state == "PREPARED" for row in rows) == 1
+
 
 @pytest.mark.parametrize("source_id", ["collection_rate", "pdd_collection_failure"])
 def test_send_routes_all_three_stages_to_the_server_allowlisted_regional_chat_id(tmp_path: Path, monkeypatch, source_id: str):

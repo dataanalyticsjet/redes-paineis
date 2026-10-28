@@ -938,17 +938,21 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
                               region_code=region_code, staging_directory=staging_directory, report_id=report_id)
     now = _now()
     hashes = payload["artifacts"]
+    previously_sent = False
     try:
         with engine.begin() as connection:
-            unresolved = connection.execute(text(f"""
+            prior_delivery = connection.execute(text(f"""
                 SELECT report_id, report_state FROM {TABLE}
                 WHERE source_id=:source_id AND publication_id=:publication_id AND region_key=:region_key
                   AND recipient_key=:recipient_key AND rules_version=:rules_version
-                  AND report_state IN ('SENDING','PARTIAL','PENDING') LIMIT 1
+                  AND report_state IN ('SENDING','PARTIAL','PENDING','SENT')
+                ORDER BY CASE WHEN report_state IN ('SENDING','PARTIAL','PENDING') THEN 0 ELSE 1 END
+                LIMIT 1
             """), {"source_id": source_id, "publication_id": bytes(payload["publication"]["publication_id"]),
                   "region_key": region_code or "ALL", "recipient_key": recipient_key, "rules_version": RULES_VERSION}).mappings().first()
-            if unresolved:
+            if prior_delivery and prior_delivery["report_state"] in {"SENDING", "PARTIAL", "PENDING"}:
                 raise OperationalFeishuReportError("operational_feishu_delivery_unresolved", 409)
+            previously_sent = bool(prior_delivery and prior_delivery["report_state"] == "SENT")
             connection.execute(text(f"""
                 INSERT INTO {TABLE}
                   (report_id,source_id,publication_id,publication_version,contract_version,map_version_id,
@@ -967,7 +971,7 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
                   "region_key": region_code or "ALL", "recipient_key": recipient_key,
                   "recipient_email": recipient.identifier if recipient.kind == "email" else None,
                   "recipient_type": recipient.kind, "recipient_identifier": recipient.identifier,
-                  "recipient_name": recipient.label, "actor_user_id": actor_user_id,
+                  "recipient_name": recipient.audit_name or recipient.label, "actor_user_id": actor_user_id,
                   "analysis_text": payload["analysis"], "record_count": payload["recordCount"],
                   "dataset_sha256": payload["digest"], "rules_version": RULES_VERSION,
                   "delivery_context": json.dumps({"artifacts": hashes, "fileName": payload["fileName"], "stages": {}}, separators=(",", ":")),
@@ -990,7 +994,7 @@ def prepare_report(engine: Engine, *, source_id: str, publication_id: str, regio
             "recipientLabel": recipient.label, "recipientType": recipient.kind, "analysis": payload["analysis"],
             "recordCount": payload["recordCount"], "excelFileName": payload["fileName"],
             "excelBytes": payload["xlsxBytes"], "pngBytes": payload["pngBytes"], "state": "PREPARED",
-            "sendEnabled": True}
+            "sendEnabled": True, "previouslySent": previously_sent}
 
 
 def confirm_report(engine: Engine, *, report_id: str, actor_user_id: int, analysis_text: str, source_id: str,
@@ -1064,11 +1068,19 @@ def send_report(engine: Engine, *, source_id: str, report_id: str, actor_user_id
         if row["report_state"] != "CONFIRMED":
             raise OperationalFeishuReportError("operational_feishu_report_not_confirmed", 409)
         publication_id = str(uuid.UUID(bytes=bytes(row["publication_id"])))
+        if engine.dialect.name == "mysql":
+            # One publication row serializes different confirmed report IDs for
+            # the same dataset, closing the race between duplicate checks.
+            connection.execute(text("""
+                SELECT publication_id FROM source_publications
+                WHERE source_id=:source_id AND publication_id=:publication_id
+                FOR UPDATE
+            """), {"source_id": source_id, "publication_id": bytes(row["publication_id"])}).first()
         publication = _publication(engine, source_id, publication_id, connection)
         _assert_report_publication_matches(row, publication)
-        duplicate = connection.execute(text(f"SELECT report_id FROM {TABLE} WHERE source_id=:source AND publication_id=:pub AND region_key=:region AND recipient_key=:recipient AND rules_version=:rules AND report_id<>:id AND report_state IN ('SENDING','PARTIAL','PENDING','SENT') LIMIT 1" + lock), {"source": source_id, "pub": bytes(row["publication_id"]), "region": row["region_key"], "recipient": row["recipient_key"], "rules": row["rules_version"], "id": key}).first()
+        duplicate = connection.execute(text(f"SELECT report_id FROM {TABLE} WHERE source_id=:source AND publication_id=:pub AND region_key=:region AND recipient_key=:recipient AND rules_version=:rules AND report_id<>:id AND report_state IN ('SENDING','PARTIAL','PENDING') LIMIT 1" + lock), {"source": source_id, "pub": bytes(row["publication_id"]), "region": row["region_key"], "recipient": row["recipient_key"], "rules": row["rules_version"], "id": key}).first()
         if duplicate:
-            raise OperationalFeishuReportError("operational_feishu_report_already_sent_or_unresolved", 409)
+            raise OperationalFeishuReportError("operational_feishu_delivery_unresolved", 409)
         region = None if row["region_key"] == "ALL" else str(row["region_key"])
         current_digest, current_count = _digest_rows(connection, engine, source_id, publication, region)
         if current_count == 0:

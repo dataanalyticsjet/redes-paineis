@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     feishu_report_recipient_phelippe_enabled: bool = True
     feishu_report_recipient_marcos_enabled: bool = True
     feishu_report_recipient_alan_enabled: bool = True
+    feishu_report_recipient_national_rms_enabled: bool = False
     feishu_report_recipient_sr_enabled: bool = False
     feishu_report_recipient_mg_enabled: bool = False
     feishu_report_recipient_ce_hq_enabled: bool = False

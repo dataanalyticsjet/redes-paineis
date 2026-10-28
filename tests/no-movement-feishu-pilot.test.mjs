@@ -75,9 +75,13 @@ test("edited rich-text runs serialize to confirmed Markdown and preserve bold fo
 
 test("rich-text editor controls keep Portuguese source text and English/Chinese translations", async () => {
   const translations = await read("src/lib/i18n.ts");
+  const dialog = await read("src/features/dashboards/no-movement-feishu-report-dialog.tsx");
   assert.match(translations, /"Negrito": \{ en: "Bold", zh: "粗体" \}/);
   assert.match(translations, /"Formatação da análise": \{ en: "Analysis formatting", zh: "分析格式" \}/);
   assert.match(translations, /"Selecione o texto para aplicar ou remover negrito\."/);
+  assert.match(translations, /no_movement_report_delivery_unresolved.*pt: "Existe um envio anterior deste relatório com situação pendente\./);
+  assert.match(translations, /no_movement_report_already_sent.*pt: "Este relatório já foi enviado/);
+  assert.match(dialog, /\{error \? <p className="feishu-share-unavailable" role="alert">\{t\(error\)\}<\/p> : null\}/);
 });
 
 test("backend delivers only the confirmed analysis_text and keeps the pilot disabled by default", async () => {
@@ -106,19 +110,26 @@ test("pilot uses independently disabled configuration and does not alter automat
 
 test("recipient selectors use scoped backend allowlists and never embed destination IDs in the UI", async () => {
   const dialog = await read("src/features/dashboards/no-movement-feishu-report-dialog.tsx");
-  const service = await read("backend/app/services/feishu_report_recipients.py");
   const noMovement = await read("backend/app/services/no_movement_feishu_reports.py");
+  const recipients = await read("backend/app/services/feishu_report_recipients.py");
+  const config = await read("backend/app/core/config.py");
   assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "email"\)/);
-  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "chat_id"\)/);
+  assert.match(dialog, /item\.type === "chat_id" && item\.regionCode === null/);
+  assert.match(dialog, /item\.type === "chat_id" && item\.regionCode !== null/);
   assert.match(dialog, /disabled=\{!item\.available\}/);
   assert.match(dialog, /regionCode=\$\{encodeURIComponent\(region\)\}/);
   assert.match(dialog, /prepared\.recipientType/);
-  assert.match(service, /"SR_COLLECTION_GROUP"/);
-  assert.match(service, /region_code="SR"/);
+  assert.match(recipients, /"SR_COLLECTION_GROUP"/);
+  assert.match(recipients, /region_code="SR"/);
   assert.match(noMovement, /recipient_options\(region_code\)/);
   assert.match(dialog, /const scopedOptions = options\?\.scopeRegionCode === \(region \|\| null\) \? options : null/);
   assert.match(dialog, /const activeRecipient = selectedOption\?\.key/);
   assert.doesNotMatch(dialog, /oc_[a-f0-9]{20,}|marcos\.sjunior@|alan\.vicente@/);
+  assert.match(dialog, /prepared\?\.previouslySent/);
+  assert.match(dialog, /prepared\?\.state === "SENT"[\s\S]*Preparar novo envio/);
+  assert.match(recipients, /"NATIONAL_RMS"/);
+  assert.match(config, /feishu_report_recipient_national_rms_enabled: bool = False/);
+  assert.match(noMovement, /previouslySent/);
 });
 
 test("report generation uses the selected publication and its pinned map, not browser pagination", async () => {

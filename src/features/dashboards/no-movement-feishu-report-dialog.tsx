@@ -36,6 +36,7 @@ type Prepared = {
   excelBytes: number;
   pngBytes: number;
   state: "PREPARED" | "CONFIRMED" | "PARTIAL" | "PENDING" | "SENT";
+  previouslySent?: boolean;
 };
 
 async function requestJson<T>(path: string, authorization: string, method = "GET", body?: object): Promise<T> {
@@ -284,8 +285,11 @@ export function NoMovementFeishuReportDialog({
         <optgroup label={t("Pessoas")}>
           {scopedOptions?.recipients.filter(item => item.type === "email").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
         </optgroup>
+        <optgroup label={t("Grupos nacionais")}>
+          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode === null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+        </optgroup>
         <optgroup label={t("Grupos regionais")}>
-          {scopedOptions?.recipients.filter(item => item.type === "chat_id").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
+          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode !== null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
         </optgroup>
       </select>
       <div className="no-movement-feishu-attachments" aria-live="polite">
@@ -327,6 +331,7 @@ export function NoMovementFeishuReportDialog({
       />
       <p className="feishu-share-demo-note">{t("Serão anexados o Excel completo das 18 colunas oficiais e uma prévia PNG gerados da mesma publicação e do mesmo recorte.")}</p>
       {prepared ? <p className="feishu-share-demo-note">{prepared.excelFileName} · {prepared.state}</p> : null}
+      {prepared?.previouslySent ? <p className="feishu-share-demo-note" role="status">{t("Este relatório já foi enviado anteriormente. Você pode preparar um novo envio.")}</p> : null}
       {error ? <p className="feishu-share-unavailable" role="alert">{t(error)}</p> : null}
       {status ? <p className="feishu-share-success" role="status">{t(status)}</p> : null}
       <div className="feishu-share-actions">
@@ -334,6 +339,7 @@ export function NoMovementFeishuReportDialog({
         {!prepared && error && scopedOptions ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => void prepare()}>{t(busy ? "Preparando…" : "Tentar novamente")}</button> : null}
         {prepared?.state === "PREPARED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !analysisDraft.trim()} onClick={() => void confirm()}>{t("Confirmar preparação")}</button> : null}
         {prepared?.state === "CONFIRMED" ? <button className="feishu-share-confirm" type="button" disabled={busy || !scopedOptions?.sendEnabled} onClick={() => void send()}>{t(scopedOptions?.sendEnabled ? "Enviar agora" : "Envio desativado")}</button> : null}
+        {prepared?.state === "SENT" ? <button className="feishu-share-confirm" type="button" disabled={busy} onClick={() => { setPrepared(null); setAnalysisDraft(""); setStatus(null); setError(null); void prepare(); }}>{t("Preparar novo envio")}</button> : null}
       </div>
     </section>
   </div>;

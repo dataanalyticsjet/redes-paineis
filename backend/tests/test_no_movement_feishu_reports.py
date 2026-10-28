@@ -43,6 +43,215 @@ def test_pilot_recipient_is_fixed_to_the_authorized_private_test_user():
     assert error.value.code == "no_movement_report_recipient_invalid"
 
 
+def _national_prepare_fixture(monkeypatch):
+    import uuid
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE no_movement_feishu_reports (
+                report_id BLOB PRIMARY KEY, source_id TEXT, publication_id BLOB,
+                publication_version INTEGER, contract_version INTEGER, map_version_id BLOB,
+                region_key TEXT, recipient_key TEXT, recipient_email TEXT, recipient_type TEXT,
+                recipient_identifier TEXT, recipient_name TEXT, actor_user_id INTEGER,
+                analysis_text TEXT, interpretation TEXT, comments TEXT, recommendations TEXT,
+                record_count INTEGER, total_stopped_orders INTEGER, dataset_sha256 BLOB,
+                rules_version TEXT, report_state TEXT, delivery_context TEXT,
+                created_at DATETIME, updated_at DATETIME
+            )
+        """)
+
+    publication_id, map_version_id = uuid.uuid4(), uuid.uuid4()
+    publication = {
+        "publication_id": publication_id.bytes, "version_no": 12, "contract_version": 2,
+        "map_version_id": map_version_id.bytes, "period_start": date(2026, 10, 26),
+        "snapshot_as_of": datetime(2026, 10, 26, 9, 15), "publication_state": "PUBLISHED",
+    }
+    payload = {
+        "publication": publication, "regionCode": None,
+        "rows": [
+            {"resolved_base_code": "001", "mapped_region": "SPS"},
+            {"resolved_base_code": None, "mapped_region": None},
+        ],
+        "message": "Análise nacional", "recordCount": 2, "total": 23,
+        "datasetDigest": b"d" * 32, "fileName": "sem_movimentacao_nacional_2026-10-26.xlsx",
+        "xlsx": b"national xlsx", "png": b"national png", "regions": ["PR", "SPS"],
+    }
+
+    def report_payload(*args, publication_id, region_code, **kwargs):
+        assert publication_id == str(uuid.UUID(bytes=publication["publication_id"]))
+        assert region_code is None
+        return payload
+
+    monkeypatch.setattr("app.services.no_movement_feishu_reports._report_payload", report_payload)
+    return engine, publication_id, payload
+
+
+@pytest.mark.parametrize(
+    "prior_state",
+    [
+        "PARTIAL",
+        "PENDING",
+        "SENDING",
+    ],
+)
+def test_national_prepare_blocks_unresolved_prior_delivery(tmp_path, monkeypatch, prior_state):
+    import uuid
+
+    engine, publication_id, _ = _national_prepare_fixture(monkeypatch)
+    prior_report_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO no_movement_feishu_reports
+                (report_id, publication_id, region_key, recipient_key, actor_user_id,
+                 rules_version, report_state)
+            VALUES (:report_id, :publication_id, 'ALL', :recipient_key, 7, :rules_version, :state)
+        """), {
+            "report_id": prior_report_id.bytes, "publication_id": publication_id.bytes,
+            "recipient_key": RECIPIENT_KEY, "rules_version": service.RULES_VERSION,
+            "state": prior_state,
+        })
+
+    with pytest.raises(NoMovementFeishuReportError) as error:
+        prepare_report(
+            engine, publication_id=str(publication_id), region_code=None,
+            recipient_key=RECIPIENT_KEY, actor_user_id=7, staging_directory=tmp_path,
+        )
+
+    assert error.value.code == "no_movement_report_delivery_unresolved"
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT report_id, report_state FROM no_movement_feishu_reports")).all()
+    assert rows == [(prior_report_id.bytes, prior_state)]
+    assert not list((tmp_path / ".no-movement-feishu-reports").glob("*"))
+
+
+def test_national_prepare_allows_new_report_after_sent_and_marks_prior_history(tmp_path, monkeypatch):
+    import uuid
+
+    engine, publication_id, _ = _national_prepare_fixture(monkeypatch)
+    prior_report_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO no_movement_feishu_reports
+                (report_id, publication_id, region_key, recipient_key, actor_user_id,
+                 rules_version, report_state)
+            VALUES (:report_id, :publication_id, 'ALL', :recipient_key, 7, :rules_version, 'SENT')
+        """), {"report_id": prior_report_id.bytes, "publication_id": publication_id.bytes,
+               "recipient_key": RECIPIENT_KEY, "rules_version": service.RULES_VERSION})
+
+    prepared = prepare_report(
+        engine, publication_id=str(publication_id), region_code=None,
+        recipient_key=RECIPIENT_KEY, actor_user_id=7, staging_directory=tmp_path,
+    )
+    assert uuid.UUID(prepared["reportId"]) != prior_report_id
+    assert prepared["previouslySent"] is True
+    assert prepared["recordCount"] == 2
+    with engine.connect() as connection:
+        states = connection.execute(text(
+            "SELECT report_state FROM no_movement_feishu_reports"
+        )).scalars().all()
+    assert sorted(states) == ["PREPARED", "SENT"]
+
+
+@pytest.mark.parametrize("region_code", ["PR", "SPS"])
+def test_regional_prepare_remains_independent_from_national_scope(tmp_path, monkeypatch, region_code):
+    engine, publication_id, payload = _national_prepare_fixture(monkeypatch)
+
+    def report_payload(*args, publication_id, region_code: str | None, **kwargs):
+        assert region_code in {"PR", "SPS"}
+        return {**payload, "regionCode": region_code, "rows": [payload["rows"][0]], "recordCount": 1}
+
+    monkeypatch.setattr("app.services.no_movement_feishu_reports._report_payload", report_payload)
+    prepared = prepare_report(
+        engine, publication_id=str(publication_id), region_code=region_code,
+        recipient_key=RECIPIENT_KEY, actor_user_id=7, staging_directory=tmp_path,
+    )
+
+    assert prepared["regionCode"] == region_code
+    assert prepared["regionLabel"] == region_code
+    assert prepared["recordCount"] == 1
+
+
+def test_national_prepare_includes_unmapped_rows_and_ignores_completed_regional_report(tmp_path, monkeypatch):
+    import uuid
+
+    engine, publication_id, _ = _national_prepare_fixture(monkeypatch)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO no_movement_feishu_reports
+                (report_id, publication_id, region_key, recipient_key, actor_user_id,
+                 rules_version, report_state)
+            VALUES (:report_id, :publication_id, 'PR', :recipient_key, 7, :rules_version, 'SENT')
+        """), {
+            "report_id": uuid.uuid4().bytes, "publication_id": publication_id.bytes,
+            "recipient_key": RECIPIENT_KEY, "rules_version": service.RULES_VERSION,
+        })
+
+    prepared = prepare_report(
+        engine, publication_id=str(publication_id), region_code=None,
+        recipient_key=RECIPIENT_KEY, actor_user_id=7, staging_directory=tmp_path,
+    )
+
+    assert prepared["regionCode"] is None
+    assert prepared["regionLabel"] == "Todas as regionais"
+    assert prepared["recordCount"] == 2
+    with engine.connect() as connection:
+        scopes = connection.execute(text(
+            "SELECT region_key, report_state FROM no_movement_feishu_reports ORDER BY region_key"
+        )).all()
+    assert scopes == [("ALL", "PREPARED"), ("PR", "SENT")]
+
+
+def test_sr_group_options_require_sr_in_the_publications_pinned_mapping(monkeypatch):
+    import uuid
+
+    from app.services import feishu_report_recipients
+
+    engine = create_engine("sqlite://")
+    sr_map_id, other_map_id = uuid.uuid4(), uuid.uuid4()
+    sr_publication_id, other_publication_id = uuid.uuid4(), uuid.uuid4()
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE base_mapping_entries (map_version_id BLOB, regional_name TEXT)")
+        connection.execute(text("INSERT INTO base_mapping_entries VALUES (:map,:region)"), {"map": sr_map_id.bytes, "region": "SR"})
+        connection.execute(text("INSERT INTO base_mapping_entries VALUES (:map,:region)"), {"map": other_map_id.bytes, "region": "SPS"})
+
+    publications = {
+        str(sr_publication_id): {
+            "publication_id": sr_publication_id.bytes, "version_no": 12, "contract_version": 2,
+            "map_version_id": sr_map_id.bytes, "period_start": date(2026, 10, 26),
+            "published_at_sao_paulo": None,
+        },
+        str(other_publication_id): {
+            "publication_id": other_publication_id.bytes, "version_no": 13, "contract_version": 2,
+            "map_version_id": other_map_id.bytes, "period_start": date(2026, 10, 26),
+            "published_at_sao_paulo": None,
+        },
+    }
+    monkeypatch.setattr(service, "_current_publication", lambda _engine, publication_id, _connection=None: publications[publication_id])
+    enabled = Settings(_env_file=None, feishu_report_recipient_sr_enabled=True)
+    monkeypatch.setattr(service, "get_settings", lambda: enabled)
+    monkeypatch.setattr(feishu_report_recipients, "get_settings", lambda: enabled)
+
+    options = service.get_report_options(engine, publication_id=str(sr_publication_id), region_code="SR")
+    assert options["mapVersionId"] == str(sr_map_id)
+    sr_option = next(item for item in options["recipients"] if item["key"] == "SR_COLLECTION_GROUP")
+    assert sr_option["available"] is True
+
+    with pytest.raises(NoMovementFeishuReportError) as missing_sr:
+        service.get_report_options(engine, publication_id=str(other_publication_id), region_code="SR")
+    assert missing_sr.value.code == "no_movement_feishu_region_invalid"
+
+    national = service.get_report_options(engine, publication_id=str(sr_publication_id))
+    national_sr = next(item for item in national["recipients"] if item["key"] == "SR_COLLECTION_GROUP")
+    assert national_sr["available"] is False
+
+    disabled = Settings(_env_file=None, feishu_report_recipient_sr_enabled=False)
+    monkeypatch.setattr(service, "get_settings", lambda: disabled)
+    monkeypatch.setattr(feishu_report_recipients, "get_settings", lambda: disabled)
+    disabled_sr = service.get_report_options(engine, publication_id=str(sr_publication_id), region_code="SR")
+    assert next(item for item in disabled_sr["recipients"] if item["key"] == "SR_COLLECTION_GROUP")["available"] is False
+
+
 def test_explicit_feishu_http_rejection_is_distinguished_from_ambiguous_server_failure():
     with pytest.raises(_FeishuRejected):
         _feishu_payload(_response(400, {"code": 999, "msg": "rejected"}))
@@ -374,6 +583,7 @@ def test_prepare_and_confirm_sps_persists_exact_text_and_immutable_attachment_ha
 
 @pytest.mark.parametrize(("recipient_key", "region_code", "receive_type", "receive_id", "recipient_flag", "recipient_name"), [
     (RECIPIENT_KEY, "SPS", "email", service.RECIPIENT_EMAIL, None, "Phelippe · Pessoa / 个人"),
+    ("NATIONAL_RMS", None, "chat_id", "oc_8474b27a4b40adb3ecb8c6577773d222", "feishu_report_recipient_national_rms_enabled", "Grupo Nacional de RMs 全国RM"),
     ("MG_COLLECTION_GROUP", "MG", "chat_id", "oc_d3ef49bb0698066065c5556ce484c6ed", "feishu_report_recipient_mg_enabled", "MG 揽收沟通群 · Coordenação de Coleta First Mile"),
 ])
 def test_send_uses_confirmed_artifacts_and_allowlisted_destination_without_regeneration(
@@ -508,16 +718,36 @@ def test_send_uses_confirmed_artifacts_and_allowlisted_destination_without_regen
     assert card["body"]["elements"][0]["content"] == _feishu_markdown(edited)
     assert f"**Resumo {region_code}**" in card["body"]["elements"][0]["content"]
     with engine.connect() as connection:
-        persisted_text = connection.execute(text("SELECT analysis_text FROM no_movement_feishu_reports")).scalar_one()
+        persisted_text = connection.execute(text("SELECT analysis_text FROM no_movement_feishu_reports WHERE report_id=:id"),
+                                            {"id": uuid.UUID(prepared["reportId"]).bytes}).scalar_one()
     assert persisted_text == edited
     assert not (tmp_path / ".no-movement-feishu-reports" / f"{uuid.UUID(prepared['reportId']).hex}.xlsx").exists()
     with pytest.raises(NoMovementFeishuReportError) as duplicate_error:
-        prepare_report(
-            engine, publication_id=str(publication_id), region_code=region_code, recipient_key=recipient_key,
-            actor_user_id=7, staging_directory=tmp_path,
-        )
-    assert duplicate_error.value.code == "no_movement_report_delivery_unresolved"
-    assert list((tmp_path / ".no-movement-feishu-reports").iterdir()) == []
+        send_report(engine, report_id=prepared["reportId"], actor_user_id=7,
+                    staging_directory=tmp_path, settings=settings)
+    assert duplicate_error.value.code == "no_movement_report_not_confirmed"
+    second = prepare_report(
+        engine, publication_id=str(publication_id), region_code=region_code, recipient_key=recipient_key,
+        actor_user_id=7, staging_directory=tmp_path,
+    )
+    assert second["reportId"] != prepared["reportId"]
+    assert second["previouslySent"] is True
+    confirm_report(engine, report_id=second["reportId"], actor_user_id=7, analysis_text=edited)
+    second_result = send_report(
+        engine, report_id=second["reportId"], actor_user_id=7,
+        staging_directory=tmp_path, settings=settings,
+    )
+    assert second_result["state"] == "SENT"
+    assert captured["targets"] == [(receive_type, receive_id)] * 6
+    assert include_artifact_calls == [True, False, True, False]
+    if recipient_key == "NATIONAL_RMS":
+        assert all(target == ("chat_id", "oc_8474b27a4b40adb3ecb8c6577773d222") for target in captured["targets"])
+    with engine.connect() as connection:
+        history = connection.execute(text(
+            "SELECT report_id, report_state FROM no_movement_feishu_reports ORDER BY created_at, report_id"
+        )).all()
+    assert len(history) == 2
+    assert all(row.report_state == "SENT" for row in history)
 
 
 def test_mysql_datetime_values_are_created_as_naive_utc():

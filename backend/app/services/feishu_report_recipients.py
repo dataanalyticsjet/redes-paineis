@@ -17,12 +17,15 @@ class Recipient:
     enabled_setting: str | None = None
     region_code: str | None = None
     mapping_confirmed: bool = True
+    national_only: bool = False
+    audit_name: str | None = None
 
 
 RECIPIENTS: tuple[Recipient, ...] = (
     Recipient("PHELIPPE_PRIVATE", "Phelippe · Pessoa / 个人", "email", RECIPIENT_EMAIL, "feishu_report_recipient_phelippe_enabled"),
     Recipient("MARCOS_PRIVATE", "Marcos · Pessoa / 个人", "email", "marcos.sjunior@jtexpress.com.br", "feishu_report_recipient_marcos_enabled"),
     Recipient("ALAN_PRIVATE", "Alan · Pessoa / 个人", "email", "alan.vicente@jtexpress.com.br", "feishu_report_recipient_alan_enabled"),
+    Recipient("NATIONAL_RMS", "Grupo Nacional de RMs 全国RM — MATRIZ / Todas as regionais", "chat_id", "oc_8474b27a4b40adb3ecb8c6577773d222", "feishu_report_recipient_national_rms_enabled", national_only=True, audit_name="Grupo Nacional de RMs 全国RM"),
     Recipient("SR_COLLECTION_GROUP", "SR 揽收沟通群 · Coordenação de Coleta - First Mile", "chat_id", "oc_cf854b86072f21b49d9f4c926b0c192b", "feishu_report_recipient_sr_enabled", region_code="SR"),
     Recipient("MG_COLLECTION_GROUP", "MG 揽收沟通群 · Coordenação de Coleta First Mile", "chat_id", "oc_d3ef49bb0698066065c5556ce484c6ed", "feishu_report_recipient_mg_enabled", region_code="MG"),
     Recipient("CE_HQ_COLLECTION_GROUP", "【CE+HQ】揽收沟通 · Coordenação de Coleta", "chat_id", "oc_eccb8d1014d79126eb0cec51c540dea9", "feishu_report_recipient_ce_hq_enabled", region_code="CE"),
@@ -40,9 +43,12 @@ def recipient_options(region_code: str | None, settings: Settings | None = None)
     config = settings or get_settings()
     result: list[dict[str, Any]] = []
     for recipient in RECIPIENTS:
-        scope_matches = recipient.kind == "email" or (
-            bool(region_code) and recipient.mapping_confirmed and recipient.region_code == region_code
-        )
+        if recipient.kind == "email":
+            scope_matches = True
+        elif recipient.national_only:
+            scope_matches = region_code is None and recipient.mapping_confirmed
+        else:
+            scope_matches = bool(region_code) and recipient.mapping_confirmed and recipient.region_code == region_code
         enabled = _is_enabled(recipient, config)
         available = scope_matches and enabled
         if recipient.kind == "chat_id" and not recipient.mapping_confirmed:
@@ -74,7 +80,9 @@ def resolve_recipient(recipient_key: str, region_code: str | None, settings: Set
     if recipient.kind == "chat_id":
         if not recipient.mapping_confirmed:
             raise ValueError("feishu_report_recipient_mapping_pending")
-        if not region_code or region_code != recipient.region_code:
+        if recipient.national_only and region_code is not None:
+            raise ValueError("feishu_report_recipient_region_mismatch")
+        if not recipient.national_only and (not region_code or region_code != recipient.region_code):
             raise ValueError("feishu_report_recipient_region_mismatch")
     return recipient
 
@@ -98,7 +106,7 @@ def recipient_from_audit(
         raise ValueError("feishu_report_recipient_invalid")
     if (str(recipient_type or "") != recipient.kind
             or str(recipient_identifier or "") != recipient.identifier
-            or str(recipient_name or "") != recipient.label):
+            or str(recipient_name or "") != (recipient.audit_name or recipient.label)):
         raise ValueError("feishu_report_recipient_changed")
     if recipient.kind == "email" and str(legacy_email or "") != recipient.identifier:
         raise ValueError("feishu_report_recipient_changed")
