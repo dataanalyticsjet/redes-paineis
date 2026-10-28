@@ -58,6 +58,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -1997,17 +1998,31 @@ interface MultiSelectProps {
   disabled?: boolean;
   disabledLabel?: string;
   disabledReason?: string;
-  exclusiveGroup?: string;
   t: DashboardTranslator;
 }
 
 function positionMultiSelectPopover(element: HTMLDetailsElement): void {
   if (typeof window === "undefined") return;
   const bounds = element.getBoundingClientRect();
-  const popoverWidth = Math.min(Math.max(bounds.width, 320), Math.max(0, window.innerWidth - 32));
+  const popoverWidth = Math.min(Math.max(bounds.width, 320), Math.max(120, window.innerWidth - 32));
   const fitsLeft = bounds.left + popoverWidth <= window.innerWidth - 16;
   const fitsRight = bounds.right - popoverWidth >= 16;
   element.dataset.popoverAlign = fitsLeft || !fitsRight ? "left" : "right";
+  const desiredHeight = Math.min(520, window.innerHeight * 0.72);
+  const availableBelow = Math.max(96, window.innerHeight - bounds.bottom - 12);
+  const availableAbove = Math.max(96, bounds.top - 12);
+  const placeAbove = availableBelow < desiredHeight && availableAbove > availableBelow;
+  element.dataset.popoverPlacement = placeAbove ? "top" : "bottom";
+  element.style.setProperty("--multi-select-popover-width", `${popoverWidth}px`);
+  element.style.setProperty("--multi-select-popover-max-height", `${Math.max(96, Math.min(desiredHeight, placeAbove ? availableAbove : availableBelow))}px`);
+}
+
+function multiSelectGroup(element: HTMLDetailsElement | null): Element | null {
+  return element?.closest("[data-filter-group]")
+    ?? element?.closest(".filter-grid")
+    ?? element?.closest(".filters-card")
+    ?? element?.parentElement
+    ?? null;
 }
 
 function MultiSelect({
@@ -2025,11 +2040,14 @@ function MultiSelect({
   disabled = false,
   disabledLabel,
   disabledReason,
-  exclusiveGroup,
   t,
 }: MultiSelectProps) {
   const [query, setQuery] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
   const detailsRef = useRef<HTMLDetailsElement>(null);
+  const labelId = useId();
+  const selectedId = useId();
+  const menuId = useId();
   const allSelected = allOptionsAreSelected(options, selected);
   const selectedLabel = disabled && disabledLabel ? disabledLabel : allSelected
     ? allLabel
@@ -2050,11 +2068,11 @@ function MultiSelect({
   };
 
   useEffect(() => {
-    if (!exclusiveGroup) return undefined;
     const closeOtherMenus = (event: Event) => {
-      const detail = (event as CustomEvent<{ group: string; element: HTMLDetailsElement }>).detail;
-      if (detail?.group === exclusiveGroup && detail.element !== detailsRef.current && detailsRef.current) {
-        detailsRef.current.open = false;
+      const detail = (event as CustomEvent<{ group: string | Element | null; element: HTMLDetailsElement }>).detail;
+      const current = detailsRef.current;
+      if (detail?.group === multiSelectGroup(current) && detail.element !== current && current) {
+        current.open = false;
       }
     };
     const closeOutside = (event: PointerEvent) => {
@@ -2081,11 +2099,11 @@ function MultiSelect({
       document.removeEventListener("keydown", closeOnEscape);
       window.removeEventListener("resize", repositionOpenMenu);
     };
-  }, [exclusiveGroup]);
+  }, []);
 
   return (
     <div className="filter-field">
-      <span className="filter-label">{label}</span>
+      <span id={labelId} className="filter-label">{label}</span>
       <details
         ref={detailsRef}
         className="multi-select"
@@ -2093,24 +2111,27 @@ function MultiSelect({
         title={disabled ? disabledReason : undefined}
         style={disabled ? { opacity: 0.65, cursor: "not-allowed" } : undefined}
         onToggle={(event) => {
-          if (!event.currentTarget.open) return;
+          const current = event.currentTarget;
+          setIsOpen(current.open);
+          if (!current.open) return;
           if (resetSearchOnOpen) setQuery("");
-          if (exclusiveGroup) {
-            positionMultiSelectPopover(event.currentTarget);
-            document.dispatchEvent(new CustomEvent("dashboard-multiselect-open", {
-              detail: { group: exclusiveGroup, element: event.currentTarget },
-            }));
-          }
+          positionMultiSelectPopover(current);
+          document.dispatchEvent(new CustomEvent("dashboard-multiselect-open", {
+            detail: { group: multiSelectGroup(current), element: current },
+          }));
         }}
       >
         <summary
+          aria-expanded={isOpen}
+          aria-controls={menuId}
+          aria-labelledby={`${labelId} ${selectedId}`}
           aria-disabled={disabled || undefined}
           onClick={disabled ? (event) => event.preventDefault() : undefined}
         >
-          <span>{selectedLabel}</span>
+          <span id={selectedId}>{selectedLabel}</span>
           <ChevronDown size={16} aria-hidden="true" />
         </summary>
-        <div className="multi-select-popover">
+        <div id={menuId} className="multi-select-popover">
           {searchable ? (
             <label className="menu-search">
               <Search size={15} aria-hidden="true" />
@@ -8186,7 +8207,7 @@ export function DashboardApp() {
                   {movementLoaded?.format === "summary" ? (
                     <div className="filter-field">
                       <label className="filter-label" htmlFor="movement-metric">{t("Indicador / AGING")}</label>
-                      <select className="date-input" id="movement-metric" value={movementSummaryMetric}
+                      <select className="operational-filter-select" id="movement-metric" value={movementSummaryMetric}
                         disabled={!noMovementHasPublishedRecords}
                         onChange={(event) => { setMovementSummaryMetric(event.target.value); setMovementPage(1); }}>
                         {MOVEMENT_SUMMARY_METRICS.map(([key, label]) => <option key={key} value={key}>{t(label)}</option>)}
@@ -9353,7 +9374,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("regional")}
                     plural={t("regionais")}
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9365,7 +9385,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular="RM"
                     plural="RM"
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9377,7 +9396,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular="RGM"
                     plural="RGM"
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9389,7 +9407,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("região do RM")}
                     plural={t("regiões do RM")}
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9401,7 +9418,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("base")}
                     plural={t("bases")}
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <div className="filter-field date-field">
@@ -9464,7 +9480,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("origem")}
                     plural={t("origens")}
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                   <MultiSelect
@@ -9476,7 +9491,6 @@ const byRegional = [...new Set(eligible.map((row) => row.region))].map((region) 
                     singular={t("tipo")}
                     plural={t("tipos")}
                     searchable
-                    exclusiveGroup="collection-rate-v3"
                     t={t}
                   />
                 </div>

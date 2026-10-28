@@ -276,12 +276,12 @@ export function NoMovementFeishuReportDialog({
         {prepared ? <p><strong>{t("Destino confirmado:")}</strong> {prepared.recipientLabel} · {prepared.recipientType === "email" ? t("Pessoa · e-mail") : t("Grupo · chat Feishu")}</p> : null}
       </div>
       <label htmlFor="nm-feishu-region">{t("Regional do relatório")}</label>
-      <select id="nm-feishu-region" value={region} disabled={!scopedOptions || busy} onChange={event => changeScope(event.target.value, activeRecipient)}>
+      <select className="operational-filter-select" id="nm-feishu-region" value={region} disabled={!scopedOptions || busy} onChange={event => changeScope(event.target.value, activeRecipient)}>
         <option value="">{t("Todas as regionais")}</option>
         {scopedOptions?.regions.map(item => <option key={item} value={item}>{item}</option>)}
       </select>
       <label htmlFor="nm-feishu-recipient">{t("Destinatário")}</label>
-      <select id="nm-feishu-recipient" value={activeRecipient} disabled={!scopedOptions || busy} onChange={event => changeScope(region, event.target.value)}>
+      <select className="operational-filter-select" id="nm-feishu-recipient" value={activeRecipient} disabled={!scopedOptions || busy} onChange={event => changeScope(region, event.target.value)}>
         <optgroup label={t("Pessoas")}>
           {scopedOptions?.recipients.filter(item => item.type === "email").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
         </optgroup>

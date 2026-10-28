@@ -194,7 +194,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
   const select = (key: keyof CollectionMonitoringV2Filters, label: string, values: readonly string[]) => (
     <label className="collection-monitoring-v2-filter" key={key}>
       <span>{t(label)}</span>
-      <select value={String(filters[key] ?? "")} onChange={(event) => updateFilter(key, event.target.value || undefined)}>
+      <select className="operational-filter-select" value={String(filters[key] ?? "")} onChange={(event) => updateFilter(key, event.target.value || undefined)}>
         <option value="">{t("Todos")}</option>
         {values.map((value) => <option key={value} value={value}>{value}</option>)}
       </select>
@@ -224,7 +224,7 @@ export function CollectionMonitoringV2Dashboard({ t, language, scopeKey }: Props
         {dateFilters}
         <label className="collection-monitoring-v2-filter collection-monitoring-v2-status-filter">
           <span>{t("Status")}</span>
-          <select aria-label={`${t("Status")} — ${t("Pendente de mapeamento")}`} disabled value="pending"><option value="pending">{t("Pendente de mapeamento")}</option></select>
+          <select className="operational-filter-select" aria-label={`${t("Status")} — ${t("Pendente de mapeamento")}`} disabled value="pending"><option value="pending">{t("Pendente de mapeamento")}</option></select>
           <small>{t("Filtro indisponível até a aprovação do mapeamento categórico do JMS.")}</small>
         </label>
         {select("origin", "Origem do pedido", options.origins)}

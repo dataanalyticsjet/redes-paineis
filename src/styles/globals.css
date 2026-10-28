@@ -10228,3 +10228,149 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 html[data-theme="dark"] .data-foundation-source-card, html[data-theme="dark"] .data-foundation-confirmation-modal { background: #20242b; border-color: #3c414a; }
 html[data-theme="dark"] .data-foundation-source-card-copy h2, html[data-theme="dark"] .data-foundation-source-card-copy p strong, html[data-theme="dark"] .data-foundation-confirmation-modal > header h2, html[data-theme="dark"] .data-foundation-confirm-file strong { color: #f0f1f3; }
 html[data-theme="dark"] .data-foundation-confirm-file, html[data-theme="dark"] .data-foundation-confirmation-modal > header button { background: #2a2f37; color: #f0f1f3; border-color: #454b55; }
+
+/* Shared operational filter styling, anchored to the Sem Movimentação controls. */
+.dashboard-main:not(.dashboard-main-presentation-home) section.filters-card:not(.upload-ready-card):has(.multi-select[open]) {
+  z-index: 125;
+  overflow: visible;
+}
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-field:has(> .multi-select[open]) { z-index: 130; }
+.multi-select[open] { z-index: 131; }
+.multi-select summary:hover:not([aria-disabled="true"]) { border-color: #e8bcbc; }
+.multi-select summary:focus-visible {
+  border-color: #d71920;
+  outline: 3px solid rgb(215 25 32 / 16%);
+  outline-offset: 2px;
+}
+.multi-select[data-popover-align="left"] .multi-select-popover { right: auto; left: 0; }
+.multi-select[data-popover-align="right"] .multi-select-popover { right: 0; left: auto; }
+.multi-select[data-popover-placement="top"] .multi-select-popover { top: auto; bottom: calc(100% + 7px); }
+.multi-select[data-popover-placement="bottom"] .multi-select-popover { top: calc(100% + 7px); bottom: auto; }
+.multi-select-popover {
+  box-sizing: border-box;
+  width: min(var(--multi-select-popover-width, max(100%, 320px)), calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: var(--multi-select-popover-max-height, min(72dvh, 520px));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.menu-options { max-height: min(265px, max(80px, calc(var(--multi-select-popover-max-height, 520px) - 170px))); }
+.menu-search:focus-within { border-color: #df9b9b; box-shadow: 0 0 0 3px rgb(215 25 32 / 9%); }
+.menu-option.selected { background: #fff7f7; }
+.menu-option:focus-within,
+.menu-option-all:focus-visible,
+.menu-search button:focus-visible,
+.menu-footer button:focus-visible {
+  outline: 2px solid rgb(215 25 32 / 32%);
+  outline-offset: 1px;
+}
+.menu-empty { padding: 16px 10px; color: #747b85; }
+
+.operational-filter-select,
+.dashboard-main .filter-field .operational-filter-select,
+.collection-monitoring-v2-filter .operational-filter-select,
+.collection-monitoring-t4-t5-filter-grid .operational-filter-select,
+.feishu-share-dialog .operational-filter-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 34px 0 12px;
+  border: 1px solid #e1e4e9;
+  border-radius: 8px;
+  color: #343a43;
+  background-color: #fff;
+  background-image: linear-gradient(45deg, transparent 50%, #858c97 50%), linear-gradient(135deg, #858c97 50%, transparent 50%);
+  background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.25;
+  appearance: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.operational-filter-select:focus-visible {
+  border-color: #d71920;
+  outline: 3px solid rgb(215 25 32 / 14%);
+  outline-offset: 1px;
+}
+.operational-filter-select:disabled {
+  color: #747b85;
+  background-color: #f6f7f9;
+  cursor: not-allowed;
+}
+.collection-monitoring-v2-filter > span,
+.collection-monitoring-t4-t5-filter-grid label > span,
+.operational-feishu-dialog > label,
+.no-movement-feishu-dialog > label {
+  color: #737981;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+
+/* Keep date and text controls aligned with the shared filter/select pattern. */
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > input:not([type="checkbox"]):not([type="radio"]),
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > .date-input-wrap,
+.collection-monitoring-v2-filter-grid .collection-monitoring-v2-filter input,
+.collection-monitoring-t4-t5-filter-grid input,
+.collection-monitoring-t4-t5-filter-grid select,
+.collection-monitoring-t4-t5-toolbar input {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid #e1e4e9;
+  border-radius: 8px;
+  color: #343a43;
+  background-color: #fff;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.25;
+}
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > input:not([type="checkbox"]):not([type="radio"]),
+.collection-monitoring-v2-filter-grid .collection-monitoring-v2-filter input,
+.collection-monitoring-t4-t5-filter-grid input,
+.collection-monitoring-t4-t5-toolbar input {
+  width: 100%;
+  padding: 0 12px;
+}
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > .date-input-wrap {
+  padding-inline: 12px;
+}
+.collection-monitoring-v2-filter-grid .collection-monitoring-v2-filter input:focus-visible,
+.collection-monitoring-t4-t5-filter-grid input:focus-visible,
+.collection-monitoring-t4-t5-toolbar input:focus-visible,
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > input:focus-visible,
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > .date-input-wrap:focus-within {
+  border-color: #d71920;
+  outline: 3px solid rgb(215 25 32 / 14%);
+  outline-offset: 1px;
+}
+.dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > input:disabled {
+  color: #747b85;
+  background-color: #f6f7f9;
+  cursor: not-allowed;
+}
+html[data-theme="dark"] .operational-filter-select,
+html[data-theme="dark"] .collection-monitoring-v2-filter-grid .collection-monitoring-v2-filter input,
+html[data-theme="dark"] .collection-monitoring-t4-t5-filter-grid input,
+html[data-theme="dark"] .dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > input:not([type="checkbox"]):not([type="radio"]),
+html[data-theme="dark"] .dashboard-main:not(.dashboard-main-presentation-home) .filter-grid > .filter-field > .date-input-wrap {
+  border-color: var(--border-strong) !important;
+  background-color: #191d23 !important;
+  color: var(--ink) !important;
+  color-scheme: dark;
+}
+html[data-theme="dark"] .multi-select-popover { border-color: var(--border-strong); background: #20242b; color: var(--ink); }
+html[data-theme="dark"] .menu-search { border-color: var(--border-strong); background: #191d23; }
+html[data-theme="dark"] .menu-option { color: var(--muted); }
+html[data-theme="dark"] .menu-option:hover { background: #30343c; }
+html[data-theme="dark"] .menu-option.selected { background: #3b2528; color: var(--ink); }
+html[data-theme="dark"] .fake-checkbox { border-color: var(--border-strong); background: #191d23; }
+html[data-theme="dark"] .menu-option.selected .fake-checkbox,
+html[data-theme="dark"] .menu-option-all.selected .fake-checkbox { border-color: var(--jnt-red); background: var(--jnt-red); }
+html[data-theme="dark"] .operational-filter-select {
+  color-scheme: dark;
+}

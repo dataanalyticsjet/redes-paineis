@@ -28,7 +28,9 @@ test("filtros Taxa V3 permanecem expandidos e mantêm Limpar filtros", () => {
 
 test("menus multi-select da Taxa V3 são exclusivos, pesquisáveis, roláveis e fecham fora ou com Escape", () => {
   const filterArea = dashboard.slice(dashboard.indexOf('id="taxa-v2-filter-content"'), dashboard.indexOf('data-testid="collection-rate-v2-diagnostic"'));
-  assert.equal((filterArea.match(/exclusiveGroup="collection-rate-v3"/g) ?? []).length, 7);
+  assert.match(filterArea, /className="filter-grid taxa-filter-grid"/);
+  assert.doesNotMatch(filterArea, /exclusiveGroup=/);
+  assert.match(dashboard, /element\?\.closest\("\.filter-grid"\)/);
   assert.match(dashboard, /function positionMultiSelectPopover\(element: HTMLDetailsElement\): void/);
   assert.match(dashboard, /element\.dataset\.popoverAlign = fitsLeft \|\| !fitsRight \? "left" : "right"/);
   assert.match(dashboard, /document\.addEventListener\("pointerdown", closeOutside, true\)/);
