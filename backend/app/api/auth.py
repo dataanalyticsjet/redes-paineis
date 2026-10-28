@@ -308,6 +308,9 @@ async def current_user(
             "additional_regions",
             "effective_regions",
             "data_scope_source",
+            "admin_override_enabled",
+            "admin_allowed_regions",
+            "effective_scope_source",
             "is_active",
         )
     }

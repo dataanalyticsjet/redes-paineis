@@ -242,7 +242,19 @@ test("SYNC_FAILED denies cached data except for the exact explicit regional gran
     ...authorization,
     organizational_scope: "regional",
     role: "regional",
+    data_scope_source: "admin_override",
+    organizational_scope_policy: "V2",
+    effective_regions: ["PR"],
+  };
+  await assert.rejects(loadCachedDashboardData(request), /dashboard_manifest_unauthorized/);
+  assert.equal(loads, 0);
+
+  authorization = {
+    ...authorization,
+    organizational_scope: "regional",
+    role: "regional",
     data_scope_source: "admin_grant",
+    organizational_scope_policy: "LEGACY",
     effective_regions: ["CE", "SPE"],
   };
   assert.deepEqual(await loadCachedDashboardData(request), { value: 1 });

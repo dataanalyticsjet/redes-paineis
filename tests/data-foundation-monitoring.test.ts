@@ -170,6 +170,25 @@ test("consulta V2 aceita qualquer perfil com escopo regional, base ou matriz vá
     effective_regions: ["CE"],
     region_resolution_status: "SYNC_FAILED",
     data_scope_source: "admin_grant",
+    organizational_scope_policy: "LEGACY",
+  }), true);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "regional",
+    role: "regional",
+    effective_regions: ["PR"],
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "admin_override",
+    organizational_scope_policy: "V2",
+  }), false);
+  assert.equal(canReadDashboardV2Data({
+    platform_role: "USER",
+    organizational_scope: "regional",
+    role: "regional",
+    effective_regions: ["PR"],
+    region_resolution_status: "SYNC_FAILED",
+    data_scope_source: "admin_override",
+    organizational_scope_policy: "LEGACY",
   }), true);
   assert.equal(canReadDashboardV2Data({
     platform_role: "USER",

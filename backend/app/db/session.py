@@ -33,7 +33,9 @@ def create_database_engine(settings: Settings | None = None) -> Engine:
         port=config.db_port,
         database=config.db_name,
     )
-    return create_engine(url, pool_pre_ping=True)
+    # The platform-user store uses TIMESTAMP audit columns. A UTC session makes
+    # their persisted and returned values unambiguous across hosts/time zones.
+    return create_engine(url, pool_pre_ping=True, connect_args={"init_command": "SET time_zone = '+00:00'"})
 
 
 def create_data_database_engine(settings: Settings | None = None) -> Engine:

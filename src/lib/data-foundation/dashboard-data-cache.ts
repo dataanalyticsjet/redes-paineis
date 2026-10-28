@@ -153,11 +153,13 @@ export async function readDashboardDataManifest(
     home_region?: unknown;
     effective_regions?: unknown;
     data_scope_source?: unknown;
+    organizational_scope_policy?: unknown;
     organizational_region_code?: unknown;
     region_resolution_status?: unknown;
   };
   const syncFailed = authorization.region_resolution_status === "SYNC_FAILED";
-  const explicitGrantDuringSyncFailure = syncFailed && authorization.data_scope_source === "admin_grant";
+  const explicitGrantDuringSyncFailure = syncFailed && authorization.organizational_scope_policy === "LEGACY" &&
+    (authorization.data_scope_source === "admin_grant" || authorization.data_scope_source === "admin_override");
   const authorizedMatrix = !syncFailed && authorization.organizational_scope === "matrix" && authorization.role === "matrix";
   const authorizedRegional = authorization.organizational_scope === "regional" && authorization.role === "regional" &&
     (!syncFailed || explicitGrantDuringSyncFailure) &&

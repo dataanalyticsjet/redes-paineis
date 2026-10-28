@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -44,6 +46,10 @@ def _user_payload(
         "homeBase": identity["home_base"],
         "additionalRegions": extras if extras is not None else additional_regions_for_user(db, user.id),
         "effectiveRegions": identity["effective_regions"] or [],
+        "adminOverrideEnabled": identity["admin_override_enabled"],
+        "adminAllowedRegions": identity["admin_allowed_regions"],
+        "effectiveScopeSource": identity["effective_scope_source"],
+        "organizationalScopePolicy": identity["organizational_scope_policy"],
         "feishuRegionCode": identity["organizational_region_code"],
         "feishuRegionStatus": identity["region_resolution_status"],
         "isActive": bool(user.is_active),
@@ -96,7 +102,21 @@ def list_user_access_audit(
                 "newIsActive": entry.new_is_active,
                 "regionsAdded": entry.regions_added or [],
                 "regionsRemoved": entry.regions_removed or [],
-                "createdAt": entry.created_at,
+                "scopeSourceBefore": (
+                    "ADMIN_OVERRIDE" if entry.action == "regional_override_updated"
+                    or entry.action in {"regional_override_removed", "regional_override_removed_to_none"}
+                    else "LEGACY_GRANT" if entry.action == "regional_override_created_from_legacy"
+                    else "NONE" if entry.action == "regional_override_created_from_none"
+                    else "AUTOMATIC" if entry.action.startswith("regional_override_")
+                    else None
+                ),
+                "scopeSourceAfter": (
+                    "NONE" if entry.action == "regional_override_removed_to_none"
+                    else "AUTOMATIC" if entry.action == "regional_override_removed"
+                    else "ADMIN_OVERRIDE" if entry.action.startswith("regional_override_")
+                    else None
+                ),
+                "createdAt": entry.created_at.replace(tzinfo=timezone.utc) if entry.created_at.tzinfo is None else entry.created_at.astimezone(timezone.utc),
             }
             for entry in entries
         ],
@@ -188,10 +208,23 @@ def update_user(
         extra_regions = None
     else:
         extra_regions = payload.additional_regions or []
+    override_fields = {"admin_override_enabled", "admin_allowed_regions"} & fields
+    if override_fields:
+        if "additional_regions" in fields or override_fields != {"admin_override_enabled", "admin_allowed_regions"}:
+            raise HTTPException(status_code=422, detail="user_region_override_payload_invalid")
+        if payload.admin_override_enabled is True:
+            if not payload.admin_allowed_regions:
+                raise HTTPException(status_code=422, detail="user_region_override_requires_regions")
+            extra_regions = payload.admin_allowed_regions
+        else:
+            if payload.admin_allowed_regions:
+                raise HTTPException(status_code=422, detail="user_region_override_disabled_with_regions")
+            extra_regions = []
     if "is_active" not in fields:
         is_active = None
     else:
         is_active = payload.is_active
+    region_override = bool(override_fields)
     try:
         user, extras = update_user_access(
             db,
@@ -200,6 +233,7 @@ def update_user(
             platform_role=platform_role,
             additional_regions=extra_regions,
             is_active=is_active,
+            region_override=region_override,
         )
     except UserAccessError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None

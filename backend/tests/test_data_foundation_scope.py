@@ -204,7 +204,7 @@ def test_administration_endpoints_require_admin_but_not_matrix_scope(
 
 def test_regional_and_matrix_users_can_read_publications_under_their_own_scope(monkeypatch):
     previous = dict(app.dependency_overrides)
-    monkeypatch.setenv("DATA_SOURCES_ENABLED", "true")
+    monkeypatch.setenv("DATA_QUERIES_ENABLED", "true")
     from app.core.config import get_settings
     get_settings.cache_clear()
     regional = _viewer("USER", "regional")

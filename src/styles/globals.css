@@ -7127,6 +7127,13 @@ html[data-theme="dark"] .pdd-v2-detail-card .pdd-v2-export-button:hover:not(:dis
 .demo-users-modal > select { width: 100%; min-height: 40px; padding: 0 10px; border: 1px solid #dfe2e6; border-radius: 8px; background: #fff; color: #3f4650; font: inherit; font-size: 12px; }
 .user-admin-home-scope { display: grid; gap: 5px; margin: 15px 0 19px; padding: 11px 12px; border: 1px solid #ece3e3; border-radius: 9px; background: #fafafa; color: #555d67; font-size: 11px; }
 .user-admin-home-scope strong { color: #414750; font-size: 11px; }
+.user-admin-override-mode { display: grid; gap: 9px; margin: 0 0 16px; padding: 0; border: 0; }
+.user-admin-override-mode legend { margin-bottom: 8px; color: #4d545f; font-size: 12px; font-weight: 750; }
+.user-admin-override-mode label { display: flex; min-height: 40px; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid #e7e8eb; border-radius: 9px; color: #414752; cursor: pointer; font-size: 12px; }
+.user-admin-override-mode label:focus-within { outline: 3px solid rgb(230 0 0 / 20%); outline-offset: 2px; }
+.user-admin-override-mode input { accent-color: #d90000; }
+.user-admin-effective-preview { margin-top: 12px; }
+.user-admin-effective-preview small { color: #858b95; font-size: 10px; }
 .user-admin-audit { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e8eaed; }
 .user-admin-audit h3 { margin: 0 0 10px; color: #414750; font-size: 12px; font-weight: 750; }
 .user-admin-audit > p { color: #747b85; font-size: 11px; }
@@ -8874,7 +8881,7 @@ html[data-theme="dark"] .no-movement-export-confirmation-fields input { border-c
 
 .profile-menu-identity > span:last-child { display: grid; min-width: 0; gap: 4px; }
 .profile-menu-identity strong { overflow-wrap: anywhere; color: #252a32; font-size: 13px; font-weight: 750; }
-.profile-menu-identity small { color: #737b87; font-size: 11px; }
+.profile-menu-identity small { overflow-wrap: anywhere; color: #737b87; font-size: 11px; }
 .profile-avatar-large { width: 42px; height: 42px; border-color: #f0d6d6; background: #fff3f3; color: #b80000; font-size: 13px; }
 .profile-menu-separator { height: 1px; margin: 5px 2px; background: #edf0f3; }
 
@@ -9000,8 +9007,10 @@ html[data-theme="dark"] .presentation-home-header-inner .profile-menu-popover bu
   .presentation-home-header-inner .presentation-brand-lockup img { max-width: min(39vw, 225px); }
   .presentation-brand-separator { height: 25px; }
   .presentation-brand-name { font-size: 14px; letter-spacing: .08em; }
-  .presentation-home-header-inner .profile-menu-trigger { max-width: 54px; min-width: 44px; justify-content: center; gap: 5px; padding: 4px 5px; }
-  .profile-trigger-copy { display: none; }
+  .presentation-home-header-inner .profile-menu-trigger { max-width: min(43vw, 175px); min-width: 0; justify-content: flex-start; gap: 6px; padding: 4px 6px; }
+  .profile-trigger-copy { display: grid; max-width: min(29vw, 120px); }
+  .profile-trigger-copy strong,
+  .profile-trigger-copy small { max-width: 100%; }
   .profile-avatar { width: 34px; height: 34px; }
 }
 
@@ -9160,9 +9169,17 @@ html[data-theme="dark"] .demo-users-modal-close:hover {
 }
 
 html[data-theme="dark"] .user-admin-form-label,
-html[data-theme="dark"] .demo-users-access-list legend {
+html[data-theme="dark"] .demo-users-access-list legend,
+html[data-theme="dark"] .user-admin-override-mode legend {
   color: var(--text-secondary);
 }
+
+html[data-theme="dark"] .user-admin-override-mode label {
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"] .user-admin-effective-preview small { color: var(--text-secondary); }
 
 html[data-theme="dark"] .demo-users-modal > select,
 html[data-theme="dark"] .user-admin-search {

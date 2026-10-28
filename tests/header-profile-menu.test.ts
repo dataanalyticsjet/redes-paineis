@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { formatCollaboratorName } from "../src/lib/profile-name.ts";
+import { effectiveRegionDisplay } from "../src/lib/effective-region-display.mjs";
 
 const appSource = readFileSync("src/features/dashboards/dashboard-app.tsx", "utf8");
 const styleSource = readFileSync("src/styles/globals.css", "utf8");
@@ -25,11 +26,12 @@ test("profile formats names for display, shows avatar when valid and initials as
   assert.match(appSource, /onError=\{\(\) => setFailedAvatarUrl\(avatarUrl\)\}/);
   assert.match(appSource, /referrerPolicy="no-referrer"/);
   assert.match(appSource, /formatCollaboratorName\(rawName\)/);
-  assert.match(appSource, /organizationalRegionLabel\([\s\S]*identity\.organizational_region_code[\s\S]*identity\.region_resolution_status/);
+  assert.match(appSource, /effectiveRegionDisplay\(identity/);
+  assert.match(appSource, /identity\.effective_regions/);
   assert.doesNotMatch(appSource, /const region = identity\.home_region/);
   assert.match(appSource, /avatarUrl && !avatarLoadFailed[\s\S]*?initials \|\| <UserRound size=\{size\} \/>/);
-  assert.match(appSource, /\{fullName\}[\s\S]*?\{region\}/);
-  assert.match(appSource, /Regional não identificada/);
+  assert.match(appSource, /\{fullName\}[\s\S]*?\{scopeDisplay\}/);
+  assert.match(appSource, /Vínculo organizacional pendente de validação/);
   assert.match(styleSource, /\.profile-avatar img[\s\S]*?object-fit: cover/);
 });
 
@@ -55,6 +57,44 @@ test("profile menu supports outside click, Escape, arrow navigation and reduced 
   assert.match(appSource, /event\.key === "Escape"/);
   assert.match(appSource, /\["ArrowDown", "ArrowUp", "Home", "End"\]/);
   assert.match(styleSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.profile-menu-popover \{ animation: none/);
+});
+
+test("profile header shows confirmed effective permissions and refreshes without stale scope", () => {
+  assert.match(appSource, /effectiveRegionDisplay\(identity,\s*\{[\s\S]*refreshing:\s*permissionsRefreshing/);
+  assert.match(appSource, /updatingLabel:\s*t\("Atualizando permissões…"\)/);
+  assert.match(appSource, /title=\{scopeDisplay\}/);
+  assert.match(appSource, /aria-label=\{scopeDisplay\}/);
+  assert.match(appSource, /sameArray\(left\.admin_allowed_regions, right\.admin_allowed_regions\)/);
+  assert.match(appSource, /identity\.effective_scope_source/);
+  assert.match(appSource, /viewerIdentityRefreshing/);
+  assert.match(appSource, /permissionsRefreshing=\{viewerIdentityRefreshing\}/);
+  assert.match(appSource, /permissionsUnavailable=\{viewerDataAccessBlocked\}/);
+  assert.match(styleSource, /@media \(max-width: 700px\)[\s\S]*?\.profile-trigger-copy \{ display: grid/);
+});
+
+test("header label follows backend organization and effective regions without granting scope", () => {
+  const labels = { pendingLabel: "Vínculo pendente", updatingLabel: "Atualizando…" };
+  const identity = (values: Record<string, unknown>) => ({
+    region_resolution_status: "RESOLVED",
+    organizational_scope: "regional",
+    effective_scope_source: "FEISHU",
+    effective_regions: ["CE"],
+    organizational_region_code: "CE",
+    ...values,
+  });
+  assert.equal(effectiveRegionDisplay(identity({}), labels), "CE");
+  assert.equal(effectiveRegionDisplay(identity({ organizational_region_code: "MATRIZ", organizational_scope: "matrix", effective_scope_source: "FEISHU", effective_regions: null }), labels), "MATRIZ");
+  assert.equal(effectiveRegionDisplay(identity({ organizational_region_code: "MATRIZ", organizational_scope: "regional", effective_scope_source: "ADMIN_OVERRIDE", effective_regions: ["SPE"] }), labels), "MATRIZ");
+  assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "ADMIN_OVERRIDE", effective_regions: ["SPE"] }), labels), "SPE");
+  assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "ADMIN_OVERRIDE", effective_regions: ["SPE", "SPS"] }), labels), "SPE, SPS");
+  assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "ADMIN_OVERRIDE", effective_regions: ["SPE", "SPS", "SPN"] }), labels), "SPE, SPS, SPN");
+  assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "FEISHU", effective_regions: ["CE"] }), labels), "CE");
+  assert.equal(effectiveRegionDisplay(identity({ organizational_scope: "unknown", region_resolution_status: "UNKNOWN", organizational_region_code: null, effective_regions: [] }), labels), "Vínculo pendente");
+  assert.equal(effectiveRegionDisplay(identity({ platform_role: "ADMIN", administrative_scope: "matrix", organizational_scope: "unknown", region_resolution_status: "UNKNOWN", organizational_region_code: null, effective_regions: [] }), labels), "Vínculo pendente");
+  assert.equal(effectiveRegionDisplay(identity({ region_resolution_status: "UNKNOWN", effective_regions: ["CE"] }), labels), "Vínculo pendente");
+  assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "NONE", organizational_scope: "unknown", region_resolution_status: "SYNC_FAILED", organizational_region_code: null, effective_regions: [] }), labels), "Vínculo pendente");
+  assert.equal(effectiveRegionDisplay(identity({}), { ...labels, refreshing: true }), "Atualizando…");
+  assert.equal(effectiveRegionDisplay(identity({ effective_regions: ["CE"] }), { ...labels, unavailable: true }), "Vínculo pendente");
 });
 
 test("theme preference is persisted separately from language and translated in all languages", () => {

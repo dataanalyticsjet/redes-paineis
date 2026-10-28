@@ -15,6 +15,10 @@ export interface ManagedUser {
   homeBase: string | null;
   additionalRegions: string[];
   effectiveRegions: string[];
+  adminOverrideEnabled: boolean;
+  adminAllowedRegions: string[];
+  effectiveScopeSource: "ADMIN_OVERRIDE" | "LEGACY_GRANT" | "FEISHU" | "NONE";
+  organizationalScopePolicy: "LEGACY" | "V2";
   feishuRegionCode: string | null;
   feishuRegionStatus: "RESOLVED" | "UNKNOWN" | "AMBIGUOUS" | "SYNC_FAILED";
   isActive: boolean;
@@ -32,6 +36,8 @@ export interface UserAccessAuditEntry {
   newIsActive: boolean | null;
   regionsAdded: string[];
   regionsRemoved: string[];
+  scopeSourceBefore: "ADMIN_OVERRIDE" | "LEGACY_GRANT" | "AUTOMATIC" | "NONE" | null;
+  scopeSourceAfter: "ADMIN_OVERRIDE" | "AUTOMATIC" | "NONE" | null;
   createdAt: string;
 }
 
@@ -81,11 +87,13 @@ export function getUserAccessAudit(userId: number): Promise<{ entries: UserAcces
 
 export function updateManagedUser(
   userId: number,
-  update: Partial<Pick<ManagedUser, "platformRole" | "additionalRegions" | "isActive">>,
+  update: Partial<Pick<ManagedUser, "platformRole" | "additionalRegions" | "adminOverrideEnabled" | "adminAllowedRegions" | "isActive">>,
 ): Promise<{ user: ManagedUser }> {
   const body: Record<string, unknown> = {};
   if (update.platformRole !== undefined) body.platformRole = update.platformRole;
   if (update.additionalRegions !== undefined) body.additionalRegions = update.additionalRegions;
+  if (update.adminOverrideEnabled !== undefined) body.adminOverrideEnabled = update.adminOverrideEnabled;
+  if (update.adminAllowedRegions !== undefined) body.adminAllowedRegions = update.adminAllowedRegions;
   if (update.isActive !== undefined) body.isActive = update.isActive;
   return request(`/api/admin/users/${userId}`, {
     method: "PATCH",

@@ -23,7 +23,8 @@ import { viewerAuthStateFromResponse, type ViewerAuthState } from "../../lib/vie
 import { apiFetch, apiUrl, subscribeToProtectedApiAuthorizationFailure } from "../../lib/api-url.ts";
 import { invalidateDashboardDataCache, loadCachedDashboardData, readDashboardDataManifest } from "../../lib/data-foundation/dashboard-data-cache.ts";
 import { formatCollaboratorName } from "../../lib/profile-name.ts";
-import { organizationalRegionLabel, type OrganizationalRegionStatus } from "../../lib/organizational-region.ts";
+import { effectiveRegionDisplay } from "../../lib/effective-region-display.mjs";
+import type { OrganizationalRegionStatus } from "../../lib/organizational-region.ts";
 import {
   Activity,
   ArrowLeft,
@@ -735,7 +736,7 @@ interface ViewerIdentity {
   administrative_scope?: "matrix" | "regional" | "base" | "unknown";
   can_manage_users?: boolean;
   organizational_scope?: "matrix" | "regional" | "base" | "unknown";
-  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "none";
+  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "admin_override" | "none";
   home_region?: string | null;
   organizational_region_code?: string | null;
   region_resolution_status?: OrganizationalRegionStatus;
@@ -745,6 +746,9 @@ interface ViewerIdentity {
   home_base?: string | null;
   additional_regions?: string[];
   effective_regions?: string[] | null;
+  admin_override_enabled?: boolean;
+  admin_allowed_regions?: string[];
+  effective_scope_source?: "ADMIN_OVERRIDE" | "LEGACY_GRANT" | "FEISHU" | "NONE";
   is_active?: boolean;
 }
 
@@ -770,8 +774,11 @@ function sameViewerIdentity(left: ViewerIdentity | null, right: ViewerIdentity):
     left.organizational_scope_v2_enabled === right.organizational_scope_v2_enabled &&
     left.home_base === right.home_base &&
     left.is_active === right.is_active &&
+    left.admin_override_enabled === right.admin_override_enabled &&
+    left.effective_scope_source === right.effective_scope_source &&
     sameArray(left.effective_regions, right.effective_regions) &&
-    sameArray(left.additional_regions, right.additional_regions);
+    sameArray(left.additional_regions, right.additional_regions) &&
+    sameArray(left.admin_allowed_regions, right.admin_allowed_regions);
 }
 
 function dashboardIdentityCacheKey(sessionId: string, identity: ViewerIdentity | null): string {
@@ -789,6 +796,9 @@ function dashboardIdentityCacheKey(sessionId: string, identity: ViewerIdentity |
     identity.home_base,
     identity.effective_regions,
     identity.additional_regions,
+    identity.admin_override_enabled,
+    identity.admin_allowed_regions,
+    identity.effective_scope_source,
     identity.organizational_region_code,
     identity.region_resolution_status,
     identity.organizational_scope_reason,
@@ -2402,8 +2412,10 @@ function LanguageSwitcher({ language, onChange, t }: {
   );
 }
 
-function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
+function UserProfileMenu({ identity, permissionsRefreshing, permissionsUnavailable, canManageDataSources, canManageUsers, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
   identity: ViewerIdentity;
+  permissionsRefreshing: boolean;
+  permissionsUnavailable: boolean;
   canManageDataSources: boolean;
   canManageUsers: boolean;
   theme: DashboardTheme;
@@ -2424,21 +2436,12 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
   const avatarLoadFailed = Boolean(avatarUrl && failedAvatarUrl === avatarUrl);
   const displayName = fullName.split(/\s+/)[0] || t("Colaborador");
   const adminActionCount = Number(canManageDataSources) + Number(canManageUsers);
-  const region = organizationalRegionLabel(
-    identity.organizational_region_code,
-    identity.region_resolution_status,
-    t("Regional não identificada"),
-    identity.data_scope_source,
-  );
-  const scopeDisplay = identity.organizational_scope_policy === "V2"
-    ? identity.organizational_scope_reason === "mn_rule_pending"
-      ? t("Vínculo organizacional pendente de validação")
-      : identity.organizational_scope === "matrix"
-        ? t("MATRIZ — Visão Nacional")
-        : identity.organizational_scope === "regional" && region !== t("Regional não identificada")
-          ? t("REGIONAL {region}", { region })
-          : t("Vínculo organizacional pendente de validação")
-    : region;
+  const scopeDisplay = effectiveRegionDisplay(identity, {
+    refreshing: permissionsRefreshing,
+    unavailable: permissionsUnavailable,
+    updatingLabel: t("Atualizando permissões…"),
+    pendingLabel: t("Vínculo organizacional pendente de validação"),
+  });
   const nameParts = fullName.split(/\s+/).filter(Boolean);
   const initials = nameParts.length > 1
     ? `${Array.from(nameParts[0])[0] ?? ""}${Array.from(nameParts.at(-1) ?? "")[0] ?? ""}`
@@ -2502,7 +2505,8 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
         className="profile-menu-trigger"
         type="button"
         ref={triggerRef}
-        aria-label={`${t("Menu do usuário")}: ${fullName}`}
+        aria-label={`${t("Menu do usuário")}: ${fullName} — ${scopeDisplay}`}
+        title={scopeDisplay}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls="profile-menu-options"
@@ -2511,7 +2515,7 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
         <span className="profile-avatar" aria-hidden="true">{renderAvatar(18)}</span>
         <span className="profile-trigger-copy">
           <strong>{displayName}</strong>
-          <small>{scopeDisplay}</small>
+          <small title={scopeDisplay} aria-label={scopeDisplay}>{scopeDisplay}</small>
         </span>
         <ChevronDown className={`profile-menu-chevron${open ? " is-open" : ""}`} size={16} aria-hidden="true" />
       </button>
@@ -2519,7 +2523,7 @@ function UserProfileMenu({ identity, canManageDataSources, canManageUsers, theme
         <div className="profile-menu-popover" id="profile-menu-options" role="menu" aria-label={t("Perfil do colaborador")}>
           <div className="profile-menu-identity">
             <span className="profile-avatar profile-avatar-large" aria-hidden="true">{renderAvatar(22)}</span>
-            <span><strong>{fullName}</strong><small>{scopeDisplay}</small></span>
+            <span><strong>{fullName}</strong><small title={scopeDisplay}>{scopeDisplay}</small></span>
           </div>
           <div className="profile-menu-separator" role="separator" />
           {adminActionCount > 0 ? <>
@@ -3007,6 +3011,7 @@ export function DashboardApp() {
   const themeInitializedRef = useRef(false);
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
+  const [viewerIdentityRefreshing, setViewerIdentityRefreshing] = useState(false);
   const [viewerDataAccessBlocked, setViewerDataAccessBlocked] = useState(false);
   const [viewerAuthState, setViewerAuthState] = useState<ViewerAuthState>("CHECKING");
   const [viewerSessionCheckAttempt, setViewerSessionCheckAttempt] = useState(0);
@@ -3559,6 +3564,7 @@ export function DashboardApp() {
     setDashboardAvailability({ status: "idle" });
     setViewerDataAccessBlocked(false);
     setViewerAuthorization(null);
+    setViewerIdentityRefreshing(false);
     viewerIdentityRef.current = null;
     setViewerIdentity(null);
     setViewerAuthError(null);
@@ -3571,6 +3577,7 @@ export function DashboardApp() {
   const verifyCurrentAccess = useCallback(async () => {
     if (!viewerAuthorization || accessCheckInFlightRef.current || document.visibilityState === "hidden") return;
     accessCheckInFlightRef.current = true;
+    setViewerIdentityRefreshing(true);
     try {
       const response = await apiFetch("/api/auth/me", { method: "GET", cache: "no-store" });
       if (response.status === 401) {
@@ -3586,12 +3593,13 @@ export function DashboardApp() {
         const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
         if (identity.authenticated && identity.is_active !== false) {
           applyViewerIdentity(identity);
+          setViewerIdentityRefreshing(false);
         } else {
           endViewerSession();
         }
       }
     } catch {
-      // A temporary network issue does not invalidate a valid session or widen its scope.
+      // Keep the header pending until a fresh effective scope is confirmed.
     } finally {
       accessCheckInFlightRef.current = false;
     }
@@ -7574,6 +7582,8 @@ export function DashboardApp() {
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
             <UserProfileMenu
               identity={viewerIdentity}
+              permissionsRefreshing={viewerIdentityRefreshing}
+              permissionsUnavailable={viewerDataAccessBlocked}
               canManageDataSources={isMatrixAdminViewer}
               canManageUsers={viewerIdentity.can_manage_users === true}
               theme={theme}

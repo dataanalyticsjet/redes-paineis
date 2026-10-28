@@ -28,7 +28,11 @@ class Region(Base):
     region_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
+    created_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
 
 
 class PlatformUser(Base):
@@ -59,9 +63,13 @@ class PlatformUser(Base):
     home_region: Mapped[str | None] = mapped_column(String(16), nullable=True)
     home_base: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
+    created_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
         nullable=False,
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
@@ -74,13 +82,21 @@ class UserRegionAccess(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("platform_users.id", ondelete="CASCADE"), primary_key=True)
     region_code: Mapped[str] = mapped_column(ForeignKey("regions.region_code"), primary_key=True)
     granted_by_user_id: Mapped[int] = mapped_column(ForeignKey("platform_users.id"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
+    created_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
 
 
 class UserAccessAudit(Base):
     __tablename__ = "user_access_audit"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        mysql.BIGINT(unsigned=True).with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     actor_type: Mapped[str] = mapped_column(
         Enum("admin", "bootstrap", name="user_access_actor_type", native_enum=True),
         nullable=False,
@@ -98,7 +114,11 @@ class UserAccessAudit(Base):
     new_is_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     regions_added: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     regions_removed: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
+    created_at: Mapped[datetime] = mapped_column(
+        mysql.TIMESTAMP().with_variant(DateTime(), "sqlite"),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
 
 
 class PlatformUserFeishuProfile(Base):

@@ -14,7 +14,8 @@ export interface MonitoringViewerAuthorization {
   home_base?: string | null;
   effective_regions?: readonly string[] | null;
   additional_regions?: readonly string[] | null;
-  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "none" | null;
+  data_scope_source?: "feishu" | "feishu_v2" | "admin_grant" | "admin_override" | "none" | null;
+  organizational_scope_policy?: "LEGACY" | "V2" | null;
   region_resolution_status?: "RESOLVED" | "UNKNOWN" | "AMBIGUOUS" | "SYNC_FAILED" | string | null;
   is_active?: boolean;
 }
@@ -31,7 +32,8 @@ export function canReadDashboardV2Data(identity: MonitoringViewerAuthorization |
   const role = identity.role?.trim().toLowerCase();
   const syncFailed = identity.region_resolution_status === "SYNC_FAILED";
   if (syncFailed) {
-    return scope === "regional" && role === "regional" && identity.data_scope_source === "admin_grant" &&
+    return scope === "regional" && role === "regional" && identity.organizational_scope_policy === "LEGACY" &&
+      (identity.data_scope_source === "admin_grant" || identity.data_scope_source === "admin_override") &&
       Boolean(identity.effective_regions?.some((region) => region.trim()));
   }
   if (scope === "matrix" && role === "matrix") return true;

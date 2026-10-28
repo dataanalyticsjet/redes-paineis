@@ -23,6 +23,7 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [draftRole, setDraftRole] = useState<"USER" | "ADMIN">("USER");
   const [draftRegions, setDraftRegions] = useState<string[]>([]);
+  const [draftOverrideEnabled, setDraftOverrideEnabled] = useState(false);
   const [accessAudit, setAccessAudit] = useState<UserAccessAuditEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [pendingUserIds, setPendingUserIds] = useState<Set<number>>(new Set());
@@ -90,7 +91,8 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
     if (user.canManageAccess !== true) return;
     setEditingUser(user);
     setDraftRole(user.platformRole);
-    setDraftRegions([...user.additionalRegions]);
+    setDraftOverrideEnabled(user.adminOverrideEnabled);
+    setDraftRegions(user.adminOverrideEnabled ? [...user.adminAllowedRegions] : []);
     setAccessAudit([]);
     setAuditLoading(true);
     setError("");
@@ -103,7 +105,8 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
     try {
       const result = await updateManagedUser(editingUser.id, {
         platformRole: draftRole,
-        additionalRegions: draftRegions,
+        adminOverrideEnabled: draftOverrideEnabled,
+        adminAllowedRegions: draftOverrideEnabled ? draftRegions : [],
       });
       setUsers((current) => current.map((user) => user.id === result.user.id ? result.user : user));
       setEditingUser(null);
@@ -117,6 +120,20 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
   const regionName = (code: string | null) => {
     if (!code) return t("Não definido");
     return t(regions.find((region) => region.code === code)?.name ?? code);
+  };
+  const effectiveScopePreview = (user: ManagedUser) => {
+    if (draftOverrideEnabled) {
+      if (user.organizationalScopePolicy === "V2" && user.feishuRegionStatus !== "RESOLVED") {
+        return t("Vínculo organizacional pendente de validação");
+      }
+      return draftRegions.length ? draftRegions.map(regionName).join(", ") : t("Selecione ao menos uma regional");
+    }
+    if (user.feishuRegionStatus !== "RESOLVED" || !user.feishuRegionCode) {
+      return t("Vínculo organizacional pendente de validação");
+    }
+    return user.feishuRegionCode === "MATRIZ"
+      ? t("Matriz — acesso nacional")
+      : regionName(user.feishuRegionCode);
   };
 
   return (
@@ -164,7 +181,9 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                       <small className="user-admin-email">{t(user.feishuRegionStatus)}</small>
                     </td>
                     <td data-label={t("Regionais autorizadas")}>
-                      {user.organizationalScope === "matrix" ? t("Nacional") : user.effectiveRegions.length ? user.effectiveRegions.map(regionName).join(", ") : t("Nenhum")}
+                      {user.adminOverrideEnabled
+                        ? user.effectiveRegions.length ? user.effectiveRegions.map(regionName).join(", ") : t("Nenhum")
+                        : user.organizationalScope === "matrix" ? t("Nacional") : user.effectiveRegions.length ? user.effectiveRegions.map(regionName).join(", ") : t("Nenhum")}
                     </td>
                     <td data-label={t("Status")}>
                       <div className="demo-users-status-control">
@@ -211,24 +230,43 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
 
             <div className="user-admin-home-scope">
               <strong>{t("Escopo efetivo de dados")}</strong>
-              <span>{editingUser.organizationalScope === "matrix" ? t("Matriz — acesso nacional") : editingUser.effectiveRegions.length ? editingUser.effectiveRegions.map(regionName).join(", ") : editingUser.homeBase ? `${t("Base")}: ${editingUser.homeBase}` : t("Regional não identificada")}</span>
+              <span>{editingUser.adminOverrideEnabled
+                ? editingUser.effectiveRegions.length ? editingUser.effectiveRegions.map(regionName).join(", ") : t("Nenhum")
+                : editingUser.organizationalScope === "matrix" ? t("Matriz — acesso nacional") : editingUser.effectiveRegions.length ? editingUser.effectiveRegions.map(regionName).join(", ") : editingUser.homeBase ? `${t("Base")}: ${editingUser.homeBase}` : t("Regional não identificada")}</span>
             </div>
 
-            <fieldset className="demo-users-access-list user-admin-region-list">
-              <legend>{t("Liberação regional manual")}</legend>
-              <p className="user-admin-hint">{t("A regional efetiva é controlada pelo Feishu e por liberações administrativas auditadas. Esta alteração não concede perfil ADMIN nem acesso nacional.")}</p>
-              {editingUser.organizationalScope === "matrix" ? <p className="user-admin-hint">{t("Usuários de Matriz já possuem escopo nacional.")}</p> : regions.map((region) => {
-                const locked = region.code === editingUser.homeRegion || editingUser.organizationalScope === "matrix";
-                const checked = editingUser.organizationalScope === "matrix" || draftRegions.includes(region.code);
-                return (
-                  <label key={region.code} className={`demo-users-access-option${locked ? " is-locked" : ""}`}>
-                    <input type="checkbox" checked={checked} disabled={locked} onChange={(event) => { const isChecked = event.currentTarget.checked; setDraftRegions((current) => isChecked ? [...current, region.code] : current.filter((code) => code !== region.code)); }} />
-                    <span className="demo-users-access-check"><Check size={13} /></span>
-                    <span>{t(region.name)} <small>{region.code}{region.code === editingUser.homeRegion ? ` · ${t("Região de origem")}` : ""}</small></span>
-                  </label>
-                );
-              })}
+            <fieldset className="user-admin-override-mode">
+              <legend>{t("Origem das permissões")}</legend>
+              <label>
+                <input type="radio" name="user-region-mode" checked={!draftOverrideEnabled} onChange={() => setDraftOverrideEnabled(false)} />
+                <span>{t("Usar regional automática do Feishu")}</span>
+              </label>
+              <label>
+                <input type="radio" name="user-region-mode" checked={draftOverrideEnabled} onChange={() => setDraftOverrideEnabled(true)} />
+                <span>{t("Permissões personalizadas pelo administrador")}</span>
+              </label>
             </fieldset>
+
+            {draftOverrideEnabled ? <fieldset className="demo-users-access-list user-admin-region-list">
+              <legend>{t("Regionais autorizadas")}</legend>
+              <p className="user-admin-hint">{t("A configuração personalizada substitui a regional do Feishu e não concede perfil ADMIN nem acesso nacional.")}</p>
+              {regions.map((region) => (
+                <label key={region.code} className="demo-users-access-option">
+                  <input type="checkbox" checked={draftRegions.includes(region.code)} onChange={(event) => { const isChecked = event.currentTarget.checked; setDraftRegions((current) => isChecked ? [...current, region.code] : current.filter((code) => code !== region.code)); }} />
+                  <span className="demo-users-access-check"><Check size={13} /></span>
+                  <span>{t(region.name)} <small>{region.code}</small></span>
+                </label>
+              ))}
+            </fieldset> : null}
+
+            <div className="user-admin-home-scope user-admin-effective-preview" aria-live="polite">
+              <strong>{t("Acesso efetivo após salvar")}</strong>
+              <span>{effectiveScopePreview(editingUser)}</span>
+              <small>{t(draftOverrideEnabled ? "Acesso personalizado pelo administrador" : "Acesso definido pelo Feishu")}</small>
+              {draftOverrideEnabled && editingUser.organizationalScopePolicy === "V2" && editingUser.feishuRegionStatus !== "RESOLVED"
+                ? <small role="status">{t("V2 exige uma classificação Feishu válida antes de salvar a substituição regional.")}</small>
+                : null}
+            </div>
 
             <section className="user-admin-audit" aria-labelledby="user-admin-audit-heading">
               <h3 id="user-admin-audit-heading">{t("Histórico de alterações de acesso")}</h3>
@@ -243,6 +281,9 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
                         {entry.regionsAdded.length && entry.regionsRemoved.length ? " · " : ""}
                         {entry.regionsRemoved.length ? `${t("Revogadas")}: ${entry.regionsRemoved.map(regionName).join(", ")}` : ""}
                       </small> : null}
+                      {entry.scopeSourceBefore || entry.scopeSourceAfter ? <small>
+                        {t("Origem")}: {t(entry.scopeSourceBefore ?? "NONE")} → {t(entry.scopeSourceAfter ?? "NONE")}
+                      </small> : null}
                     </li>
                   ))}
                 </ol>
@@ -252,7 +293,7 @@ export function UserControl({ t }: { t: DashboardTranslator }) {
             {error ? <p className="user-admin-error" role="alert"><AlertCircle size={16} /> {t(error)}</p> : null}
             <div className="demo-users-modal-actions">
               <button type="button" onClick={() => setEditingUser(null)} disabled={saving}>{t("Cancelar")}</button>
-              <button type="button" onClick={() => void saveEditor()} disabled={saving}>
+              <button type="button" onClick={() => void saveEditor()} disabled={saving || (draftOverrideEnabled && draftRegions.length === 0) || (draftOverrideEnabled && editingUser.organizationalScopePolicy === "V2" && editingUser.feishuRegionStatus !== "RESOLVED")}>
                 {saving ? <LoaderCircle size={15} className="monitoring-source-spinner" /> : null}{t(saving ? "Salvando…" : "Salvar alterações")}
               </button>
             </div>
