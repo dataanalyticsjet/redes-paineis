@@ -43,7 +43,7 @@ class NetworkDirectoryCandidate:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "sourceId": "base_mapping_official", "candidateLabel": "DoomsDay V3",
+            "sourceId": "base_mapping_official", "candidateLabel": "Atualização do Depara",
             "candidateSchemaVersion": 1, "contractVersion": NETWORK_DIRECTORY_CONTRACT.version, "state": "LOCAL_REVIEW_REQUIRED",
             "approved": False, "canPublish": False, "mapVersionId": None,
             "fileSha256": self.file_sha256, "sheetName": SHEET_NAME,
@@ -189,11 +189,11 @@ def audit_candidate(candidate: NetworkDirectoryCandidate, previous: list[dict[st
         "manualDecisionReview": decisions,
         "manualDecisionsAvailable": manual_decisions is not None,
         "publicationBlockers": [
-            "Manual review and approval of candidate differences and unit eligibility.",
-            "Existing entry schema lacks unit type, status, supervisor, owner, parent and source timestamps.",
-            "Existing publisher is initial-migration-only; candidate preparation cannot replace the active map.",
-            "Published map version and its manual decisions must be verified without substituting an offline copy.",
-            "Authorization and frontend caches must invalidate when the active mapping version changes.",
+            "Review additions, removals, changed fields and manual decisions before publication.",
+            "The candidate must match the registered V2 contract and valid unit metadata.",
+            "Publication requires an explicit confirmation and a fresh check of the current official pointer.",
+            "Previous published maps and their operational references remain available as history.",
+            "Organizational caches are invalidated after the official pointer changes.",
         ],
     }
 

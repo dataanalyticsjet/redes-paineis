@@ -1,6 +1,5 @@
-export function effectiveRegionDisplay(identity, { pendingLabel, updatingLabel, refreshing = false, unavailable = false }) {
+export function effectiveRegionDisplay(identity, { pendingLabel, unavailable = false }) {
   if (unavailable) return pendingLabel;
-  if (refreshing) return updatingLabel;
 
   const isResolvedMatrix = identity?.region_resolution_status === "RESOLVED" &&
     identity?.organizational_region_code === "MATRIZ";

@@ -2412,9 +2412,8 @@ function LanguageSwitcher({ language, onChange, t }: {
   );
 }
 
-function UserProfileMenu({ identity, permissionsRefreshing, permissionsUnavailable, canManageDataSources, canManageUsers, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
+function UserProfileMenu({ identity, permissionsUnavailable, canManageDataSources, canManageUsers, theme, onToggleTheme, onOpenDataSources, onOpenUserControl, onSignOut, t }: {
   identity: ViewerIdentity;
-  permissionsRefreshing: boolean;
   permissionsUnavailable: boolean;
   canManageDataSources: boolean;
   canManageUsers: boolean;
@@ -2437,9 +2436,7 @@ function UserProfileMenu({ identity, permissionsRefreshing, permissionsUnavailab
   const displayName = fullName.split(/\s+/)[0] || t("Colaborador");
   const adminActionCount = Number(canManageDataSources) + Number(canManageUsers);
   const scopeDisplay = effectiveRegionDisplay(identity, {
-    refreshing: permissionsRefreshing,
     unavailable: permissionsUnavailable,
-    updatingLabel: t("Atualizando permissões…"),
     pendingLabel: t("Vínculo organizacional pendente de validação"),
   });
   const nameParts = fullName.split(/\s+/).filter(Boolean);
@@ -3011,7 +3008,6 @@ export function DashboardApp() {
   const themeInitializedRef = useRef(false);
   const [viewerAuthorization, setViewerAuthorization] = useState<string | null>(null);
   const [viewerIdentity, setViewerIdentity] = useState<ViewerIdentity | null>(null);
-  const [viewerIdentityRefreshing, setViewerIdentityRefreshing] = useState(false);
   const [viewerDataAccessBlocked, setViewerDataAccessBlocked] = useState(false);
   const [viewerAuthState, setViewerAuthState] = useState<ViewerAuthState>("CHECKING");
   const [viewerSessionCheckAttempt, setViewerSessionCheckAttempt] = useState(0);
@@ -3564,7 +3560,6 @@ export function DashboardApp() {
     setDashboardAvailability({ status: "idle" });
     setViewerDataAccessBlocked(false);
     setViewerAuthorization(null);
-    setViewerIdentityRefreshing(false);
     viewerIdentityRef.current = null;
     setViewerIdentity(null);
     setViewerAuthError(null);
@@ -3577,7 +3572,6 @@ export function DashboardApp() {
   const verifyCurrentAccess = useCallback(async () => {
     if (!viewerAuthorization || accessCheckInFlightRef.current || document.visibilityState === "hidden") return;
     accessCheckInFlightRef.current = true;
-    setViewerIdentityRefreshing(true);
     try {
       const response = await apiFetch("/api/auth/me", { method: "GET", cache: "no-store" });
       if (response.status === 401) {
@@ -3593,7 +3587,6 @@ export function DashboardApp() {
         const identity = await response.json() as ViewerIdentity & { authenticated: boolean };
         if (identity.authenticated && identity.is_active !== false) {
           applyViewerIdentity(identity);
-          setViewerIdentityRefreshing(false);
         } else {
           endViewerSession();
         }
@@ -7582,7 +7575,6 @@ export function DashboardApp() {
             <LanguageSwitcher language={language} onChange={changeLanguage} t={t} />
             <UserProfileMenu
               identity={viewerIdentity}
-              permissionsRefreshing={viewerIdentityRefreshing}
               permissionsUnavailable={viewerDataAccessBlocked}
               canManageDataSources={isMatrixAdminViewer}
               canManageUsers={viewerIdentity.can_manage_users === true}

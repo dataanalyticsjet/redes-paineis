@@ -60,20 +60,16 @@ test("profile menu supports outside click, Escape, arrow navigation and reduced 
 });
 
 test("profile header shows confirmed effective permissions and refreshes without stale scope", () => {
-  assert.match(appSource, /effectiveRegionDisplay\(identity,\s*\{[\s\S]*refreshing:\s*permissionsRefreshing/);
-  assert.match(appSource, /updatingLabel:\s*t\("Atualizando permissões…"\)/);
   assert.match(appSource, /title=\{scopeDisplay\}/);
   assert.match(appSource, /aria-label=\{scopeDisplay\}/);
   assert.match(appSource, /sameArray\(left\.admin_allowed_regions, right\.admin_allowed_regions\)/);
   assert.match(appSource, /identity\.effective_scope_source/);
-  assert.match(appSource, /viewerIdentityRefreshing/);
-  assert.match(appSource, /permissionsRefreshing=\{viewerIdentityRefreshing\}/);
   assert.match(appSource, /permissionsUnavailable=\{viewerDataAccessBlocked\}/);
   assert.match(styleSource, /@media \(max-width: 700px\)[\s\S]*?\.profile-trigger-copy \{ display: grid/);
 });
 
 test("header label follows backend organization and effective regions without granting scope", () => {
-  const labels = { pendingLabel: "Vínculo pendente", updatingLabel: "Atualizando…" };
+  const labels = { pendingLabel: "Vínculo pendente" };
   const identity = (values: Record<string, unknown>) => ({
     region_resolution_status: "RESOLVED",
     organizational_scope: "regional",
@@ -93,7 +89,9 @@ test("header label follows backend organization and effective regions without gr
   assert.equal(effectiveRegionDisplay(identity({ platform_role: "ADMIN", administrative_scope: "matrix", organizational_scope: "unknown", region_resolution_status: "UNKNOWN", organizational_region_code: null, effective_regions: [] }), labels), "Vínculo pendente");
   assert.equal(effectiveRegionDisplay(identity({ region_resolution_status: "UNKNOWN", effective_regions: ["CE"] }), labels), "Vínculo pendente");
   assert.equal(effectiveRegionDisplay(identity({ effective_scope_source: "NONE", organizational_scope: "unknown", region_resolution_status: "SYNC_FAILED", organizational_region_code: null, effective_regions: [] }), labels), "Vínculo pendente");
-  assert.equal(effectiveRegionDisplay(identity({}), { ...labels, refreshing: true }), "Atualizando…");
+  assert.match(appSource, /verifyCurrentAccess/);
+  assert.match(appSource, /setInterval/);
+  assert.doesNotMatch(appSource, /viewerIdentityRefreshing|permissionsRefreshing/);
   assert.equal(effectiveRegionDisplay(identity({ effective_regions: ["CE"] }), { ...labels, unavailable: true }), "Vínculo pendente");
 });
 

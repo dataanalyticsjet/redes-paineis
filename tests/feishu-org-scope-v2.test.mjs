@@ -16,12 +16,9 @@ test("identity header displays only backend-resolved organization and effective 
   assert.match(display, /return pendingLabel/);
 });
 
-test("PT and Chinese pending and refreshing labels exist while unknown scopes remain pending", () => {
+test("PT and Chinese pending label exists while unknown scopes remain pending", () => {
   const i18n = read("src/lib/i18n.ts");
-  for (const label of [
-    "Vínculo organizacional pendente de validação",
-    "Atualizando permissões…",
-  ]) assert.ok(i18n.includes('"' + label + '"'), "missing translation: " + label);
+  assert.ok(i18n.includes('"Vínculo organizacional pendente de validação"'));
   const region = read("src/lib/organizational-region.ts");
   assert.match(region, /dataScopeSource === "feishu_v2"/);
 });

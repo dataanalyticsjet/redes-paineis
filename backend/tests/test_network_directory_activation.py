@@ -28,7 +28,7 @@ REVIEW_SHA = "a" * 64
 IDEMPOTENCY = "network-directory-activation-001"
 
 
-def activation_engine():
+def activation_engine(*, candidate_rows: int = 1783):
     engine, _, _ = prepared_schema()
     with engine.begin() as connection:
         connection.exec_driver_sql("ALTER TABLE base_mapping_current ADD COLUMN changed_by_user_id INTEGER")
@@ -77,17 +77,18 @@ def activation_engine():
             INSERT INTO base_mapping_versions
               (map_version_id,version_no,source_id,source_job_id,contract_version,version_state,
                original_file_name,file_sha256,mapping_row_count,published_by_user_id,published_at,candidate_metadata)
-            VALUES (:id,2,'base_mapping_official',:job,2,'PREPARED','contacts.xlsx',:sha,1783,NULL,NULL,:metadata)
+            VALUES (:id,2,'base_mapping_official',:job,2,'PREPARED','contacts.xlsx',:sha,:count,NULL,NULL,:metadata)
         """), {"id": V2_ID, "job": job_id, "sha": b"f" * 32,
-               "metadata": json.dumps(metadata)})
+               "count": candidate_rows, "metadata": json.dumps(metadata)})
         connection.execute(text("""
             INSERT INTO import_jobs
               (job_id,source_id,contract_version,validation_map_version_id,submitted_by_user_id,job_state,
                original_file_name,stored_file_key,file_size_bytes,file_sha256,input_row_count,valid_row_count,
                error_count,request_id,validated_at)
             VALUES (:job,'base_mapping_official',2,:previous,:actor,'VALIDATED','contacts.xlsx','private.xlsx',1,
-                    :sha,1783,1783,0,'request-1','2026-10-21')
-        """), {"job": job_id, "previous": MAPPING_ID, "actor": ACTOR_ID, "sha": b"f" * 32})
+                    :sha,:count,:count,0,'request-1','2026-10-21')
+        """), {"job": job_id, "previous": MAPPING_ID, "actor": ACTOR_ID, "sha": b"f" * 32,
+               "count": candidate_rows})
         connection.execute(text("""
             INSERT INTO base_mapping_entries
               (map_version_id,base_code,base_name,regional_name,rm_region,rm_responsible,source_row_no,unit_metadata)
@@ -102,7 +103,7 @@ def activation_engine():
                  "base_name": f"New unit {index}", "regional_name": "SPS" if index == 1 else "CE",
                  "rm_region": "RM CE", "rm_responsible": "Person",
              }), "region": "SPS" if index == 1 else "CE"}
-            for index in range(1, 1784)
+            for index in range(1, candidate_rows + 1)
         ])
     return engine
 
@@ -114,6 +115,150 @@ def publish(engine, *, key=IDEMPOTENCY):
         review_sha256=REVIEW_SHA, idempotency_key=key, actor_user_id=ACTOR_ID,
         request_id="request-activation",
     )
+
+
+def insert_follow_up_candidate(engine, *, version: int, rows: int, based_on: bytes, map_id: bytes):
+    job_id = uuid.uuid5(uuid.NAMESPACE_OID, f"network-map-job-{version}").bytes
+    file_sha = bytes([version]) * 32
+    metadata = {
+        "schemaVersion": 1, "actorUserId": ACTOR_ID,
+        "basedOnMapVersionId": str(uuid.UUID(bytes=based_on)),
+        "reviewSha256": REVIEW_SHA, "approvalState": "PENDING", "activationEnabled": False,
+        "audit": {"duplicateNamesNormalized": {}},
+    }
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO base_mapping_versions
+              (map_version_id,version_no,source_id,source_job_id,contract_version,version_state,
+               original_file_name,file_sha256,mapping_row_count,published_by_user_id,published_at,candidate_metadata)
+            VALUES (:id,:version,'base_mapping_official',:job,2,'PREPARED','contacts.xlsx',:sha,:count,NULL,NULL,:metadata)
+        """), {"id": map_id, "version": version, "job": job_id, "sha": file_sha,
+               "count": rows, "metadata": json.dumps(metadata)})
+        connection.execute(text("""
+            INSERT INTO import_jobs
+              (job_id,source_id,contract_version,validation_map_version_id,submitted_by_user_id,job_state,
+               original_file_name,stored_file_key,file_size_bytes,file_sha256,input_row_count,valid_row_count,
+               error_count,request_id,validated_at)
+            VALUES (:job,'base_mapping_official',2,:previous,:actor,'VALIDATED','contacts.xlsx','private.xlsx',1,
+                    :sha,:count,:count,0,:request,'2026-10-21')
+        """), {"job": job_id, "previous": based_on, "actor": ACTOR_ID, "sha": file_sha,
+               "count": rows, "request": f"request-{version}"})
+        connection.execute(text("""
+            INSERT INTO base_mapping_entries
+              (map_version_id,base_code,base_name,regional_name,rm_region,rm_responsible,source_row_no,unit_metadata)
+            VALUES (:map_id,:code,:name,'CE','RM CE','Person',:row_no,:metadata)
+        """), [
+            {"map_id": map_id, "code": f"REV{version}-{index:04}", "name": f"Revision {version} unit {index}",
+             "row_no": index, "metadata": json.dumps({
+                 "unit_type": "OWN", "enabled_state": "ENABLED", "is_operational_base": True,
+                 "base_code": f"REV{version}-{index:04}", "base_name": f"Revision {version} unit {index}",
+                 "regional_name": "CE", "rm_region": "RM CE", "rm_responsible": "Person",
+             })}
+            for index in range(1, rows + 1)
+        ])
+
+
+@pytest.mark.parametrize("candidate_rows", [1783, 1820, 1700])
+def test_activation_accepts_valid_v2_contract_candidates_with_changed_row_counts(monkeypatch, candidate_rows):
+    monkeypatch.setattr(get_settings(), "data_mapping_unit_metadata_enabled", False)
+    engine = activation_engine(candidate_rows=candidate_rows)
+    status = get_network_directory_activation_status(engine)
+    assert status["canPublish"] is True
+    assert status["candidate"]["contractVersion"] == 2
+    assert status["candidate"]["rowCount"] == candidate_rows
+    result = publish(engine)
+    assert result["state"] == "PUBLISHED"
+    assert result["version"] == 2
+    engine.dispose()
+
+
+def test_follow_up_revision_publishes_atomically_and_rolls_back_to_previous_published_map(monkeypatch):
+    monkeypatch.setattr(get_settings(), "data_mapping_unit_metadata_enabled", False)
+    engine = activation_engine()
+    publish(engine)
+    v3_id = uuid.UUID("44444444-4444-4444-8444-444444444444").bytes
+    insert_follow_up_candidate(engine, version=3, rows=1700, based_on=V2_ID, map_id=v3_id)
+
+    status = get_network_directory_activation_status(engine)
+    assert status["officialVersion"] == 2
+    assert status["candidate"]["version"] == 3
+    assert status["candidate"]["contractVersion"] == NETWORK_DIRECTORY_CONTRACT.version == 2
+    assert status["candidate"]["rowCount"] == 1700
+    assert status["canPublish"] is True
+
+    result = publish_network_directory_candidate(
+        engine, map_version_id=str(uuid.UUID(bytes=v3_id)),
+        expected_official_map_version_id=str(uuid.UUID(bytes=V2_ID)),
+        review_sha256=REVIEW_SHA, idempotency_key="network-directory-v3-publish",
+        actor_user_id=ACTOR_ID, request_id="request-v3-publish",
+    )
+    assert result["state"] == "PUBLISHED"
+    assert result["version"] == 3
+    active = get_network_directory_activation_status(engine)
+    assert active["officialVersion"] == 3
+    assert active["canRollback"] is True
+    assert active["rollbackMapVersionId"] == str(uuid.UUID(bytes=v3_id))
+    assert active["rollbackTargetVersion"] == 2
+
+    rollback = rollback_network_directory_candidate(
+        engine, map_version_id=str(uuid.UUID(bytes=v3_id)),
+        idempotency_key="network-directory-v3-rollback", actor_user_id=ACTOR_ID,
+        request_id="request-v3-rollback",
+    )
+    assert rollback["officialVersion"] == 2
+    assert rollback["mapVersionId"] == str(uuid.UUID(bytes=V2_ID))
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT map_version_id FROM base_mapping_current")).scalar_one() == V2_ID
+        assert connection.execute(text("SELECT COUNT(*) FROM base_mapping_versions WHERE version_state='PUBLISHED'")).scalar_one() == 3
+        assert connection.execute(text("SELECT COUNT(*) FROM base_mapping_entries WHERE map_version_id=:id"), {"id": v3_id}).scalar_one() == 1700
+    repeated = rollback_network_directory_candidate(
+        engine, map_version_id=str(uuid.UUID(bytes=v3_id)),
+        idempotency_key="network-directory-v3-rollback", actor_user_id=ACTOR_ID,
+        request_id="request-v3-rollback",
+    )
+    assert repeated["reused"] is True
+    engine.dispose()
+
+
+def test_follow_up_candidate_bound_to_old_official_map_is_blocked(monkeypatch):
+    monkeypatch.setattr(get_settings(), "data_mapping_unit_metadata_enabled", False)
+    engine = activation_engine()
+    publish(engine)
+    stale_id = uuid.UUID("55555555-5555-4555-8555-555555555555").bytes
+    insert_follow_up_candidate(engine, version=3, rows=1800, based_on=MAPPING_ID, map_id=stale_id)
+    status = get_network_directory_activation_status(engine)
+    assert status["officialVersion"] == 2
+    assert status["candidate"]["version"] == 3
+    assert status["canPublish"] is False
+    assert "candidate_review_stale" in status["blockers"]
+    engine.dispose()
+
+
+def test_official_map_remains_rollbackable_while_newer_candidate_is_prepared(monkeypatch):
+    monkeypatch.setattr(get_settings(), "data_mapping_unit_metadata_enabled", False)
+    engine = activation_engine()
+    publish(engine)
+    pending_id = uuid.UUID("66666666-6666-4666-8666-666666666666").bytes
+    insert_follow_up_candidate(engine, version=3, rows=1700, based_on=V2_ID, map_id=pending_id)
+
+    status = get_network_directory_activation_status(engine)
+    assert status["candidate"]["version"] == 3
+    assert status["canPublish"] is True
+    assert status["canRollback"] is True
+    assert status["rollbackMapVersionId"] == str(uuid.UUID(bytes=V2_ID))
+    assert status["rollbackTargetVersion"] == 1
+
+    rollback = rollback_network_directory_candidate(
+        engine, map_version_id=str(uuid.UUID(bytes=V2_ID)),
+        idempotency_key="network-directory-v2-rollback-with-v3-prepared",
+        actor_user_id=ACTOR_ID, request_id="request-v2-rollback-with-v3-prepared",
+    )
+    assert rollback["officialVersion"] == 1
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT map_version_id FROM base_mapping_current")).scalar_one() == MAPPING_ID
+        assert connection.execute(text("SELECT version_state FROM base_mapping_versions WHERE map_version_id=:id"),
+                                  {"id": pending_id}).scalar_one() == "PREPARED"
+    engine.dispose()
 
 
 def test_status_checks_exact_candidate_contract_metadata_and_preserves_registry_policy(monkeypatch):

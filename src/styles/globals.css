@@ -10187,3 +10187,43 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 @media (max-width: 760px) { .dashboard-loading-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .dashboard-loading-card { min-height: 82px; padding: 12px; } }
 @media (max-width: 480px) { .dashboard-loading-skeleton { padding: 16px; border-radius: 14px; } .dashboard-loading-table-head, .dashboard-loading-table-row { gap: 8px; padding: 0 8px; grid-template-columns: 1fr 1.3fr .8fr .7fr; } .dashboard-loading-update { align-items: flex-start; flex-wrap: wrap; } .dashboard-loading-update button { margin-left: 22px; } }
 @media (prefers-reduced-motion: reduce) { .dashboard-loading-card i, .dashboard-loading-card b, .dashboard-loading-table i, .dashboard-loading-progress.is-indeterminate > span, .dashboard-loading-update-indicator { animation: none; } .dashboard-loading-progress > span { transition: none; } }
+
+
+/* Compact Data Foundation source cards and the explicit publication review dialog. */
+.data-foundation-source-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; margin-top: 18px; }
+.data-foundation-source-card { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 18px; border: 1px solid #e5e7eb; border-radius: 14px; background: #fff; box-shadow: 0 5px 20px rgb(22 33 54 / 4%); min-width: 0; }
+.data-foundation-source-card-icon { display: grid; width: 42px; height: 42px; place-items: center; color: #d92f2f; background: #fff1f1; border-radius: 12px; }
+.data-foundation-source-card-copy { min-width: 0; }
+.data-foundation-source-card-copy h2 { margin: 0 0 10px; font-size: 15px; color: #252a33; }
+.data-foundation-source-card-copy p { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px; margin: 4px 0; font-size: 12px; color: #737985; }
+.data-foundation-source-card-copy p strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3b4049; font-weight: 650; }
+.data-foundation-source-card-copy small, .data-foundation-source-card-wait { display: block; margin-top: 7px; color: #737985; font-size: 11px; }
+.data-foundation-update-button { position: relative; display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid #d92f2f; border-radius: 9px; background: #d92f2f; color: white; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.data-foundation-update-button input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.data-foundation-update-button:has(input:disabled), .data-foundation-update-button:disabled { opacity: .5; cursor: not-allowed; }
+.data-foundation-map-card { margin-top: 15px; }
+.data-foundation-modal-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; overflow: auto; padding: 22px; background: rgb(21 25 33 / 58%); }
+.data-foundation-confirmation-modal { width: min(920px, 100%); max-height: min(92vh, 980px); overflow: auto; padding: 22px; border-radius: 16px; background: #fff; box-shadow: 0 24px 80px rgb(0 0 0 / 24%); }
+.data-foundation-confirmation-modal > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.data-foundation-confirmation-modal > header h2 { margin: 4px 0; color: #292d35; }
+.data-foundation-confirmation-modal > header p { margin: 0; color: #747b85; }
+.data-foundation-confirmation-modal > header button { width: 36px; height: 36px; border: 1px solid #e3e5e8; border-radius: 50%; background: white; font-size: 24px; cursor: pointer; }
+.data-foundation-confirm-file { display: flex; align-items: center; gap: 11px; padding: 12px; border-radius: 10px; background: #f7f8fa; color: #d92f2f; }
+.data-foundation-confirm-file div { display: grid; min-width: 0; gap: 3px; flex: 1; }
+.data-foundation-confirm-file div span { color: #7a8089; font-size: 11px; }
+.data-foundation-confirm-file strong { overflow-wrap: anywhere; color: #30353d; font-size: 13px; }
+.data-foundation-confirm-file small { color: #747b85; font-size: 11px; white-space: nowrap; }
+.data-foundation-retry-validation { margin-top: 10px; min-height: 36px; padding: 0 12px; border: 1px solid #c92e2e; border-radius: 8px; background: #fff; color: #c92e2e; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+@media (max-width: 650px) {
+  .data-foundation-source-card { grid-template-columns: 36px minmax(0, 1fr); padding: 14px; gap: 10px; }
+  .data-foundation-source-card-icon { width: 36px; height: 36px; }
+  .data-foundation-update-button { grid-column: 1 / -1; width: 100%; }
+  .data-foundation-source-card-copy p { grid-template-columns: 95px minmax(0, 1fr); }
+  .data-foundation-modal-backdrop { padding: 8px; }
+  .data-foundation-confirmation-modal { max-height: 96vh; padding: 14px; }
+  .data-foundation-confirm-file { align-items: flex-start; flex-wrap: wrap; }
+  .data-foundation-confirm-file small { width: 100%; padding-left: 29px; }
+}
+html[data-theme="dark"] .data-foundation-source-card, html[data-theme="dark"] .data-foundation-confirmation-modal { background: #20242b; border-color: #3c414a; }
+html[data-theme="dark"] .data-foundation-source-card-copy h2, html[data-theme="dark"] .data-foundation-source-card-copy p strong, html[data-theme="dark"] .data-foundation-confirmation-modal > header h2, html[data-theme="dark"] .data-foundation-confirm-file strong { color: #f0f1f3; }
+html[data-theme="dark"] .data-foundation-confirm-file, html[data-theme="dark"] .data-foundation-confirmation-modal > header button { background: #2a2f37; color: #f0f1f3; border-color: #454b55; }

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 import uuid
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, inspect, text
 
 from app.services.data_foundation.contracts import CONTRACTS, CONTRACT_VERSIONS, get_contract
 from app.services.data_foundation.mapping_resolution import build_mapping_query, code_only_mapping
@@ -568,6 +568,49 @@ def _daily_publication_metadata_is_consistent(
     return inconsistent is None
 
 
+def _utc_timestamp_sql(expression: str, dialect: str) -> str:
+    if dialect in {"mysql", "mariadb"}:
+        return f"CONVERT_TZ({expression}, @@session.time_zone, '+00:00')"
+    return expression
+
+
+def _publication_file_metadata_sql(connection, dialect: str) -> tuple[str, str]:
+    """Use upload metadata when the schema has it; keep older schemas readable."""
+    if dialect in {"mysql", "mariadb"}:
+        attached_at = _utc_timestamp_sql("job.created_at", dialect)
+        return (
+            f"job.original_file_name, {attached_at} AS attached_at",
+            "LEFT JOIN import_jobs AS job ON job.source_id = publication.source_id "
+            "AND job.job_id = publication.job_id",
+        )
+    inspector = inspect(connection)
+    if not inspector.has_table("import_jobs"):
+        return "NULL AS original_file_name, NULL AS attached_at", ""
+    publication_columns = {column["name"] for column in inspector.get_columns("source_publications")}
+    import_job_columns = {column["name"] for column in inspector.get_columns("import_jobs")}
+    if not {"job_id", "source_id"}.issubset(publication_columns) or not {
+        "job_id", "source_id", "original_file_name", "created_at"
+    }.issubset(import_job_columns):
+        return "NULL AS original_file_name, NULL AS attached_at", ""
+    attached_at = _utc_timestamp_sql("job.created_at", dialect)
+    return (
+        f"job.original_file_name, {attached_at} AS attached_at",
+        "LEFT JOIN import_jobs AS job ON job.source_id = publication.source_id "
+        "AND job.job_id = publication.job_id",
+    )
+
+
+def _utc_iso_datetime(value: object) -> str | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _get_matrix_publications_from_metadata(
     engine: Engine,
     *,
@@ -579,6 +622,7 @@ def _get_matrix_publications_from_metadata(
 ) -> dict[str, object]:
     """List visible matrix publication history from publication metadata only."""
     with engine.connect() as connection:
+        file_metadata, file_metadata_join = _publication_file_metadata_sql(connection, engine.dialect.name)
         total = int(connection.execute(text(f"""
             SELECT COUNT(*)
             FROM source_publications AS publication
@@ -590,8 +634,10 @@ def _get_matrix_publications_from_metadata(
                    publication.contract_version, publication.published_at,
                    publication.snapshot_as_of,
                    publication.row_count AS visible_row_count,
-                   publication.period_start, publication.period_end
+                   publication.period_start, publication.period_end,
+                   {file_metadata}
             FROM source_publications AS publication
+            {file_metadata_join}
             WHERE {publication_filter}
               AND publication.row_count > 0
             ORDER BY publication.version_no DESC
@@ -607,6 +653,8 @@ def _get_matrix_publications_from_metadata(
                 "visibleRowCount": int(row["visible_row_count"]),
                 "periodStart": row["period_start"],
                 "periodEnd": row["period_end"],
+                "fileName": row["original_file_name"],
+                "attachedAt": _utc_iso_datetime(row["attached_at"]),
             }
             for row in rows
         ]
@@ -627,9 +675,18 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
     with engine.connect() as connection:
         metadata_schema_ready = supports_unit_metadata(connection)
         version_metadata = "version.candidate_metadata" if metadata_schema_ready else "NULL"
+        mapping_version_columns = (
+            {"original_file_name", "created_at"}
+            if engine.dialect.name in {"mysql", "mariadb"}
+            else {column["name"] for column in inspect(connection).get_columns("base_mapping_versions")}
+        )
+        original_file_name = "version.original_file_name" if "original_file_name" in mapping_version_columns else "NULL"
+        attached_at = _utc_timestamp_sql("version.created_at", engine.dialect.name) if "created_at" in mapping_version_columns else "NULL"
+        file_metadata = f"{original_file_name} AS original_file_name, {attached_at} AS attached_at"
         current = connection.execute(text("""
             SELECT version.map_version_id, version.version_no, version.version_state,
-                   version.published_at, """ + version_metadata + """ AS candidate_metadata
+                   version.published_at, """ + version_metadata + """ AS candidate_metadata,
+                   """ + file_metadata + """
             FROM base_mapping_current AS pointer
             JOIN base_mapping_versions AS version
               ON version.map_version_id = pointer.map_version_id
@@ -643,6 +700,8 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
                 "version": None,
                 "publishedAt": None,
                 "visibleBaseCount": 0,
+                "fileName": None,
+                "attachedAt": None,
             }
         count_filter = "current_entry.map_version_id = :map_version_id"
         if unit_metadata_enabled(connection, version_no=current["version_no"],
@@ -666,6 +725,8 @@ def get_current_mapping_status(engine: Engine, *, identity: dict[str, Any]) -> d
         "version": int(current["version_no"]),
         "publishedAt": current["published_at"],
         "visibleBaseCount": count,
+        "fileName": current["original_file_name"],
+        "attachedAt": _utc_iso_datetime(current["attached_at"]),
     }
 
 
@@ -1063,6 +1124,7 @@ def get_publications(
     else:
         date_select = "NULL AS period_start, NULL AS period_end"
     with engine.connect() as connection:
+        file_metadata, file_metadata_join = _publication_file_metadata_sql(connection, engine.dialect.name)
         published_versions = {
             int(row[0])
             for row in connection.execute(text("""
@@ -1116,8 +1178,10 @@ def get_publications(
         result = connection.execute(text(f"""
             SELECT publication.publication_id, publication.version_no, publication.contract_version, publication.published_at,
                    publication.snapshot_as_of, fact.visible_row_count,
-                   {date_select.replace('MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end', 'fact.period_start, fact.period_end')}
+                   {date_select.replace('MIN(fact.data_date) AS period_start, MAX(fact.data_date) AS period_end', 'fact.period_start, fact.period_end')},
+                   {file_metadata}
             FROM source_publications AS publication
+            {file_metadata_join}
             JOIN ({fact_counts_sql}) AS fact
               ON fact.source_id = publication.source_id
              AND fact.publication_id = publication.publication_id
@@ -1135,6 +1199,8 @@ def get_publications(
                 "visibleRowCount": int(row["visible_row_count"]),
                 "periodStart": row["period_start"],
                 "periodEnd": row["period_end"],
+                "fileName": row["original_file_name"],
+                "attachedAt": _utc_iso_datetime(row["attached_at"]),
             }
             for row in result
         ]

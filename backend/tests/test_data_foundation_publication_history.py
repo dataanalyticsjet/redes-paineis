@@ -6,7 +6,7 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, event, text
 
-from app.services.data_foundation.queries import get_publications
+from app.services.data_foundation.queries import _utc_iso_datetime, _utc_timestamp_sql, get_current_mapping_status, get_publications
 from app.services.data_foundation.repository import DataFoundationError
 
 
@@ -32,7 +32,7 @@ def _history_engine(*, published_mapping: bool = True):
 
     with engine.begin() as connection:
         connection.exec_driver_sql(
-            "CREATE TABLE base_mapping_versions (map_version_id BLOB PRIMARY KEY, version_state TEXT)"
+            "CREATE TABLE base_mapping_versions (map_version_id BLOB PRIMARY KEY, version_state TEXT, version_no INTEGER, original_file_name TEXT, created_at TEXT, published_at TEXT)"
         )
         connection.exec_driver_sql(
             "CREATE TABLE base_mapping_current (current_key TEXT PRIMARY KEY, map_version_id BLOB)"
@@ -52,6 +52,7 @@ def _history_engine(*, published_mapping: bool = True):
             CREATE TABLE source_publications (
                 publication_id BLOB PRIMARY KEY,
                 source_id TEXT NOT NULL,
+                job_id BLOB,
                 contract_version INTEGER NOT NULL,
                 version_no INTEGER NOT NULL,
                 published_at TEXT,
@@ -60,6 +61,14 @@ def _history_engine(*, published_mapping: bool = True):
                 period_start DATE,
                 period_end DATE,
                 publication_state TEXT NOT NULL
+            )
+        """)
+        connection.exec_driver_sql("""
+            CREATE TABLE import_jobs (
+                job_id BLOB PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                original_file_name TEXT,
+                created_at TEXT
             )
         """)
         connection.exec_driver_sql("""
@@ -74,7 +83,7 @@ def _history_engine(*, published_mapping: bool = True):
         if published_mapping:
             mapping_id = b"m" * 16
             connection.execute(
-                text("INSERT INTO base_mapping_versions VALUES (:id, 'PUBLISHED')"),
+                text("INSERT INTO base_mapping_versions (map_version_id, version_state, version_no, original_file_name, created_at, published_at) VALUES (:id, 'PUBLISHED', 2, 'directory-official.xlsx', '2026-10-20 13:30:00', '2026-10-20 14:00:00')"),
                 {"id": mapping_id},
             )
             connection.execute(
@@ -97,18 +106,24 @@ def _add_publication(
     state: str = "PUBLISHED",
     snapshot_as_of: str | None = None,
 ) -> None:
+    job_id = b"j" + publication_id[1:]
+    connection.execute(text("""
+        INSERT INTO import_jobs (job_id, source_id, original_file_name, created_at)
+        VALUES (:job_id, :source_id, :file_name, '2026-10-20 13:30:00')
+    """), {"job_id": job_id, "source_id": source_id, "file_name": f"{source_id}-{version_no}.xlsx"})
     connection.execute(text("""
         INSERT INTO source_publications
-          (publication_id, source_id, contract_version, version_no,
+          (publication_id, source_id, job_id, contract_version, version_no,
            published_at, snapshot_as_of, row_count, period_start, period_end,
            publication_state)
         VALUES
-          (:publication_id, :source_id, :contract_version, :version_no,
+          (:publication_id, :source_id, :job_id, :contract_version, :version_no,
            '2026-10-20 10:00:00', :snapshot_as_of, :row_count, :period_start,
            :period_end, :state)
     """), {
         "publication_id": publication_id,
         "source_id": source_id,
+        "job_id": job_id,
         "contract_version": contract_version,
         "version_no": version_no,
         "snapshot_as_of": snapshot_as_of,
@@ -197,6 +212,8 @@ def test_matrix_history_uses_metadata_for_all_supported_daily_contract_versions_
     assert [item["visibleRowCount"] for item in page["publications"]] == [1, 4]
     assert page["publications"][1]["periodStart"] == "2026-10-13"
     assert page["publications"][1]["periodEnd"] == "2026-10-14"
+    assert page["publications"][1]["fileName"] == "collection_rate-5.xlsx"
+    assert page["publications"][1]["attachedAt"] == "2026-10-20T13:30:00Z"
 
     all_publications = get_publications(
         engine,
@@ -270,6 +287,8 @@ def test_matrix_snapshot_history_uses_publication_metadata_and_excludes_empty_pu
         "visibleRowCount": 151,
         "periodStart": "2026-10-19",
         "periodEnd": "2026-10-19",
+        "fileName": "no_movement-3.xlsx",
+        "attachedAt": "2026-10-20T13:30:00Z",
     }]
     engine.dispose()
 
@@ -328,3 +347,16 @@ def test_inconsistent_daily_metadata_falls_back_to_legacy_fact_aggregation():
     assert result["publications"][0]["visibleRowCount"] == 1
     assert result["publications"][0]["periodStart"] == "2026-10-05"
     engine.dispose()
+
+
+def test_current_mapping_status_returns_official_filename_and_utc_attachment_time():
+    engine = _history_engine()
+    result = get_current_mapping_status(engine, identity=MATRIX_USER)
+    assert result["fileName"] == "directory-official.xlsx"
+    assert result["attachedAt"] == "2026-10-20T13:30:00Z"
+
+
+def test_attachment_timestamps_use_database_session_timezone_and_emit_utc():
+    assert _utc_timestamp_sql("job.created_at", "mysql") == "CONVERT_TZ(job.created_at, @@session.time_zone, '+00:00')"
+    assert _utc_timestamp_sql("job.created_at", "sqlite") == "job.created_at"
+    assert _utc_iso_datetime("2026-10-20 13:30:00") == "2026-10-20T13:30:00Z"

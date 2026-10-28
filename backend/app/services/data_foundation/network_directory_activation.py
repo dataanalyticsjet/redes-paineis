@@ -10,8 +10,6 @@ from sqlalchemy import Engine, inspect, text
 from app.services.data_foundation.contracts import NETWORK_DIRECTORY_CONTRACT, contract_sha256
 from app.services.data_foundation.repository import DataFoundationError, _for_update_clause, _write_audit
 
-EXPECTED_CANDIDATE_VERSION = 2
-EXPECTED_CANDIDATE_ROWS = 1783
 EXPECTED_LEGACY_ROWS = 1628
 OPERATIONAL_TYPES = {"OWN", "FRANCHISE"}
 UNIT_TYPES = {"OWN", "FRANCHISE", "PA", "DC", "SC"}
@@ -166,8 +164,10 @@ def _candidate_state(connection, engine: Engine, *, lock: bool = False) -> dict[
         SELECT map_version_id, version_no, source_job_id, contract_version, version_state,
                mapping_row_count, file_sha256, candidate_metadata, published_by_user_id
         FROM base_mapping_versions
-        WHERE source_id='base_mapping_official' AND version_no=:version
-    """ + (_for_update_clause(connection) if lock else "")), {"version": EXPECTED_CANDIDATE_VERSION}).mappings().first()
+        WHERE source_id='base_mapping_official' AND candidate_metadata IS NOT NULL
+          AND version_state IN ('PREPARED', 'PUBLISHED')
+        ORDER BY version_no DESC LIMIT 1
+    """ + (_for_update_clause(connection) if lock else ""))).mappings().first()
     if candidate is None:
         return {
             "officialMapVersionId": _uuid_text(official_id), "officialVersion": official_version,
@@ -176,6 +176,7 @@ def _candidate_state(connection, engine: Engine, *, lock: bool = False) -> dict[
         }
 
     map_id = bytes(candidate["map_version_id"])
+    is_current = official_id == map_id
     metadata = _json_object(candidate["candidate_metadata"])
     metadata_count, invalid_metadata = _unit_metadata_stats(connection, map_id, lock=lock)
     entry_count = metadata_count + len(invalid_metadata)
@@ -185,13 +186,14 @@ def _candidate_state(connection, engine: Engine, *, lock: bool = False) -> dict[
         FROM import_jobs WHERE job_id=:job_id
     """ + (_for_update_clause(connection) if lock else "")),
         {"job_id": candidate["source_job_id"]}).mappings().first()
-    if int(candidate["version_no"]) != EXPECTED_CANDIDATE_VERSION or int(candidate["contract_version"]) != NETWORK_DIRECTORY_CONTRACT.version:
+    candidate_version = int(candidate["version_no"])
+    if (not is_current and candidate_version <= official_version) or int(candidate["contract_version"]) != NETWORK_DIRECTORY_CONTRACT.version:
         blockers.append("candidate_version_mismatch")
     if candidate["version_state"] not in {"PREPARED", "PUBLISHED"}:
         blockers.append("candidate_not_prepared")
-    if int(candidate["mapping_row_count"] or 0) != EXPECTED_CANDIDATE_ROWS or entry_count != EXPECTED_CANDIDATE_ROWS:
+    if entry_count <= 0 or int(candidate["mapping_row_count"] or 0) != entry_count:
         blockers.append("candidate_row_count_mismatch")
-    if metadata_count != EXPECTED_CANDIDATE_ROWS or invalid_metadata:
+    if metadata_count != entry_count or invalid_metadata:
         blockers.append("candidate_unit_metadata_invalid")
     if not isinstance(candidate["file_sha256"], (bytes, bytearray)) or len(bytes(candidate["file_sha256"])) != 32:
         blockers.append("candidate_file_hash_invalid")
@@ -206,68 +208,87 @@ def _candidate_state(connection, engine: Engine, *, lock: bool = False) -> dict[
                        or int(job["contract_version"]) != NETWORK_DIRECTORY_CONTRACT.version
                        or job["job_state"] not in expected_job_states
                        or bytes(job["file_sha256"] or b"") != bytes(candidate["file_sha256"] or b"")
-                       or int(job["input_row_count"] or 0) != EXPECTED_CANDIDATE_ROWS
-                       or int(job["valid_row_count"] or 0) != EXPECTED_CANDIDATE_ROWS
+                       or int(job["input_row_count"] or 0) != entry_count
+                       or int(job["valid_row_count"] or 0) != entry_count
                        or int(job["error_count"] or 0) != 0):
         blockers.append("candidate_job_invalid")
-    elif official_version == 1 and bytes(job["validation_map_version_id"] or b"") != official_id:
+    elif not is_current and bytes(job["validation_map_version_id"] or b"") != official_id:
         blockers.append("candidate_review_stale")
-    if official_version == 1:
-        if metadata.get("basedOnMapVersionId") != _uuid_text(official_id):
-            blockers.append("candidate_review_stale")
-    elif official_version != EXPECTED_CANDIDATE_VERSION or official_id != map_id:
-        blockers.append("official_pointer_changed")
+    if not is_current and metadata.get("basedOnMapVersionId") != _uuid_text(official_id):
+        blockers.append("candidate_review_stale")
 
-    previous_decisions: list[dict] = []
-    candidate_decisions: list[dict] = []
+    previous_decisions, candidate_decisions = _decision_plan(connection, official_id, map_id, lock=lock)
     unresolved_decisions = 0
-    copied_decisions = 0
+    copied_decisions = len(previous_decisions)
     if official_version == 1:
-        previous_decisions, candidate_decisions = _decision_plan(connection, official_id, map_id, lock=lock)
         legacy_entry_count = int(connection.execute(text("""
             SELECT COUNT(*) FROM base_mapping_entries WHERE map_version_id=:map_id
         """), {"map_id": official_id}).scalar_one())
         if int(pointer["mapping_row_count"] or 0) != EXPECTED_LEGACY_ROWS or legacy_entry_count != EXPECTED_LEGACY_ROWS:
             blockers.append("official_v1_row_count_mismatch")
-        codes = {str(row[0]) for row in connection.execute(text("""
-            SELECT base_code FROM base_mapping_entries WHERE map_version_id=:map_id
-        """), {"map_id": map_id})}
-        pending_keys: set[tuple[str, str]] = set()
-        for decision in previous_decisions:
-            state = str(decision["resolution_state"])
-            if state in {"UNREVIEWED", "AMBIGUOUS"}:
-                pending_keys.add((str(decision["source_id"]), str(decision["source_base_name"])))
-            elif state == "LINKED" and str(decision["target_base_code"] or "") not in codes:
-                blockers.append("manual_decision_target_missing")
-            elif state not in {"LINKED", "REJECTED"}:
-                unresolved_decisions += 1
-        if unresolved_decisions:
-            blockers.append("manual_decisions_pending")
-        candidate_codes = {str(row[0]) for row in connection.execute(text("""
-            SELECT base_code FROM base_mapping_entries WHERE map_version_id=:map_id
-        """), {"map_id": map_id})}
-        for decision in candidate_decisions:
-            state = str(decision["resolution_state"])
-            if state == "LINKED" and str(decision["target_base_code"] or "") not in candidate_codes:
-                blockers.append("manual_decision_target_missing")
-            elif state not in {"LINKED", "REJECTED"}:
-                pending_keys.add((str(decision["source_id"]), str(decision["source_base_name"])))
-        unresolved_decisions = len(pending_keys)
-        if unresolved_decisions:
-            blockers.append("manual_decisions_pending")
-        existing = {(d["source_id"], d["source_base_name"]): (d["resolution_state"], d["target_base_code"]) for d in candidate_decisions}
-        expected = {(d["source_id"], d["source_base_name"]): (d["resolution_state"], d["target_base_code"]) for d in previous_decisions}
-        if any(key not in expected or expected[key] != value for key, value in existing.items()):
-            blockers.append("candidate_decision_conflict")
-        copied_decisions = len(previous_decisions)
+    candidate_codes = {str(row[0]) for row in connection.execute(text("""
+        SELECT base_code FROM base_mapping_entries WHERE map_version_id=:map_id
+    """), {"map_id": map_id})}
+    pending_keys: set[tuple[str, str]] = set()
+    for decision in previous_decisions:
+        state = str(decision["resolution_state"])
+        key = (str(decision["source_id"]), str(decision["source_base_name"]))
+        if state in {"UNREVIEWED", "AMBIGUOUS"}:
+            pending_keys.add(key)
+        elif state == "LINKED" and str(decision["target_base_code"] or "") not in candidate_codes:
+            blockers.append("manual_decision_target_missing")
+        elif state not in {"LINKED", "REJECTED"}:
+            pending_keys.add(key)
+    for decision in candidate_decisions:
+        state = str(decision["resolution_state"])
+        key = (str(decision["source_id"]), str(decision["source_base_name"]))
+        if state == "LINKED" and str(decision["target_base_code"] or "") not in candidate_codes:
+            blockers.append("manual_decision_target_missing")
+        elif state not in {"LINKED", "REJECTED"}:
+            pending_keys.add(key)
+    previous_by_key = {(d["source_id"], d["source_base_name"]): (d["resolution_state"], d["target_base_code"]) for d in previous_decisions}
+    candidate_by_key = {(d["source_id"], d["source_base_name"]): (d["resolution_state"], d["target_base_code"]) for d in candidate_decisions}
+    if any(key not in previous_by_key or previous_by_key[key] != value for key, value in candidate_by_key.items()):
+        blockers.append("candidate_decision_conflict")
+    unresolved_decisions = len(pending_keys)
+    if unresolved_decisions:
+        blockers.append("manual_decisions_pending")
 
     audit = metadata.get("audit") if isinstance(metadata.get("audit"), dict) else {}
     ambiguous_names = audit.get("duplicateNamesNormalized", {})
     ambiguous_name_groups = len(ambiguous_names) if isinstance(ambiguous_names, dict) else 0
+    added_units = audit.get("newUnits") if isinstance(audit.get("newUnits"), list) else []
+    removed_units = audit.get("missingUnits") if isinstance(audit.get("missingUnits"), list) else []
+    changed_fields = audit.get("changes") if isinstance(audit.get("changes"), dict) else {}
+    changed_codes = {
+        str(item.get("base_code"))
+        for changes in changed_fields.values() if isinstance(changes, list)
+        for item in changes if isinstance(item, dict) and item.get("base_code") is not None
+    }
     state = str(candidate["version_state"])
-    is_current = official_version == EXPECTED_CANDIDATE_VERSION and official_id == map_id
-    can_publish = state == "PREPARED" and official_version == 1 and not blockers
-    can_rollback = state == "PUBLISHED" and is_current and official_version == EXPECTED_CANDIDATE_VERSION
+    can_publish = state == "PREPARED" and not blockers
+    official_row = connection.execute(text("""
+        SELECT candidate_metadata FROM base_mapping_versions
+        WHERE map_version_id=:map_id AND source_id='base_mapping_official'
+          AND version_state='PUBLISHED'
+    """), {"map_id": official_id}).mappings().first()
+    official_metadata = _json_object(official_row["candidate_metadata"]) if official_row else {}
+    official_publication = official_metadata.get("publication") if isinstance(official_metadata.get("publication"), dict) else {}
+    previous_id = official_publication.get("expectedOfficialMapVersionId")
+    try:
+        previous = connection.execute(text("""
+            SELECT version_no, mapping_row_count FROM base_mapping_versions
+            WHERE map_version_id=:map_id AND source_id='base_mapping_official' AND version_state='PUBLISHED'
+        """), {"map_id": uuid.UUID(previous_id).bytes}).first() if previous_id else None
+    except (ValueError, AttributeError):
+        previous = None
+    # Rollback availability belongs to the official map, not to whichever
+    # newer prepared candidate is currently shown in the candidate panel.
+    can_rollback = bool(
+        official_row is not None and previous is not None
+        and int(previous[0]) < official_version and int(previous[1] or 0) > 0
+        and (int(previous[0]) != 1 or int(previous[1]) == EXPECTED_LEGACY_ROWS)
+    )
     return {
         "officialMapVersionId": _uuid_text(official_id), "officialVersion": official_version,
         "candidate": {
@@ -280,8 +301,17 @@ def _candidate_state(connection, engine: Engine, *, lock: bool = False) -> dict[
             "manualDecisionCount": len(previous_decisions),
             "pendingManualDecisionCount": unresolved_decisions,
             "manualDecisionsToCarry": copied_decisions,
+            "changeSummary": {
+                "previousCount": audit.get("previousCount"),
+                "newCount": entry_count,
+                "addedCount": len(added_units),
+                "removedCount": len(removed_units),
+                "changedCount": len(changed_codes),
+            },
         },
         "canPublish": can_publish, "canRollback": can_rollback,
+        "rollbackMapVersionId": _uuid_text(official_id) if can_rollback else None,
+        "rollbackTargetVersion": int(previous[0]) if can_rollback else None,
         "alreadyPublished": is_current and state == "PUBLISHED",
         "blockers": sorted(set(blockers)),
     }
@@ -321,7 +351,9 @@ def publish_network_directory_candidate(
         row = connection.execute(text("""
             SELECT version_state, candidate_metadata FROM base_mapping_versions
             WHERE map_version_id=:map_id
-        """ + _for_update_clause(connection)), {"map_id": candidate_id}).mappings().one()
+        """ + _for_update_clause(connection)), {"map_id": candidate_id}).mappings().first()
+        if row is None:
+            raise DataFoundationError("mapping_candidate_not_found", 404)
         metadata = _json_object(row["candidate_metadata"])
         publication = metadata.get("publication") if isinstance(metadata.get("publication"), dict) else {}
         if row["version_state"] == "PUBLISHED" and official_id == candidate_id:
@@ -329,7 +361,7 @@ def publish_network_directory_candidate(
                     and publication.get("actorUserId") == actor_user_id
                     and publication.get("expectedOfficialMapVersionId") == str(uuid.UUID(bytes=expected_id))
                     and publication.get("reviewSha256") == review_sha256.lower()):
-                return {"mapVersionId": str(uuid.UUID(bytes=candidate_id)), "version": 2,
+                return {"mapVersionId": str(uuid.UUID(bytes=candidate_id)), "version": candidate["version"],
                         "state": "PUBLISHED", "reused": True, "revision": None}
             raise DataFoundationError("mapping_candidate_already_published", 409)
         if not status["canPublish"]:
@@ -403,14 +435,14 @@ def publish_network_directory_candidate(
             raise DataFoundationError("mapping_candidate_review_stale", 409)
         _write_audit(connection, actor_user_id=actor_user_id, action_code="NETWORK_DIRECTORY_PUBLISHED",
                      object_type="base_mapping_version", object_id=candidate_id, request_id=request_id,
-                     safe_context={"version": 2, "rowCount": EXPECTED_CANDIDATE_ROWS,
+                     safe_context={"version": candidate["version"], "rowCount": candidate["rowCount"],
                                    "previousMapVersionId": str(uuid.UUID(bytes=expected_id)),
                                    "manualDecisionsCarried": len(previous_decisions),
                                    "idempotencySha256": request_hash})
 
     from app.services.data_foundation.mapping_revision import read_revision
     revision = read_revision(engine)["revision"]
-    return {"mapVersionId": candidate_id_text, "version": 2, "state": "PUBLISHED",
+    return {"mapVersionId": candidate_id_text, "version": candidate["version"], "state": "PUBLISHED",
             "reused": False, "revision": revision}
 
 def rollback_network_directory_candidate(
@@ -424,46 +456,64 @@ def rollback_network_directory_candidate(
         raise DataFoundationError("mapping_candidate_not_found", 404) from None
     with engine.begin() as connection:
         status = _candidate_state(connection, engine, lock=True)
-        candidate = status.get("candidate")
-        if not isinstance(candidate, dict) or candidate["mapVersionId"] != str(uuid.UUID(bytes=candidate_id)):
-            raise DataFoundationError("mapping_candidate_not_found", 404)
         row = connection.execute(text("""
-            SELECT version_state, candidate_metadata FROM base_mapping_versions
-            WHERE map_version_id=:map_id
+            SELECT version_no, version_state, candidate_metadata FROM base_mapping_versions
+            WHERE map_version_id=:map_id AND source_id='base_mapping_official'
         """ + _for_update_clause(connection)), {"map_id": candidate_id}).mappings().one()
         metadata = _json_object(row["candidate_metadata"])
         rollback = metadata.get("rollback") if isinstance(metadata.get("rollback"), dict) else {}
         official_id = uuid.UUID(str(status["officialMapVersionId"])).bytes
-        if row["version_state"] == "PUBLISHED" and status["officialVersion"] == 1:
-            if rollback.get("idempotencySha256") == request_hash and rollback.get("actorUserId") == actor_user_id:
-                return {"officialVersion": 1, "reused": True, "revision": None}
+        publication = metadata.get("publication") if isinstance(metadata.get("publication"), dict) else {}
+        previous_id_text = publication.get("expectedOfficialMapVersionId")
+        try:
+            previous_id = uuid.UUID(previous_id_text).bytes if previous_id_text else None
+        except (ValueError, AttributeError):
+            previous_id = None
+        rollback_target = rollback.get("targetMapVersionId")
+        if row["version_state"] == "PUBLISHED" and previous_id and official_id == previous_id:
+            if (rollback.get("idempotencySha256") == request_hash
+                    and rollback.get("actorUserId") == actor_user_id
+                    and (rollback_target in {None, str(uuid.UUID(bytes=previous_id))})):
+                previous_version = int(status["officialVersion"])
+                return {"officialVersion": previous_version, "mapVersionId": str(uuid.UUID(bytes=previous_id)),
+                        "reused": True, "revision": None}
             raise DataFoundationError("mapping_candidate_not_official", 409)
-        if not status["canRollback"] or official_id != candidate_id:
+        if row["version_state"] != "PUBLISHED" or official_id != candidate_id or not status["canRollback"]:
             raise DataFoundationError("mapping_candidate_not_rollbackable", 409)
-        legacy = connection.execute(text("""
-            SELECT map_version_id, mapping_row_count, version_state
-            FROM base_mapping_versions WHERE source_id='base_mapping_official' AND version_no=1
-        """ + _for_update_clause(connection))).mappings().first()
-        if legacy is None or legacy["version_state"] != "PUBLISHED" or int(legacy["mapping_row_count"] or 0) != EXPECTED_LEGACY_ROWS:
+        if previous_id is None:
+            raise DataFoundationError("mapping_previous_version_unavailable", 409)
+        previous = connection.execute(text("""
+            SELECT version_no, mapping_row_count, version_state
+            FROM base_mapping_versions
+            WHERE map_version_id=:map_id AND source_id='base_mapping_official'
+        """ + _for_update_clause(connection)), {"map_id": previous_id}).mappings().first()
+        if previous is None or previous["version_state"] != "PUBLISHED" or int(previous["version_no"]) >= int(row["version_no"]):
+            raise DataFoundationError("mapping_previous_version_unavailable", 409)
+        if int(previous["version_no"]) == 1 and int(previous["mapping_row_count"] or 0) != EXPECTED_LEGACY_ROWS:
             raise DataFoundationError("legacy_mapping_not_available", 409)
-        legacy_id = bytes(legacy["map_version_id"])
-        metadata["rollback"] = {"actorUserId": actor_user_id, "idempotencySha256": request_hash}
+        metadata["rollback"] = {
+            "actorUserId": actor_user_id, "idempotencySha256": request_hash,
+            "targetMapVersionId": str(uuid.UUID(bytes=previous_id)),
+        }
         connection.execute(text("""
             UPDATE base_mapping_versions SET candidate_metadata=:metadata WHERE map_version_id=:map_id
         """), {"metadata": json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), "map_id": candidate_id})
         updated = connection.execute(text("""
             UPDATE base_mapping_current
-            SET map_version_id=:legacy_id, changed_by_user_id=:actor, changed_at=CURRENT_TIMESTAMP
+            SET map_version_id=:previous_id, changed_by_user_id=:actor, changed_at=CURRENT_TIMESTAMP
             WHERE current_key='OFFICIAL' AND map_version_id=:candidate_id
-        """), {"legacy_id": legacy_id, "actor": actor_user_id, "candidate_id": candidate_id})
+        """), {"previous_id": previous_id, "actor": actor_user_id, "candidate_id": candidate_id})
         if updated.rowcount != 1:
             raise DataFoundationError("mapping_candidate_not_rollbackable", 409)
         _write_audit(connection, actor_user_id=actor_user_id, action_code="NETWORK_DIRECTORY_ROLLED_BACK",
                      object_type="base_mapping_version", object_id=candidate_id, request_id=request_id,
                      safe_context={"fromMapVersionId": str(uuid.UUID(bytes=candidate_id)),
-                                   "toMapVersionId": str(uuid.UUID(bytes=legacy_id)),
+                                   "toMapVersionId": str(uuid.UUID(bytes=previous_id)),
+                                   "fromVersion": int(row["version_no"]),
+                                   "toVersion": int(previous["version_no"]),
                                    "idempotencySha256": request_hash})
     from app.services.data_foundation.mapping_revision import read_revision
     revision = read_revision(engine)["revision"]
-    return {"officialVersion": 1, "mapVersionId": str(uuid.UUID(bytes=legacy_id)),
+    return {"officialVersion": int(previous["version_no"]),
+            "mapVersionId": str(uuid.UUID(bytes=previous_id)),
             "reused": False, "revision": revision}

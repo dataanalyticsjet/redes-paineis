@@ -2,18 +2,13 @@
 
 import { NetworkDirectoryCandidate } from "./network-directory-candidate.tsx";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../../lib/api-url";
 import {
   loadIndependently,
-  PUBLICATION_HISTORY_LIMIT,
-  PUBLICATION_SUMMARY_LIMIT,
-  publicationHeadChanged,
-  publicationRequestPlan,
 } from "../../lib/data-foundation/admin-metadata";
 import type { DashboardTranslator } from "../../lib/i18n";
 import { invalidateDashboardDataCache } from "../../lib/data-foundation/dashboard-data-cache.ts";
-import { buildT4T5ImportProgressView } from "../../lib/data-foundation/t4t5-import-progress.ts";
 import { AlertTriangle, Check, Clock3, Database, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
 
 type Source = {
@@ -43,6 +38,8 @@ type Publication = {
   visibleRowCount: number;
   periodStart: string | null;
   periodEnd: string | null;
+  fileName?: string | null;
+  attachedAt?: string | null;
 };
 
 type PublicationsResponse = { publications: Publication[]; total: number };
@@ -119,6 +116,8 @@ type MappingStatus = {
   version: number | null;
   publishedAt: string | null;
   visibleBaseCount: number;
+  fileName?: string | null;
+  attachedAt?: string | null;
 };
 
 const NAME_MAPPED_SOURCES = new Set(["collection_monitoring", "collection_rate", "jt_monitoring"]);
@@ -185,6 +184,21 @@ async function requestPublications(sourceId: string, limit: number, signal: Abor
   }
 }
 
+async function waitForT4T5ImportJob(
+  jobId: string,
+  onStatus: (status: T4T5ImportStatus) => void,
+): Promise<T4T5ImportStatus> {
+  const deadline = Date.now() + 30 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
+    onStatus(status);
+    if (["VALIDATED", "INVALID", "PUBLISHED", "REUSED"].includes(status.state)) return status;
+    if (status.state === "FAILED") throw new Error(status.errorCode || "import_processing_failed");
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+  }
+  throw new Error("import_processing_timeout");
+}
+
 function formatCount(value: number): string {
   return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 }).format(value);
 }
@@ -192,11 +206,19 @@ function formatCount(value: number): string {
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "—";
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("pt-BR");
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+}
+
+function formatDataFoundationDateTime(value: string | null | undefined): string {
+  return formatDateTime(value);
 }
 
 function normalize(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+}
+
+function displayPanelName(value: string): string {
+  return value.replace(/\s+V[123]$/i, "");
 }
 
 export function DataFoundationAdmin({
@@ -214,12 +236,11 @@ export function DataFoundationAdmin({
   const [mapping, setMapping] = useState<MappingStatus | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
   const [mappingLoading, setMappingLoading] = useState(false);
-  const [selectedSource, setSelectedSource] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [operationStartedAt, setOperationStartedAt] = useState<string | null>(null);
   const [confirmNoMovementExport, setConfirmNoMovementExport] = useState(false);
   const [noMovementExportDate, setNoMovementExportDate] = useState("");
   const [noMovementExportTime, setNoMovementExportTime] = useState("");
-  const [mappingFile, setMappingFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewSource, setPreviewSource] = useState("");
   const [largeImportProgress, setLargeImportProgress] = useState<T4T5ImportStatus | null>(null);
@@ -232,118 +253,20 @@ export function DataFoundationAdmin({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [publicationHistoryLoading, setPublicationHistoryLoading] = useState<Record<string, boolean>>({});
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [mappingCandidateOpen, setMappingCandidateOpen] = useState(false);
+  const previewGeneration = useRef(0);
+  const publishInFlight = useRef(false);
+  const previewInFlight = useRef(false);
   const metadataLoadGeneration = useRef(0);
   const metadataAbortController = useRef<AbortController | null>(null);
-  const selectedSourceRef = useRef("");
-  const publicationValuesRef = useRef<Record<string, Publication[]>>({});
-  const detailedHistorySourcesRef = useRef(new Set<string>());
-  const selectedHistoryAbortController = useRef<AbortController | null>(null);
-  const selectedHistoryRequestGeneration = useRef(0);
-  const initialSummaryLoad = useRef<Promise<void>>(Promise.resolve());
   const t4t5RecoveryStarted = useRef(false);
-
-  const fetchFullHistory = useCallback(async (sourceId: string, loadGeneration: number) => {
-    selectedHistoryAbortController.current?.abort();
-    const controller = new AbortController();
-    selectedHistoryAbortController.current = controller;
-    const requestGeneration = ++selectedHistoryRequestGeneration.current;
-    const isCurrentRequest = () => (
-      metadataLoadGeneration.current === loadGeneration
-      && selectedHistoryRequestGeneration.current === requestGeneration
-      && selectedSourceRef.current === sourceId
-      && !controller.signal.aborted
-    );
-
-    setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: true }));
-    setPublicationErrors((current) => {
-      if (!current[sourceId]) return current;
-      const next = { ...current };
-      delete next[sourceId];
-      return next;
-    });
-    try {
-      const result = await requestPublications(sourceId, PUBLICATION_HISTORY_LIMIT, controller.signal);
-      if (!isCurrentRequest()) return;
-      publicationValuesRef.current[sourceId] = result.publications;
-      detailedHistorySourcesRef.current.add(sourceId);
-      setPublications((current) => ({ ...current, [sourceId]: result.publications }));
-    } catch (caught) {
-      if (!isCurrentRequest()) return;
-      publicationValuesRef.current[sourceId] = [];
-      detailedHistorySourcesRef.current.delete(sourceId);
-      setPublications((current) => ({ ...current, [sourceId]: [] }));
-      setPublicationErrors((current) => ({
-        ...current,
-        [sourceId]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
-      }));
-    } finally {
-      if (isCurrentRequest()) {
-        setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
-      }
-    }
-  }, []);
-
-  const ensureSourceHistory = useCallback(async (sourceId: string) => {
-    const loadGeneration = metadataLoadGeneration.current;
-    await initialSummaryLoad.current;
-    if (
-      metadataLoadGeneration.current !== loadGeneration
-      || selectedSourceRef.current !== sourceId
-    ) return;
-
-    if (!detailedHistorySourcesRef.current.has(sourceId)) {
-      await fetchFullHistory(sourceId, loadGeneration);
-      return;
-    }
-
-    selectedHistoryAbortController.current?.abort();
-    const controller = new AbortController();
-    selectedHistoryAbortController.current = controller;
-    const requestGeneration = ++selectedHistoryRequestGeneration.current;
-    const isCurrentRequest = () => (
-      metadataLoadGeneration.current === loadGeneration
-      && selectedHistoryRequestGeneration.current === requestGeneration
-      && selectedSourceRef.current === sourceId
-      && !controller.signal.aborted
-    );
-    setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: true }));
-    try {
-      const head = await requestPublications(sourceId, 1, controller.signal);
-      if (!isCurrentRequest()) return;
-      const cachedLatest = publicationValuesRef.current[sourceId]?.[0] ?? null;
-      const currentLatest = head.publications[0] ?? null;
-      if (!publicationHeadChanged(cachedLatest, currentLatest)) {
-        setPublicationErrors((current) => {
-          if (!current[sourceId]) return current;
-          const next = { ...current };
-          delete next[sourceId];
-          return next;
-        });
-        setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
-        return;
-      }
-      await fetchFullHistory(sourceId, loadGeneration);
-    } catch (caught) {
-      if (!isCurrentRequest()) return;
-      publicationValuesRef.current[sourceId] = [];
-      detailedHistorySourcesRef.current.delete(sourceId);
-      setPublications((current) => ({ ...current, [sourceId]: [] }));
-      setPublicationErrors((current) => ({
-        ...current,
-        [sourceId]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
-      }));
-      setPublicationHistoryLoading((current) => ({ ...current, [sourceId]: false }));
-    }
-  }, [fetchFullHistory]);
 
   const loadMetadata = useCallback(async () => {
     metadataAbortController.current?.abort();
-    selectedHistoryAbortController.current?.abort();
     const controller = new AbortController();
     metadataAbortController.current = controller;
     const loadGeneration = ++metadataLoadGeneration.current;
-    selectedHistoryRequestGeneration.current += 1;
     const isCurrentLoad = () => (
       metadataLoadGeneration.current === loadGeneration && !controller.signal.aborted
     );
@@ -352,10 +275,6 @@ export function DataFoundationAdmin({
     setNotice(null);
     setContracts({});
     setPublications({});
-    publicationValuesRef.current = {};
-    detailedHistorySourcesRef.current.clear();
-    initialSummaryLoad.current = Promise.resolve();
-    setPublicationHistoryLoading({});
     setContractErrors({});
     setPublicationErrors({});
     setMapping(null);
@@ -365,15 +284,8 @@ export function DataFoundationAdmin({
       const result = await requestJson<{ sources: Source[] }>("/api/v2/data-sources", { signal: controller.signal });
       if (!isCurrentLoad()) return;
       setSources(result.sources);
-      const selectedStillExists = result.sources.some((source) => source.source_id === selectedSourceRef.current);
-      const activeSource = selectedStillExists ? selectedSourceRef.current : result.sources[0]?.source_id ?? "";
-      selectedSourceRef.current = activeSource;
-      setSelectedSource(activeSource);
       setLoading(false);
-
-      const publicationPlan = publicationRequestPlan(result.sources, activeSource);
-      const activeHistory = publicationPlan.find((item) => item.limit === PUBLICATION_HISTORY_LIMIT);
-      if (activeHistory) void fetchFullHistory(activeHistory.source.source_id, loadGeneration);
+      const publicationSources = result.sources.filter((source) => source.source_id !== "base_mapping_official");
 
       void requestJson<MappingStatus>("/api/v2/base-mapping/current", { signal: controller.signal })
         .then((status) => {
@@ -390,7 +302,7 @@ export function DataFoundationAdmin({
         });
 
       void loadIndependently(
-        result.sources,
+        publicationSources,
         (source) => requestJson<Contract>(
           `/api/v2/data-sources/${encodeURIComponent(source.source_id)}/contract`,
           { signal: controller.signal },
@@ -414,29 +326,24 @@ export function DataFoundationAdmin({
         },
       );
 
-      initialSummaryLoad.current = loadIndependently(
-        publicationPlan.filter((item) => item.limit === PUBLICATION_SUMMARY_LIMIT),
-        (item) => requestPublications(
-          item.source.source_id,
-          item.limit,
-          controller.signal,
-        ),
-        (item, history) => {
+      void loadIndependently(
+        publicationSources,
+        (source) => requestPublications(source.source_id, 1, controller.signal),
+        (source, result) => {
           if (!isCurrentLoad()) return;
-          publicationValuesRef.current[item.source.source_id] = history.publications;
-          setPublications((current) => ({ ...current, [item.source.source_id]: history.publications }));
+          setPublications((current) => ({ ...current, [source.source_id]: result.publications }));
           setPublicationErrors((current) => {
-            if (!current[item.source.source_id]) return current;
+            if (!current[source.source_id]) return current;
             const next = { ...current };
-            delete next[item.source.source_id];
+            delete next[source.source_id];
             return next;
           });
         },
-        (item, caught) => {
+        (source, caught) => {
           if (!isCurrentLoad()) return;
           setPublicationErrors((current) => ({
             ...current,
-            [item.source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
+            [source.source_id]: caught instanceof Error ? caught.message : "data_foundation_request_failed",
           }));
         },
         2,
@@ -449,7 +356,7 @@ export function DataFoundationAdmin({
     } finally {
       if (isCurrentLoad()) setLoading(false);
     }
-  }, [fetchFullHistory]);
+  }, []);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -458,9 +365,7 @@ export function DataFoundationAdmin({
     return () => {
       window.cancelAnimationFrame(frame);
       metadataAbortController.current?.abort();
-      selectedHistoryAbortController.current?.abort();
       metadataLoadGeneration.current += 1;
-      selectedHistoryRequestGeneration.current += 1;
     };
   }, [loadMetadata]);
 
@@ -486,8 +391,6 @@ export function DataFoundationAdmin({
       try {
         let status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
         if (cancelled) return;
-        selectedSourceRef.current = status.sourceId;
-        setSelectedSource(status.sourceId);
         setLargeImportProgress(status);
         if (["RECEIVED", "PARSING"].includes(status.state)) {
           try {
@@ -517,10 +420,10 @@ export function DataFoundationAdmin({
           }
         }
         if (cancelled) return;
-        selectedSourceRef.current = status.sourceId;
-        setSelectedSource(status.sourceId);
         if (["VALIDATED", "INVALID"].includes(status.state) || (status.state === "FAILED" && status.canPublish)) {
           setPreview(status as unknown as Preview);
+          setFile(null);
+          setPreviewModalOpen(true);
           setPreviewSource(status.sourceId);
           setAcknowledgeUnmapped(false);
         }
@@ -543,33 +446,6 @@ export function DataFoundationAdmin({
     return () => { cancelled = true; };
   }, [loadMetadata, t]);
 
-  const selectSource = useCallback((sourceId: string) => {
-    if (sourceId === selectedSourceRef.current || loading) return;
-    const previousSourceId = selectedSourceRef.current;
-    selectedSourceRef.current = sourceId;
-    selectedHistoryAbortController.current?.abort();
-    selectedHistoryRequestGeneration.current += 1;
-    setPublicationHistoryLoading((current) => ({
-      ...current,
-      ...(previousSourceId ? { [previousSourceId]: false } : {}),
-      [sourceId]: true,
-    }));
-    setSelectedSource(sourceId);
-    setPreview(null);
-    setLargeImportProgress(null);
-    setCandidates([]);
-    setMappingReviewDirty(false);
-    setFile(null);
-    setConfirmNoMovementExport(false);
-    setNoMovementExportDate("");
-    setNoMovementExportTime("");
-    void ensureSourceHistory(sourceId);
-  }, [ensureSourceHistory, loading]);
-
-  const contract = contracts[selectedSource];
-  const sourcePublications = publications[selectedSource] ?? [];
-  const latestPublication = sourcePublications[0];
-  const sourceHistoryLoading = publicationHistoryLoading[selectedSource] ?? false;
   const importActionsEnabled = canImport && error !== "data_foundation_v2_disabled";
   const visibleCandidates = useMemo(() => {
     const query = normalize(candidateQuery.trim());
@@ -578,21 +454,11 @@ export function DataFoundationAdmin({
       .slice(0, 50);
   }, [candidateQuery, candidates]);
 
-  async function waitForT4T5Job(jobId: string): Promise<T4T5ImportStatus> {
-    const deadline = Date.now() + 30 * 60 * 1000;
-    while (Date.now() < deadline) {
-      const status = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(jobId)}`);
-      setLargeImportProgress(status);
-      if (["VALIDATED", "INVALID", "PUBLISHED", "REUSED"].includes(status.state)) return status;
-      if (status.state === "FAILED") throw new Error(status.errorCode || "import_processing_failed");
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
-    }
-    throw new Error("import_processing_timeout");
-  }
-
-  async function makePreview(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!file || !selectedSource) return;
+  async function makePreview(sourceId: string, selectedFile: File | null, useManualExportMetadata = false) {
+    if (!selectedFile || !sourceId || previewInFlight.current) return;
+    previewInFlight.current = true;
+    const requestGeneration = ++previewGeneration.current;
+    const isCurrentPreview = () => previewGeneration.current === requestGeneration;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -600,64 +466,49 @@ export function DataFoundationAdmin({
     setCandidates([]);
     setMappingReviewDirty(false);
     setAcknowledgeUnmapped(false);
-    if (selectedSource === "no_movement" && confirmNoMovementExport && (!noMovementExportDate || !noMovementExportTime)) {
+    setPreview(null);
+    setPreviewSource(sourceId);
+    setPreviewModalOpen(true);
+    if (sourceId === "no_movement" && useManualExportMetadata && (!noMovementExportDate || !noMovementExportTime)) {
       setError("Preencha a data e o horário local da exportação antes de confirmar.");
       setBusy(false);
+      previewInFlight.current = false;
       return;
     }
     try {
       const body = new FormData();
-      body.append("source_id", selectedSource);
-      body.append("file", file, file.name);
-      if (selectedSource === "no_movement" && confirmNoMovementExport) {
+      body.append("source_id", sourceId);
+      body.append("file", selectedFile, selectedFile.name);
+      if (sourceId === "no_movement" && useManualExportMetadata) {
         body.append("confirmed_export_date", noMovementExportDate);
         body.append("confirmed_export_time", noMovementExportTime);
       }
       let result: Preview;
-      if (selectedSource === "collection_monitoring_t4_t5") {
+      if (sourceId === "collection_monitoring_t4_t5") {
         const accepted = await requestJson<T4T5ImportStatus>("/api/v2/imports/preview", { method: "POST", body });
+        if (!isCurrentPreview()) return;
         window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({ jobId: accepted.jobId }));
         setLargeImportProgress(accepted);
-        result = await waitForT4T5Job(accepted.jobId) as unknown as Preview;
+        result = await waitForT4T5ImportJob(accepted.jobId, setLargeImportProgress) as unknown as Preview;
       } else {
         result = await requestJson<Preview>("/api/v2/imports/preview", { method: "POST", body });
       }
+      if (!isCurrentPreview()) return;
       setPreview(result);
-      setPreviewSource(selectedSource);
-      if (NAME_MAPPED_SOURCES.has(selectedSource)) {
+      if (NAME_MAPPED_SOURCES.has(sourceId)) {
         const candidatesResult = await requestJson<{ candidates: NameCandidate[] }>(
           `/api/v2/base-mapping/name-candidates/${encodeURIComponent(result.jobId)}`,
         );
+        if (!isCurrentPreview()) return;
         setCandidates(candidatesResult.candidates);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "data_foundation_preview_failed");
+      if (isCurrentPreview()) setError(caught instanceof Error ? caught.message : "data_foundation_preview_failed");
     } finally {
-      setBusy(false);
+      if (isCurrentPreview()) setBusy(false);
     }
   }
 
-  async function makeMappingPreview(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!mappingFile) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    setCandidates([]);
-    setMappingReviewDirty(false);
-    setAcknowledgeUnmapped(false);
-    try {
-      const body = new FormData();
-      body.append("file", mappingFile, mappingFile.name);
-      const result = await requestJson<Preview>("/api/v2/base-mapping/initial-migration/preview", { method: "POST", body });
-      setPreview(result);
-      setPreviewSource(INITIAL_MAPPING_SOURCE);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "base_mapping_preview_failed");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function saveDecision(candidate: NameCandidate, state: "LINKED" | "AMBIGUOUS" | "REJECTED", targetBaseCode?: string) {
     if (!preview || !reviewNote.trim()) {
@@ -706,7 +557,7 @@ export function DataFoundationAdmin({
         const queued = await requestJson<T4T5ImportStatus>(`/api/v2/imports/${encodeURIComponent(preview.jobId)}/validate`, { method: "POST" });
         window.sessionStorage.setItem(T4T5_SESSION_JOB_KEY, JSON.stringify({ jobId: preview.jobId }));
         setLargeImportProgress(queued);
-        result = await waitForT4T5Job(preview.jobId) as unknown as Preview;
+        result = await waitForT4T5ImportJob(preview.jobId, setLargeImportProgress) as unknown as Preview;
       } else {
         result = await requestJson<Preview>(`/api/v2/imports/${encodeURIComponent(preview.jobId)}/validate`, { method: "POST" });
       }
@@ -728,13 +579,9 @@ export function DataFoundationAdmin({
   }
 
   async function publish() {
-    if (!preview || !preview.canPublish || mappingReviewDirty) return;
+    if (publishInFlight.current || !preview || !preview.canPublish || mappingReviewDirty) return;
     if (preview.unmappedRowCount > 0 && !acknowledgeUnmapped) return;
-    const mappingPublish = previewSource === INITIAL_MAPPING_SOURCE;
-    const prompt = mappingPublish
-      ? "Publicar o de-para oficial como versão inicial? Esta ação altera o ponteiro vigente no banco configurado."
-      : `Publicar ${formatCount(preview.validRowCount)} registros em ${sources.find((source) => source.source_id === previewSource)?.display_name ?? previewSource}?`;
-    if (!window.confirm(prompt)) return;
+    publishInFlight.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -747,18 +594,14 @@ export function DataFoundationAdmin({
         }));
       }
       const headers = {
-        "Idempotency-Key": mappingPublish
-          ? `base-mapping-initial:${preview.jobId}`
-          : t4t5IdempotencyKey ?? crypto.randomUUID(),
+        "Idempotency-Key": t4t5IdempotencyKey ?? crypto.randomUUID(),
       };
-      const path = mappingPublish
-        ? `/api/v2/base-mapping/initial-migration/${encodeURIComponent(preview.jobId)}/publish`
-        : `/api/v2/imports/${encodeURIComponent(preview.jobId)}/publish`;
+      const path = `/api/v2/imports/${encodeURIComponent(preview.jobId)}/publish`;
       let result: { version: number; mappingRowCount?: number; reused?: boolean };
       if (preview.sourceId === "collection_monitoring_t4_t5") {
         const queued = await requestJson<T4T5ImportStatus>(path, { method: "POST", headers });
         setLargeImportProgress(queued);
-        const completed = await waitForT4T5Job(preview.jobId);
+        const completed = await waitForT4T5ImportJob(preview.jobId, setLargeImportProgress);
         if (!["PUBLISHED", "REUSED"].includes(completed.state) || typeof completed.version !== "number") {
           throw new Error("import_publication_failed");
         }
@@ -766,32 +609,29 @@ export function DataFoundationAdmin({
       } else {
         result = await requestJson<{ version: number; mappingRowCount?: number; reused?: boolean }>(path, { method: "POST", headers });
       }
-      invalidateDashboardDataCache(mappingPublish ? undefined : preview.sourceId);
-      const successNotice = mappingPublish
-        ? t("De-para publicado como versão {version} com {count} bases.", {
-            version: result.version,
-            count: formatCount(result.mappingRowCount ?? 0),
-          })
-        : t("Publicação {state} na versão {version}.", {
-            state: result.reused ? t("reutilizada") : t("concluída"),
-            version: result.version,
-          });
+      invalidateDashboardDataCache(preview.sourceId);
+      const successNotice = t("Publicação {state} na versão {version}.", {
+        state: result.reused ? t("reutilizada") : t("concluída"),
+        version: result.version,
+      });
       setPreview(null);
+      setPreviewModalOpen(false);
+      previewGeneration.current += 1;
       setLargeImportProgress(null);
       if (preview.sourceId === "collection_monitoring_t4_t5") window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
       setFile(null);
-      setMappingFile(null);
+      setOperationStartedAt(null);
       setMappingReviewDirty(false);
       await loadMetadata();
       setNotice(successNotice);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "data_foundation_publish_failed");
     } finally {
+      publishInFlight.current = false;
       setBusy(false);
     }
   }
 
-  const isMappingPreview = previewSource === INITIAL_MAPPING_SOURCE;
   const canPublish = Boolean(
     importActionsEnabled
     && preview?.canPublish
@@ -803,150 +643,84 @@ export function DataFoundationAdmin({
   return (
     <section className="data-foundation-admin" aria-labelledby="data-foundation-title">
       <div className="data-foundation-heading">
-        <div>
-          <span className="card-eyebrow"><Database size={15} /> DATA FOUNDATION V2</span>
-          <h1 id="data-foundation-title">{t("Central de Dados")}</h1>
-          <p>{t("Contratos, arquivos oficiais, validação e histórico de publicação.")}</p>
-        </div>
-        <button type="button" className="data-foundation-refresh" onClick={() => void loadMetadata()} disabled={loading || busy}>
-          <RefreshCw size={16} /> {t("Atualizar")}
-        </button>
+        <div><span className="card-eyebrow"><Database size={15} /> DATA FOUNDATION</span><h1 id="data-foundation-title">{t("Central de Dados")}</h1><p>{t("Atualize os arquivos dos painéis com validação antes da publicação.")}</p></div>
+        <button type="button" className="data-foundation-refresh" onClick={() => void loadMetadata()} disabled={loading || busy}><RefreshCw size={16} /> {t("Atualizar")}</button>
       </div>
 
-      {mapping ? (
-        <div className={`data-foundation-map-status ${mapping.state === "PUBLISHED" ? "is-ready" : "is-pending"}`}>
-          <Database size={17} />
-          <span><strong>{t("De-para vigente")}</strong> · {mapping.state === "PUBLISHED" ? t("Versão {version}", { version: mapping.version ?? "—" }) : t("Ainda não publicado")}</span>
-          <span>{t("{count} bases visíveis", { count: formatCount(mapping.visibleBaseCount) })}</span>
-          {mapping.publishedAt ? <small>{formatDateTime(mapping.publishedAt)}</small> : null}
-        </div>
-      ) : mappingError ? (
-        <div className="data-foundation-alert is-error" role="alert">
-          <AlertTriangle size={18} />
-          <span>{t("Não foi possível verificar o de-para vigente.")} {displayApiError(mappingError, t)}</span>
-        </div>
-      ) : mappingLoading ? <p className="data-foundation-loading">{t("Verificando de-para vigente…")}</p> : null}
-
-      {error ? (
-        <div className={`data-foundation-alert ${error === "data_foundation_v2_disabled" ? "is-disabled" : "is-error"}`} role="alert">
-          {error === "data_foundation_v2_disabled" ? <Clock3 size={18} /> : <AlertTriangle size={18} />}
-          <div>
-            <strong>{error === "data_foundation_v2_disabled" ? t("Data Foundation V2 desativada neste ambiente") : displayApiError(error, t)}</strong>
-            {error === "data_foundation_v2_disabled" ? <p>{t("Configure DATA_QUERIES_ENABLED=true e DATA_IMPORT_ENABLED=true com as credenciais dedicadas DATA_DB_* e o diretório DATA_IMPORT_STAGING_DIRECTORY para habilitar a Central localmente.")}</p> : null}
-          </div>
-        </div>
-      ) : null}
+      {error ? <div className={`data-foundation-alert ${error === "data_foundation_v2_disabled" ? "is-disabled" : "is-error"}`} role="alert"><AlertTriangle size={18} /><div><strong>{error === "data_foundation_v2_disabled" ? t("Data Foundation V2 desativada neste ambiente") : displayApiError(error, t)}</strong>{error === "data_foundation_v2_disabled" ? <p>{t("Configure DATA_QUERIES_ENABLED=true e DATA_IMPORT_ENABLED=true com as credenciais dedicadas DATA_DB_* e o diretório DATA_IMPORT_STAGING_DIRECTORY para habilitar a Central localmente.")}</p> : null}</div></div> : null}
       {!canImport && !error?.includes("disabled") ? <div className="data-foundation-alert is-disabled"><AlertTriangle size={18} /><p>{t("Seu perfil pode consultar apenas dados do próprio escopo. A administração e publicação exigem perfil ADMIN; isso não amplia o escopo dos dashboards.")}</p></div> : null}
       {notice ? <div className="data-foundation-notice" role="status"><Check size={17} /> {t(notice)}</div> : null}
+      {loading ? <p className="data-foundation-loading">{t("Carregando fontes…")}</p> : null}
+      {!loading && sources.length ? <div className="data-foundation-source-cards" aria-label={t("Fontes de dados")}>
+        {sources.filter((source) => source.source_id !== "base_mapping_official").map((source) => {
+          const publication = publications[source.source_id]?.[0];
+          const sourceContract = contracts[source.source_id];
+          return <article className="data-foundation-source-card" key={source.source_id}>
+            <div className="data-foundation-source-card-icon"><FileSpreadsheet size={21} /></div>
+            <div className="data-foundation-source-card-copy"><h2>{t(displayPanelName(source.display_name))}</h2>
+              <p><span>{t("Arquivo atual")}</span><strong title={publication?.fileName ?? undefined}>{publication?.fileName || "—"}</strong></p>
+              <p><span>{t("Adicionado em")}</span><strong>{formatDataFoundationDateTime(publication?.attachedAt)}</strong></p>
+              {publicationErrors[source.source_id] ? <small role="alert">{t("Metadados do arquivo indisponíveis.")}</small> : null}
+              {!publication && !publicationErrors[source.source_id] ? <small>{publications[source.source_id] ? t("Ainda não há arquivo publicado.") : t("Carregando arquivo atual…")}</small> : null}
+              {contractErrors[source.source_id] ? <small role="alert">{t("Não foi possível verificar os requisitos deste painel.")}</small> : null}
+            </div>
+            <label className="data-foundation-update-button"><Upload size={16} /> {t("Atualizar arquivo")}
+              <input aria-label={t("Selecionar arquivo para {panel}", { panel: t(source.display_name) })} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={!importActionsEnabled || !sourceContract || busy} onChange={(event) => {
+                const selectedFile = event.target.files?.[0] ?? null;
+                event.currentTarget.value = "";
+                if (!selectedFile) return;
+                setFile(selectedFile);
+                setOperationStartedAt(new Date().toISOString());
+                setPreview(null);
+                setError(null);
+                setLargeImportProgress(null);
+                window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY);
+                setMappingReviewDirty(false);
+                setConfirmNoMovementExport(false);
+                setNoMovementExportDate("");
+                setNoMovementExportTime("");
+                setPreviewModalOpen(true);
+                void makePreview(source.source_id, selectedFile);
+              }} />
+            </label>
+            {!sourceContract && !contractErrors[source.source_id] ? <small className="data-foundation-source-card-wait">{t("Preparando atualização…")}</small> : null}
+          </article>;
+        })}
+      </div> : null}
 
-      {loading ? <p className="data-foundation-loading">{t("Carregando fontes e histórico…")}</p> : null}
-      {!loading && sources.length ? (
-        <div className="data-foundation-layout">
-          <nav className="data-foundation-source-list" aria-label={t("Fontes de dados")}>
-            {sources.map((source) => {
-              const sourceContract = contracts[source.source_id];
-              const last = publications[source.source_id]?.[0];
-              return (
-                <button
-                  type="button"
-                  key={source.source_id}
-                  className={`data-foundation-source${selectedSource === source.source_id ? " is-selected" : ""}`}
-                  onClick={() => selectSource(source.source_id)}
-                  disabled={loading}
-                >
-                  <FileSpreadsheet size={18} />
-                  <span><strong>{t(source.display_name)}</strong><small>{sourceContract ? `${sourceContract.columns.length} ${t("colunas")} · v${sourceContract.version}` : contractErrors[source.source_id] ? t("Contrato indisponível") : t("Carregando contrato…")}</small></span>
-                  <small>{publicationHistoryLoading[source.source_id] ? t("Carregando…") : last ? `v${last.version}` : publicationErrors[source.source_id] ? t("Histórico indisponível") : publications[source.source_id] ? t("Sem publicação") : t("Carregando…")}</small>
-                </button>
-              );
-            })}
-          </nav>
-
-          <div className="data-foundation-content">
-            {contract ? (
-              <>
-                <section className="data-foundation-card">
-                  <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("CONTRATO OFICIAL")}</span><h2>{t(sources.find((source) => source.source_id === selectedSource)?.display_name ?? selectedSource)}</h2></div><span className="data-foundation-state">{t(contract.state)}</span></div>
-                  <div className="data-foundation-facts">
-                    <span>{t("Aba")}: <strong>{contract.sheet}</strong></span>
-                    <span>{t("Linha do cabeçalho")}: <strong>{contract.headerRow}</strong></span>
-                    <span>{t("Colunas")}: <strong>{contract.columns.length}</strong></span>
-                    <span>{t("Histórico")}: <strong>{t(contract.historyPolicy)}</strong></span>
-                  </div>
-                  <p className="data-foundation-grain">{t(contract.grain)}</p>
-                  <details className="data-foundation-details"><summary>{t("Ver as {count} colunas", { count: contract.columns.length })}</summary><div className="data-foundation-column-grid">{contract.columns.map((column) => <span key={column.key}><strong>{column.header}</strong><small>{column.type}{column.nullable ? ` · ${t("opcional")}` : ` · ${t("obrigatório")}`}</small></span>)}</div></details>
-                </section>
-
-                <section className="data-foundation-card">
-                  <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PUBLICAÇÕES")}</span><h2>{t("Última publicação e histórico")}</h2></div>{sourceHistoryLoading ? <span className="data-foundation-state">{t("Carregando…")}</span> : latestPublication ? <span className="data-foundation-state is-ready">{t("Versão {version}", { version: latestPublication.version })}</span> : <span className="data-foundation-state">{t("Sem publicação")}</span>}</div>
-                  {!sourceHistoryLoading && latestPublication ? <p className="data-foundation-latest"><Clock3 size={15} /> {formatDateTime(latestPublication.publishedAt)} · {formatCount(latestPublication.visibleRowCount)} {t("registros visíveis")}{latestPublication.periodStart ? ` · ${latestPublication.periodStart} – ${latestPublication.periodEnd}` : ""}</p> : null}
-                  {sourceHistoryLoading ? <p className="data-foundation-loading">{t("Carregando histórico…")}</p> : publicationErrors[selectedSource] ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o histórico desta fonte.")} {displayApiError(publicationErrors[selectedSource], t)}</span></div> : sourcePublications.length ? <div className="data-foundation-history">{sourcePublications.map((publication) => <div key={publication.publicationId}><span>{t("Versão {version}", { version: publication.version })}</span><span>{formatDateTime(publication.publishedAt)}</span><strong>{formatCount(publication.visibleRowCount)} {t("registros")}</strong><small>{publication.periodStart ? `${publication.periodStart} – ${publication.periodEnd}` : t("Snapshot")}</small></div>)}</div> : publications[selectedSource] ? <p className="data-foundation-empty">{t("Ainda não há publicações visíveis para este escopo.")}</p> : <p className="data-foundation-loading">{t("Carregando histórico…")}</p>}
-                </section>
-
-                <section className="data-foundation-card">
-                  <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("NOVA CARGA")}</span><h2>{t("Validar arquivo Excel")}</h2></div></div>
-                  <form className="data-foundation-upload-form" onSubmit={(event) => void makePreview(event)}>
-                    <label>{t("Arquivo oficial .xlsx")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); setLargeImportProgress(null); window.sessionStorage.removeItem(T4T5_SESSION_JOB_KEY); setMappingReviewDirty(false); }} disabled={!importActionsEnabled || !contract || busy} /></label>
-                    <button type="submit" disabled={!importActionsEnabled || !contract || !file || busy}><Upload size={16} />{t("Gerar prévia")}</button>
-                  </form>
-                  {selectedSource === "no_movement" ? <div className="no-movement-export-confirmation">
-                    <label className="no-movement-export-confirmation-check"><input type="checkbox" checked={confirmNoMovementExport} onChange={(event) => setConfirmNoMovementExport(event.target.checked)} disabled={busy} />{t("Confirmo manualmente a data e hora da exportação se o arquivo não trouxer metadados confiáveis.")}</label>
-                    <p>{t("Se a aba Execucoes tiver uma execução válida, os metadados do Bot serão priorizados e esta confirmação não os substitui.")}</p>
-                    <div className="no-movement-export-confirmation-fields">
-                      <label>{t("Data da exportação")}<input type="date" value={noMovementExportDate} onChange={(event) => setNoMovementExportDate(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label>
-                      <label>{t("Horário local da exportação")}<input type="time" value={noMovementExportTime} onChange={(event) => setNoMovementExportTime(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label>
-                    </div>
-                  </div> : null}
-                  {largeImportProgress?.sourceId === selectedSource && ["RECEIVED", "PARSING"].includes(largeImportProgress.state) ? (
-                    <div className="data-foundation-alert is-disabled" role="status" aria-live="polite">
-                      <Clock3 size={17} />
-                      <div>
-                        {(() => {
-                          const progress = buildT4T5ImportProgressView(largeImportProgress);
-                          return (
-                            <>
-                              <strong>{t(progress.phaseLabel === "Publicação" ? "Publicando arquivo T4/T5 em lotes…" : progress.phaseLabel === "Validação do arquivo" ? "Validando arquivo T4/T5 em segundo plano…" : "Etapa da importação indisponível")}</strong>
-                              <p>{t("Etapa atual")}: {t(progress.phaseLabel)}</p>
-                              <p>{t("Linhas analisadas")}: {formatCount(progress.analyzedRowCount)}{progress.totalExpectedRowCount === null ? "" : ` / ${formatCount(progress.totalExpectedRowCount)}`}</p>
-                              {progress.writtenRowCount === null ? null : <p>{t("Linhas gravadas")}: {formatCount(progress.writtenRowCount)}</p>}
-                              {progress.committedRowCount === null ? null : <p>{t("Linhas confirmadas no banco")}: {formatCount(progress.committedRowCount)}</p>}
-                              <progress aria-label={t("Progresso da importação")} max={100} value={progress.progressPercent ?? undefined}></progress>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
-
-                {preview && !isMappingPreview ? <PreviewPanel preview={preview} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state, targetCode) => void saveDecision(candidate, state, targetCode)} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
-              </>
-            ) : contractErrors[selectedSource] ? (
-              <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} /><span>{t("Não foi possível carregar o contrato desta fonte.")} {displayApiError(contractErrors[selectedSource], t)}</span></div>
-            ) : <p className="data-foundation-loading">{t("Carregando contrato…")}</p>}
-          </div>
+      {mapping ? <article className="data-foundation-source-card data-foundation-map-card">
+        <div className="data-foundation-source-card-icon"><Database size={21} /></div>
+        <div className="data-foundation-source-card-copy"><h2>{t("Depara")}</h2>
+          <p><span>{t("Arquivo atual")}</span><strong title={mapping.fileName ?? undefined}>{mapping.fileName || "—"}</strong></p>
+          <p><span>{t("Adicionado em")}</span><strong>{formatDataFoundationDateTime(mapping.attachedAt)}</strong></p>
         </div>
-      ) : null}
+        <button type="button" className="data-foundation-update-button" disabled={!importActionsEnabled} onClick={() => setMappingCandidateOpen(true)}>{t("Atualizar arquivo")}</button>
+      </article> : mappingError ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={18} /><span>{t("Não foi possível verificar o de-para vigente.")} {displayApiError(mappingError, t)}</span></div> : mappingLoading ? <p className="data-foundation-loading">{t("Carregando Depara…")}</p> : null}
 
-      {canImport ? <NetworkDirectoryCandidate enabled={importActionsEnabled} t={t} /> : null}
-
-      {canImport ? (
-        <section className="data-foundation-card data-foundation-initial-map">
-          <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("MIGRAÇÃO INICIAL")}</span><h2>{t("De-para oficial DoomsDay")}</h2><p>{t("A migração preserva o arquivo original como versão 1 e só atualiza o ponteiro após validação e confirmação.")}</p></div><span className={`data-foundation-state ${mapping?.state === "PUBLISHED" ? "is-ready" : ""}`}>{mapping ? mapping.state === "PUBLISHED" ? t("Publicado") : t("Pendente") : mappingError ? t("Estado indisponível") : t("Verificando…")}</span></div>
-          <form className="data-foundation-upload-form" onSubmit={(event) => void makeMappingPreview(event)}>
-            <label>{t("De_para DoomsDay.xlsx · aba Ativas")}<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setMappingFile(event.target.files?.[0] ?? null); setPreview(null); }} disabled={!importActionsEnabled || !mapping || Boolean(mappingError) || busy || mapping.state === "PUBLISHED"} /></label>
-            <button type="submit" disabled={!importActionsEnabled || !mapping || Boolean(mappingError) || !mappingFile || busy || mapping.state === "PUBLISHED"}><Upload size={16} />{t("Validar de-para")}</button>
-          </form>
+      {previewModalOpen ? <div className="data-foundation-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) { previewGeneration.current += 1; setPreviewModalOpen(false); setPreview(null); setError(null); } }}>
+        <section className="data-foundation-confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="data-foundation-confirm-title">
+          <header><div><span className="card-eyebrow">{t("ATUALIZAÇÃO DO PAINEL")}</span><h2 id="data-foundation-confirm-title">{t("Confirmar atualização")}</h2><p>{t(sources.find((source) => source.source_id === previewSource)?.display_name ?? previewSource)}</p></div><button type="button" aria-label={t("Fechar")} onClick={() => { previewGeneration.current += 1; setPreviewModalOpen(false); setPreview(null); setError(null); }} disabled={busy}>×</button></header>
+          <div className="data-foundation-confirm-file"><FileSpreadsheet size={18} /><div><span>{t("Novo arquivo")}</span><strong>{file?.name ?? "—"}</strong></div><small>{t("Operação")} · {formatDataFoundationDateTime(operationStartedAt)}</small></div>
+          {previewSource === "no_movement" ? <div className="no-movement-export-confirmation"><label className="no-movement-export-confirmation-check"><input type="checkbox" checked={confirmNoMovementExport} onChange={(event) => setConfirmNoMovementExport(event.target.checked)} disabled={busy} />{t("Confirmo manualmente a data e hora da exportação se o arquivo não trouxer metadados confiáveis.")}</label><p>{t("Se a aba Execucoes tiver uma execução válida, os metadados do Bot serão priorizados e esta confirmação não os substitui.")}</p><div className="no-movement-export-confirmation-fields"><label>{t("Data da exportação")}<input type="date" value={noMovementExportDate} onChange={(event) => setNoMovementExportDate(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label><label>{t("Horário local da exportação")}<input type="time" value={noMovementExportTime} onChange={(event) => setNoMovementExportTime(event.target.value)} disabled={!confirmNoMovementExport || busy} /></label></div>{confirmNoMovementExport && noMovementExportDate && noMovementExportTime && !busy ? <button type="button" className="data-foundation-retry-validation" onClick={() => void makePreview(previewSource, file, true)}>{t("Validar com data e hora informadas")}</button> : null}</div> : null}
+          {largeImportProgress?.sourceId === previewSource && ["RECEIVED", "PARSING"].includes(largeImportProgress.state) ? <div className="data-foundation-alert is-disabled" role="status" aria-live="polite">{t("Processando arquivo em segundo plano…")}{largeImportProgress.committedRowCount !== undefined ? <p>{t("Linhas confirmadas no banco")}: {formatCount(largeImportProgress.committedRowCount)}</p> : null}</div> : null}
+          {busy && !preview ? <p className="data-foundation-loading" role="status">{t("Validando arquivo…")}</p> : null}
+          {preview ? <PreviewPanel preview={preview} fileName={file?.name ?? null} candidates={candidates} candidateQuery={candidateQuery} reviewNote={reviewNote} visibleCandidates={visibleCandidates} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={mappingReviewDirty} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={setCandidateQuery} onReviewNote={setReviewNote} onAcknowledge={setAcknowledgeUnmapped} onDecision={(candidate, state, targetCode) => void saveDecision(candidate, state, targetCode)} onRevalidate={() => { if (preview.sourceId === "no_movement" && confirmNoMovementExport) void makePreview(preview.sourceId, file, true); else void revalidate(); }} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
+          {!busy && !preview && error ? <div className="data-foundation-alert is-error" role="alert"><AlertTriangle size={17} />{displayApiError(error, t)}</div> : null}
         </section>
-      ) : null}
-
-      {preview && isMappingPreview ? <PreviewPanel preview={preview} candidates={[]} candidateQuery="" reviewNote="" visibleCandidates={[]} canImport={importActionsEnabled} busy={busy} mappingReviewDirty={false} acknowledgeUnmapped={acknowledgeUnmapped} onCandidateQuery={() => undefined} onReviewNote={() => undefined} onAcknowledge={setAcknowledgeUnmapped} onDecision={() => undefined} onRevalidate={() => void revalidate()} onPublish={() => void publish()} canPublish={canPublish} t={t} /> : null}
+      </div> : null}
+      {mappingCandidateOpen ? <NetworkDirectoryCandidate
+        enabled={importActionsEnabled}
+        t={t}
+        onClose={() => setMappingCandidateOpen(false)}
+        onPublished={() => { void loadMetadata(); }}
+      /> : null}
     </section>
   );
 }
 
 function PreviewPanel({
   preview,
+  fileName,
   candidates,
   candidateQuery,
   reviewNote,
@@ -965,6 +739,7 @@ function PreviewPanel({
   t,
 }: {
   preview: Preview;
+  fileName: string | null;
   candidates: NameCandidate[];
   candidateQuery: string;
   reviewNote: string;
@@ -989,7 +764,7 @@ function PreviewPanel({
     : preview.validRowCount ? Math.round(preview.mappedRowCount / preview.validRowCount * 100) : 0;
   return (
     <section className="data-foundation-card data-foundation-preview" aria-labelledby="data-foundation-preview-title">
-      <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PRÉVIA")}</span><h2 id="data-foundation-preview-title">{t("Resultado da validação")}</h2><p>{t("Arquivo")}: {preview.fileSha256.slice(0, 16)}…</p></div><span className={`data-foundation-state ${preview.canPublish ? "is-ready" : "is-error"}`}>{preview.canPublish ? t("Válido para publicação") : t("Corrija os erros")}</span></div>
+      <div className="data-foundation-card-heading"><div><span className="card-eyebrow">{t("PRÉVIA")}</span><h2 id="data-foundation-preview-title">{t("Resultado da validação")}</h2><p>{t("Arquivo")}: {fileName || "—"}</p></div><span className={`data-foundation-state ${preview.canPublish ? "is-ready" : "is-error"}`}>{preview.canPublish ? t("Válido para publicação") : t("Corrija os erros")}</span></div>
       <div className="data-foundation-metrics">
         <Metric label={t("Linhas recebidas")} value={preview.inputRowCount} />
         <Metric label={isBaseMapping ? t("Linhas válidas") : t("Válidas")} value={preview.validRowCount} />

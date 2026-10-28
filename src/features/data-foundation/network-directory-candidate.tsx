@@ -8,7 +8,10 @@ interface Preview {
   fileSha256: string; reviewSha256?: string; previousMapVersionId?: string | null;
   counts: { units: number; operationalBases: number; types: Record<string, number> };
   errors: unknown[];
-  audit?: { newUnits: unknown[]; missingUnits: unknown[]; manualDecisionReview: unknown[] };
+  audit?: {
+    previousCount?: number; newUnits: unknown[]; missingUnits: unknown[];
+    changes?: Record<string, Array<{ base_code?: string }>>; manualDecisionReview: unknown[];
+  };
 }
 interface ActivationStatus {
   officialVersion: number;
@@ -19,13 +22,18 @@ interface ActivationStatus {
     reviewSha256: string | null; ambiguousNameGroups: number;
     manualDecisionCount: number; pendingManualDecisionCount: number;
     manualDecisionsToCarry: number;
+    changeSummary: { previousCount: number | null; newCount: number; addedCount: number; removedCount: number; changedCount: number };
   };
   canPublish: boolean;
   canRollback: boolean;
+  rollbackMapVersionId?: string | null;
+  rollbackTargetVersion?: number | null;
   alreadyPublished: boolean;
   blockers: string[];
 }
-export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t: (text: string) => string }) {
+export function NetworkDirectoryCandidate({ enabled, t, onClose, onPublished }: {
+  enabled: boolean; t: (text: string) => string; onClose: () => void; onPublished: () => void;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [prepared, setPrepared] = useState<string | null>(null);
@@ -60,14 +68,14 @@ export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t:
     if (enabled) void Promise.resolve().then(() => active ? refreshActivationStatus() : undefined);
     return () => { active = false; request.current?.abort(); activationRequest.current?.abort(); actionRequest.current?.abort(); };
   }, [enabled, refreshActivationStatus]);
-  async function run(prepare: boolean) {
-    if (!enabled || !file) return;
+  async function run(prepare: boolean, uploadFile: File | null = file) {
+    if (!enabled || !uploadFile) return;
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     setBusy(true); setError(null);
     const form = new FormData();
-    form.append("file", file);
+    form.append("file", uploadFile);
     const headers = new Headers();
     if (prepare && preview?.reviewSha256 && preview.previousMapVersionId) {
       form.append("expected_map_version_id", preview.previousMapVersionId);
@@ -93,21 +101,32 @@ export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t:
   }
   async function changeOfficialMap(action: "publish" | "rollback") {
     const candidate = activation?.candidate;
-    if (!enabled || !candidate || activationBusy) return;
-    const message = action === "publish"
-      ? "Confirma publicar a versão DoomsDay V2 como oficial? A ação aprovará o contrato V2 se necessário, atualizará o ponteiro oficial e invalidará os caches organizacionais."
-      : "Confirma retornar o ponteiro DoomsDay oficial para a versão V1? A versão V2 será preservada no histórico. Os caches organizacionais serão invalidados.";
-    if (!window.confirm(message)) return;
+    const mapVersionId = action === "publish" ? candidate?.mapVersionId : activation?.rollbackMapVersionId;
+    if (!enabled || !mapVersionId || activationBusy || (action === "publish" && !candidate)) return;
+    const confirmation = action === "publish"
+      ? "Confirma publicar a revisão preparada como Depara oficial? O contrato atual será mantido e o mapa vigente ficará preservado para rollback."
+      : "Confirma retornar o Depara oficial à revisão anterior? As revisões e os dados históricos serão preservados.";
+    const changes = candidate?.changeSummary;
+    const changeDetails = action === "publish" && changes
+      ? "\n\n" + t("Mapa atual") + ": " + (changes.previousCount ?? "—") + " · " + t("Novo arquivo") + ": " + changes.newCount
+        + "\n" + t("Adicionados") + ": " + changes.addedCount + " · " + t("Removidos") + ": " + changes.removedCount
+        + " · " + t("Registros alterados") + ": " + changes.changedCount
+      : "";
+    const changeWarning = action === "publish" && changes
+      && (changes.addedCount + changes.removedCount + changes.changedCount > 0)
+      ? "\n\n" + t("Atenção: esta revisão altera o conteúdo do mapa. Confira a auditoria antes de publicar.")
+      : "";
+    if (!window.confirm(t(confirmation) + changeDetails + changeWarning)) return;
     setActivationBusy(true); setActivationError(null);
     const controller = new AbortController();
     actionRequest.current?.abort(); actionRequest.current = controller;
     const idempotencyKey = crypto.randomUUID();
     try {
-      const response = await apiFetch(`/api/v2/base-mapping/network-directory/candidates/${candidate.mapVersionId}/${action}`, {
+      const response = await apiFetch(`/api/v2/base-mapping/network-directory/candidates/${mapVersionId}/${action}`, {
         method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
         body: action === "publish" ? JSON.stringify({
           expectedOfficialMapVersionId: activation?.officialMapVersionId,
-          reviewSha256: candidate.reviewSha256,
+          reviewSha256: candidate?.reviewSha256,
         }) : undefined,
         signal: controller.signal,
       });
@@ -126,16 +145,25 @@ export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t:
         }
       }
       await refreshActivationStatus();
+      if (action === "publish") onPublished();
     } catch (cause) {
       if (!controller.signal.aborted) setActivationError(cause instanceof Error ? cause.message : "Não foi possível alterar o DoomsDay oficial.");
     } finally { if (!controller.signal.aborted) setActivationBusy(false); }
   }
-  return <section className="data-foundation-card">
-    <div className="data-foundation-card-heading"><div><span className="card-eyebrow">DOOMSDAY</span><h2>{t("Nova fonte oficial — Gestão de Rede")}</h2>
-      <p>{t("A preparação não publica o mapa. A ativação oficial exige confirmação explícita de um administrador MATRIZ.")}</p></div></div>
+  return <div className="data-foundation-modal-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target === event.currentTarget && !busy && !activationBusy) onClose();
+  }}>
+  <section className="data-foundation-confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="network-directory-title">
+    <header><div><span className="card-eyebrow">DOOMSDAY</span><h2 id="network-directory-title">{t("Atualizar Depara")}</h2>
+      <p>{t("A prévia compara o arquivo com o mapa vigente; publicar exige confirmação explícita de ADMIN MATRIZ.")}</p></div>
+      <button type="button" aria-label={t("Fechar")} onClick={onClose} disabled={busy || activationBusy}>×</button>
+    </header>
     <label>{t("Lista de contatos da Gestão de Rede (.xlsx)")}
       <input type="file" accept=".xlsx" disabled={!enabled || busy} onChange={event => {
-        request.current?.abort(); setFile(event.target.files?.[0] ?? null); setPreview(null); setPrepared(null); setError(null); key.current = "";
+        const selected = event.target.files?.[0] ?? null;
+        event.currentTarget.value = "";
+        request.current?.abort(); setFile(selected); setPreview(null); setPrepared(null); setError(null); key.current = "";
+        if (selected) void run(false, selected);
       }} />
     </label>
     <button type="button" disabled={!enabled || !file || busy} onClick={() => void run(false)}>{t("Gerar prévia da candidata")}</button>
@@ -143,8 +171,13 @@ export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t:
     {error ? <p role="alert">{t(error)}</p> : null}
     {preview ? <div>
       <p>{t("Unidades")}: {preview.counts.units} · {t("Bases operacionais")}: {preview.counts.operationalBases}</p>
+      <p>{t("Mapa atual")}: {preview.audit?.previousCount ?? "—"} · {t("Novo arquivo")}: {preview.counts.units}</p>
       <p>{Object.entries(preview.counts.types).map(([type, count]) => type + ": " + count).join(" · ")}</p>
-      <p>{t("Novas unidades")}: {preview.audit?.newUnits.length ?? "—"} · {t("Unidades ausentes")}: {preview.audit?.missingUnits.length ?? "—"}</p>
+      <p>{t("Adicionados")}: {preview.audit?.newUnits.length ?? "—"} · {t("Removidos")}: {preview.audit?.missingUnits.length ?? "—"} · {t("Registros alterados")}: {preview.audit?.changes ? new Set(Object.values(preview.audit.changes).flat().map((item) => item.base_code).filter(Boolean)).size : "—"}</p>
+      {preview.errors.length ? <p role="alert">{t("Erros bloqueantes")}: {preview.errors.length}</p> : null}
+      {preview.audit && (preview.audit.newUnits.length + preview.audit.missingUnits.length + Object.values(preview.audit.changes ?? {}).flat().length > 0)
+        ? <p role="alert">{t("Atenção: esta revisão altera o conteúdo do mapa. Confira a auditoria antes de publicar.")}</p>
+        : null}
       <details><summary>{t("Auditoria completa da candidata")}</summary><pre style={{ maxHeight: 360, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(preview, null, 2)}</pre></details>
       <button type="button" disabled={!enabled || busy || preview.errors.length > 0 || !preview.reviewSha256 || !preview.previousMapVersionId || Boolean(prepared)} onClick={() => void run(true)}>{t("Preparar candidata para revisão")}</button>
     </div> : null}
@@ -159,10 +192,12 @@ export function NetworkDirectoryCandidate({ enabled, t }: { enabled: boolean; t:
         {activation.candidate.pendingManualDecisionCount ? <p role="alert">{t("Decisões manuais pendentes")}: {activation.candidate.pendingManualDecisionCount}</p> : null}
         {activation.blockers.length ? <p>{t("A publicação está bloqueada pelas verificações de segurança.")} {activation.blockers.map((blocker) => t(blocker)).join(" · ")}</p> : null}
         {activation.canPublish ? <button type="button" disabled={!enabled || busy || activationBusy} onClick={() => void changeOfficialMap("publish")}>{t("Publicar como DoomsDay oficial")}</button> : null}
-        {activation.canRollback ? <button type="button" disabled={!enabled || busy || activationBusy} onClick={() => void changeOfficialMap("rollback")}>{t("Reverter DoomsDay oficial para V1")}</button> : null}
-        {activation.alreadyPublished ? <p role="status">{t("A versão V2 está ativa como DoomsDay oficial.")}</p> : null}
+        {activation.canRollback ? <button type="button" disabled={!enabled || busy || activationBusy} onClick={() => void changeOfficialMap("rollback")}>{t("Reverter para a revisão anterior")}</button> : null}
+        {activation.alreadyPublished ? <p role="status">{t("Esta revisão está ativa como Depara oficial.")}</p> : null}
         <button type="button" disabled={!enabled || activationBusy} onClick={() => void refreshActivationStatus()}>{t("Atualizar estado do DoomsDay")}</button>
-      </> : <p>{t("Nenhuma candidata V2 preparada foi encontrada.")}</p>}
+      </> : <p>{t("Nenhuma revisão preparada foi encontrada.")}</p>}
     </div>
-  </section>;
+    <footer><button type="button" className="data-foundation-retry-validation" onClick={onClose} disabled={busy || activationBusy}>{t("Cancelar")}</button></footer>
+  </section>
+  </div>;
 }
