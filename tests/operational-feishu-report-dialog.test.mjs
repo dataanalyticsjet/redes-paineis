@@ -35,10 +35,13 @@ test("regional changes require confirmation and discard prior preparation", () =
 });
 
 test("recipient choices come from the fixed server list and real send remains separately gated", () => {
-  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "email"\)/);
+  assert.match(dialog, /recipientOptions\.filter\(item => item\.type === "email"\)/);
   assert.match(dialog, /item\.type === "chat_id" && item\.regionCode === null/);
   assert.match(dialog, /item\.type === "chat_id" && item\.regionCode !== null/);
-  assert.match(dialog, /disabled=\{!item\.available\}/);
+  assert.match(dialog, /disabled: !item\.available/);
+  assert.match(dialog, /DashboardSingleSelect id="operational-feishu-region"/);
+  assert.match(dialog, /DashboardSingleSelect id="operational-feishu-recipient"/);
+  assert.doesNotMatch(dialog, /<select\b/);
   assert.match(dialog, /scopeRegionCode/);
   assert.match(dialog, /prepared\?\.state === "CONFIRMED"/);
   assert.match(dialog, /!scopedOptions\?\.sendEnabled/);

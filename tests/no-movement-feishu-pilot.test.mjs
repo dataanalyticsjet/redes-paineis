@@ -113,10 +113,13 @@ test("recipient selectors use scoped backend allowlists and never embed destinat
   const noMovement = await read("backend/app/services/no_movement_feishu_reports.py");
   const recipients = await read("backend/app/services/feishu_report_recipients.py");
   const config = await read("backend/app/core/config.py");
-  assert.match(dialog, /scopedOptions\?\.recipients\.filter\(item => item\.type === "email"\)/);
+  assert.match(dialog, /recipients\.filter\(item => item\.type === "email"\)/);
+  assert.match(dialog, /DashboardSingleSelect id="nm-feishu-region"/);
+  assert.match(dialog, /DashboardSingleSelect id="nm-feishu-recipient"/);
+  assert.doesNotMatch(dialog, /<select\b/);
   assert.match(dialog, /item\.type === "chat_id" && item\.regionCode === null/);
   assert.match(dialog, /item\.type === "chat_id" && item\.regionCode !== null/);
-  assert.match(dialog, /disabled=\{!item\.available\}/);
+  assert.match(dialog, /disabled: !item\.available/);
   assert.match(dialog, /regionCode=\$\{encodeURIComponent\(region\)\}/);
   assert.match(dialog, /prepared\.recipientType/);
   assert.match(recipients, /"SR_COLLECTION_GROUP"/);

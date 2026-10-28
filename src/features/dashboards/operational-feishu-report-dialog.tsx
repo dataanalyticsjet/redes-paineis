@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bold } from "lucide-react";
+import { DashboardSingleSelect, type DashboardSingleSelectOption } from "./dashboard-single-select";
 import { apiFetch } from "../../lib/api-url.ts";
 import { parseAnalysisMarkdown, serializeAnalysisRuns } from "../../lib/no-movement-analysis-editor.mjs";
 import type { DashboardTranslator } from "../../lib/i18n";
@@ -89,6 +90,16 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
     ?? scopedOptions?.recipients.find(item => item.key === "PHELIPPE_PRIVATE" && item.available)?.key
     ?? scopedOptions?.recipients.find(item => item.available)?.key
     ?? "";
+  const recipientOptions = scopedOptions?.recipients ?? [];
+  const regionSelectOptions: DashboardSingleSelectOption[] = [
+    { value: "", label: t("Todas as regionais") },
+    ...(scopedOptions?.regions ?? []).map(item => ({ value: item, label: item })),
+  ];
+  const recipientSelectOptions: DashboardSingleSelectOption[] = [
+    ...recipientOptions.filter(item => item.type === "email").map(item => ({ value: item.key, label: `${item.label}${!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}`, group: t("Pessoas"), disabled: !item.available })),
+    ...recipientOptions.filter(item => item.type === "chat_id" && item.regionCode === null).map(item => ({ value: item.key, label: `${item.label}${!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}`, group: t("Grupos nacionais"), disabled: !item.available })),
+    ...recipientOptions.filter(item => item.type === "chat_id" && item.regionCode !== null).map(item => ({ value: item.key, label: `${item.label}${!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}`, group: t("Grupos regionais"), disabled: !item.available })),
+  ];
   const sourceLabel = sourceId === "collection_rate" ? "Taxa de Coleta V3" : "Falha de Coleta PDD";
   const route = `/api/v2/operational-feishu/${sourceId}`;
 
@@ -181,23 +192,10 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
         {prepared ? <p><strong>{t("Data operacional:")}</strong> {prepared.operationalDate} · {t("Registros:")} {prepared.recordCount.toLocaleString()}</p> : null}
         {prepared ? <p><strong>{t("Destino confirmado:")}</strong> {prepared.recipientLabel} · {prepared.recipientType === "email" ? t("Pessoa · e-mail") : t("Grupo · chat Feishu")}</p> : null}
       </div>
-      <label htmlFor="operational-feishu-region">{t("Regional do relatório")}</label>
-      <select className="operational-filter-select" id="operational-feishu-region" value={region} disabled={!scopedOptions || busy} onChange={event => changeScope(event.target.value, activeRecipient)}>
-        <option value="">{t("Todas as regionais")}</option>
-        {scopedOptions?.regions.map(item => <option key={item} value={item}>{item}</option>)}
-      </select>
-      <label htmlFor="operational-feishu-recipient">{t("Destinatário")}</label>
-      <select className="operational-filter-select" id="operational-feishu-recipient" value={activeRecipient} disabled={!scopedOptions || busy} onChange={event => changeScope(region, event.target.value)}>
-        <optgroup label={t("Pessoas")}>
-          {scopedOptions?.recipients.filter(item => item.type === "email").map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
-        </optgroup>
-        <optgroup label={t("Grupos nacionais")}>
-          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode === null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
-        </optgroup>
-        <optgroup label={t("Grupos regionais")}>
-          {scopedOptions?.recipients.filter(item => item.type === "chat_id" && item.regionCode !== null).map(item => <option key={item.key} value={item.key} disabled={!item.available}>{item.label}{!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}</option>)}
-        </optgroup>
-      </select>
+      <label id="operational-feishu-region-label">{t("Regional do relatório")}</label>
+      <DashboardSingleSelect id="operational-feishu-region" labelledBy="operational-feishu-region-label" value={region} options={regionSelectOptions} disabled={!scopedOptions || busy} placeholder={t("Carregando opções…")} onChange={value => changeScope(value, activeRecipient)} />
+      <label id="operational-feishu-recipient-label">{t("Destinatário")}</label>
+      <DashboardSingleSelect id="operational-feishu-recipient" labelledBy="operational-feishu-recipient-label" value={activeRecipient} options={recipientSelectOptions} disabled={!scopedOptions || busy} placeholder={t("Carregando opções…")} onChange={value => changeScope(region, value)} />
       <div className="no-movement-feishu-attachments" aria-live="polite">
         <span className={prepared?.excelBytes ? "is-ready" : "is-pending"}>{prepared?.excelBytes ? "✓" : "○"} {t(prepared?.excelBytes ? "Excel pronto" : busy ? "Preparando Excel…" : "Excel pendente")}</span>
         <span className={prepared?.pngBytes ? "is-ready" : "is-pending"}>{prepared?.pngBytes ? "✓" : "○"} {t(prepared?.pngBytes ? "Prévia PNG pronta" : busy ? "Preparando prévia PNG…" : "Prévia PNG pendente")}</span>

@@ -164,6 +164,7 @@ import { getSellerMonitoringSource } from "../../lib/data-sources/seller-monitor
 import { CollectionMonitoringV2Dashboard } from "./collection-monitoring-v2";
 import { CollectionMonitoringT4T5Dashboard } from "./collection-monitoring-t4-t5";
 import { DashboardLoadingSkeleton } from "./dashboard-loading-skeleton";
+import { DashboardSingleSelect } from "./dashboard-single-select";
 import {
   canReadDashboardV2Data,
   canReadMonitoringV2,
@@ -2009,18 +2010,40 @@ function positionMultiSelectPopover(element: HTMLDetailsElement): void {
   const fitsRight = bounds.right - popoverWidth >= 16;
   element.dataset.popoverAlign = fitsLeft || !fitsRight ? "left" : "right";
   const desiredHeight = Math.min(520, window.innerHeight * 0.72);
-  const availableBelow = Math.max(96, window.innerHeight - bounds.bottom - 12);
-  const availableAbove = Math.max(96, bounds.top - 12);
-  const placeAbove = availableBelow < desiredHeight && availableAbove > availableBelow;
-  element.dataset.popoverPlacement = placeAbove ? "top" : "bottom";
+  const availableBelow = Math.max(0, window.innerHeight - bounds.bottom - 12);
+  const maxHeight = Math.min(desiredHeight, availableBelow);
+  element.dataset.popoverScrollMode = maxHeight < 220 ? "container" : "options";
   element.style.setProperty("--multi-select-popover-width", `${popoverWidth}px`);
-  element.style.setProperty("--multi-select-popover-max-height", `${Math.max(96, Math.min(desiredHeight, placeAbove ? availableAbove : availableBelow))}px`);
+  element.style.setProperty("--multi-select-popover-max-height", `${maxHeight}px`);
+}
+
+function scrollFilterIntoSpaceBelow(element: HTMLElement, requestedHeight = 260): void {
+  if (typeof window === "undefined") return;
+  const bounds = element.getBoundingClientRect();
+  const targetSpace = Math.min(requestedHeight, Math.max(64, window.innerHeight - 24));
+  const below = window.innerHeight - bounds.bottom - 10;
+  const delta = targetSpace - below;
+  if (delta <= 0) return;
+
+  let parent = element.parentElement;
+  while (parent && parent !== document.body && parent !== document.documentElement) {
+    const style = window.getComputedStyle(parent);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight + 1) {
+      const remaining = parent.scrollHeight - parent.clientHeight - parent.scrollTop;
+      const amount = Math.min(delta, Math.max(0, remaining));
+      if (amount > 0) { parent.scrollTop += amount; return; }
+    }
+    parent = parent.parentElement;
+  }
+  const remaining = Math.max(0, document.documentElement.scrollHeight - window.innerHeight - window.scrollY);
+  if (remaining > 0) window.scrollBy(0, Math.min(delta, remaining));
 }
 
 function multiSelectGroup(element: HTMLDetailsElement | null): Element | null {
   return element?.closest("[data-filter-group]")
     ?? element?.closest(".filter-grid")
     ?? element?.closest(".filters-card")
+    ?? element?.closest(".feishu-share-dialog")
     ?? element?.parentElement
     ?? null;
 }
@@ -2115,7 +2138,9 @@ function MultiSelect({
           setIsOpen(current.open);
           if (!current.open) return;
           if (resetSearchOnOpen) setQuery("");
+          scrollFilterIntoSpaceBelow(current);
           positionMultiSelectPopover(current);
+          window.requestAnimationFrame(() => { if (current.open) positionMultiSelectPopover(current); });
           document.dispatchEvent(new CustomEvent("dashboard-multiselect-open", {
             detail: { group: multiSelectGroup(current), element: current },
           }));
@@ -8206,12 +8231,15 @@ export function DashboardApp() {
                     disabledLabel={t(noMovementAvailabilityText)} t={t} />
                   {movementLoaded?.format === "summary" ? (
                     <div className="filter-field">
-                      <label className="filter-label" htmlFor="movement-metric">{t("Indicador / AGING")}</label>
-                      <select className="operational-filter-select" id="movement-metric" value={movementSummaryMetric}
+                      <label className="filter-label" id="movement-metric-label">{t("Indicador / AGING")}</label>
+                      <DashboardSingleSelect
+                        id="movement-metric"
+                        labelledBy="movement-metric-label"
+                        value={movementSummaryMetric}
+                        options={MOVEMENT_SUMMARY_METRICS.map(([key, label]) => ({ value: key, label: t(label) }))}
                         disabled={!noMovementHasPublishedRecords}
-                        onChange={(event) => { setMovementSummaryMetric(event.target.value); setMovementPage(1); }}>
-                        {MOVEMENT_SUMMARY_METRICS.map(([key, label]) => <option key={key} value={key}>{t(label)}</option>)}
-                      </select>
+                        onChange={(value) => { setMovementSummaryMetric(value); setMovementPage(1); }}
+                      />
                     </div>
                   ) : (<>
                   <div className="filter-field">
