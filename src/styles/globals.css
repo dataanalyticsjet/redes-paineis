@@ -10189,16 +10189,17 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 @media (prefers-reduced-motion: reduce) { .dashboard-loading-card i, .dashboard-loading-card b, .dashboard-loading-table i, .dashboard-loading-progress.is-indeterminate > span, .dashboard-loading-update-indicator { animation: none; } .dashboard-loading-progress > span { transition: none; } }
 
 
-/* Compact Data Foundation source cards and the explicit publication review dialog. */
-.data-foundation-source-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; margin-top: 18px; }
-.data-foundation-source-card { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 18px; border: 1px solid #e5e7eb; border-radius: 14px; background: #fff; box-shadow: 0 5px 20px rgb(22 33 54 / 4%); min-width: 0; }
+/* Responsive Data Foundation source cards and the explicit publication review dialog. */
+.data-foundation-source-cards { display: grid; width: 100%; max-width: 1212px; min-width: 0; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 14px; margin: 18px auto 0; }
+.data-foundation-source-card { box-sizing: border-box; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: start; gap: 12px 14px; padding: 18px; border: 1px solid #e5e7eb; border-radius: 14px; background: #fff; box-shadow: 0 5px 20px rgb(22 33 54 / 4%); width: 100%; max-width: 100%; min-width: 0; }
 .data-foundation-source-card-icon { display: grid; width: 42px; height: 42px; place-items: center; color: #d92f2f; background: #fff1f1; border-radius: 12px; }
 .data-foundation-source-card-copy { min-width: 0; }
-.data-foundation-source-card-copy h2 { margin: 0 0 10px; font-size: 15px; color: #252a33; }
-.data-foundation-source-card-copy p { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px; margin: 4px 0; font-size: 12px; color: #737985; }
-.data-foundation-source-card-copy p strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3b4049; font-weight: 650; }
+.data-foundation-source-card-copy h2 { margin: 0 0 10px; font-size: 15px; color: #252a33; overflow-wrap: anywhere; }
+.data-foundation-source-card-copy p { display: grid; grid-template-columns: minmax(88px, 110px) minmax(0, 1fr); gap: 8px; margin: 6px 0; font-size: 12px; line-height: 1.45; color: #737985; min-width: 0; }
+.data-foundation-source-card-copy p span, .data-foundation-source-card-copy p strong { min-width: 0; }
+.data-foundation-source-card-copy p strong { overflow-wrap: anywhere; white-space: normal; color: #3b4049; font-weight: 650; }
 .data-foundation-source-card-copy small, .data-foundation-source-card-wait { display: block; margin-top: 7px; color: #737985; font-size: 11px; }
-.data-foundation-update-button { position: relative; display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid #d92f2f; border-radius: 9px; background: #d92f2f; color: white; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.data-foundation-update-button { position: relative; grid-column: 2; justify-self: end; display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid #d92f2f; border-radius: 9px; background: #d92f2f; color: white; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
 .data-foundation-update-button input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .data-foundation-update-button:has(input:disabled), .data-foundation-update-button:disabled { opacity: .5; cursor: not-allowed; }
 .data-foundation-map-card { margin-top: 15px; }
@@ -10217,8 +10218,8 @@ html[data-theme="dark"] .collection-monitoring-t4-t5-table th { background: #a80
 @media (max-width: 650px) {
   .data-foundation-source-card { grid-template-columns: 36px minmax(0, 1fr); padding: 14px; gap: 10px; }
   .data-foundation-source-card-icon { width: 36px; height: 36px; }
-  .data-foundation-update-button { grid-column: 1 / -1; width: 100%; }
-  .data-foundation-source-card-copy p { grid-template-columns: 95px minmax(0, 1fr); }
+  .data-foundation-update-button { grid-column: 2; justify-self: end; width: auto; max-width: 100%; }
+  .data-foundation-source-card-copy p { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .data-foundation-modal-backdrop { padding: 8px; }
   .data-foundation-confirmation-modal { max-height: 96vh; padding: 14px; }
   .data-foundation-confirm-file { align-items: flex-start; flex-wrap: wrap; }
