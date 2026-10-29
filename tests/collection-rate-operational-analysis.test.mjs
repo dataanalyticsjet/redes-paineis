@@ -5,21 +5,27 @@ import test from "node:test";
 const repo = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, repo), "utf8");
 
-test("Taxa de Coleta shows the persisted national V3 analysis only in the existing AI modal", async () => {
+test("Taxa de Coleta AI modal uses the exact authorized and filtered Data Foundation V3 rows", async () => {
   const [dashboard, component, backend] = await Promise.all([
     read("src/features/dashboards/dashboard-app.tsx"),
     read("src/features/dashboards/collection-rate-operational-analysis.tsx"),
     read("backend/app/api/data_foundation.py"),
   ]);
-  assert.match(dashboard, /CollectionRateOperationalAnalysis authorization=\{viewerAuthorization\}/);
+  assert.match(dashboard, /CollectionRateOperationalAnalysis\s+analysis=\{taxaV2OperationalAnalysis\}/);
+  assert.match(dashboard, /buildCollectionRateV3OperationalAnalysis\(taxaV2FilteredRows/);
+  assert.match(dashboard, /taxaV2AnalysisPeriodIsCurrent/);
   assert.match(dashboard, /view === "taxa" \? \(\s*viewerIdentity\?\.organizational_scope === "matrix" && viewerIdentity\?\.role === "matrix"/);
-  assert.match(dashboard, /view === "taxa" \? "Análise operacional da última publicação"/);
   assert.match(dashboard, /view !== "movimentacao" && view !== "taxa"/);
-  assert.match(component, /collection-rate\/operational-analysis\?limit=20/);
-  assert.match(component, /navigator\.clipboard\.writeText\(selected\.message\)/);
-  assert.match(component, /formattedMessage = selected\?\.message\?\.split/);
-  assert.match(component, /PROCESSING/);
-  assert.match(component, /FAILED/);
+  assert.match(component, /navigator\.clipboard\.writeText\(analysis\.message\)/);
+  assert.match(component, /analysis\?\.message\.split/);
+  assert.match(component, /Taxa de Tentativa/);
+  assert.doesNotMatch(component, /collection-rate\/operational-analysis\?limit=20/);
+  assert.doesNotMatch(component, /Histórico de análises/);
+  const synthesis = await read("src/lib/data-foundation/collection-rate-v3-operational-analysis.ts");
+  assert.match(synthesis, /collected_plus_attempts_quantity/);
+  assert.match(synthesis, /quantity_to_collect/);
+  assert.match(synthesis, /targetRate: null/);
+  assert.doesNotMatch(synthesis, /98%|TARGET_RATE/);
   assert.match(backend, /@router\.get\("\/collection-rate\/operational-analysis"\)/);
   assert.match(backend, /matrix_scope_required/);
 });

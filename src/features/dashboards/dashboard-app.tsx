@@ -145,6 +145,7 @@ import {
   type CollectionRateV3DashboardRow,
   type CollectionRateV3Filters,
 } from "../../lib/data-foundation/collection-rate-v3-dashboard.ts";
+import { buildCollectionRateV3OperationalAnalysis } from "../../lib/data-foundation/collection-rate-v3-operational-analysis.ts";
 import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
@@ -5924,6 +5925,37 @@ export function DashboardApp() {
   );
   const taxaV2Summary = taxaV2CardSummaries.totals;
   const taxaV2AttemptRate = taxaV2CardSummaries.attempts;
+  const taxaV2AnalysisPeriodIsCurrent = collectionRateV2State.status === "ready" &&
+    collectionRateV2State.loadedPeriod?.dateFrom === collectionRateV2State.period.dateFrom &&
+    collectionRateV2State.loadedPeriod?.dateTo === collectionRateV2State.period.dateTo;
+  const taxaV2AnalysisFilters = useMemo(() => [
+    { label: "Regional", values: [...(taxaV2Filters.regions ?? [])] },
+    { label: "RM", values: [...(taxaV2Filters.rms ?? [])] },
+    { label: "Região do RM", values: [...(taxaV2Filters.rmAreas ?? [])] },
+    { label: "RGM", values: [...(taxaV2Filters.rgms ?? [])] },
+    { label: "Base", values: [...(taxaV2Filters.bases ?? [])] },
+    { label: "Origem", values: [...(taxaV2Filters.origins ?? [])] },
+    { label: "Tipo de produto", values: [...(taxaV2Filters.productTypes ?? [])] },
+  ], [taxaV2Filters]);
+  const taxaV2OperationalAnalysis = useMemo(() => taxaV2AnalysisPeriodIsCurrent
+    ? buildCollectionRateV3OperationalAnalysis(taxaV2FilteredRows, {
+      period: collectionRateV2State.period,
+      publicationIds: collectionRateV2State.publicationIds,
+      filters: taxaV2AnalysisFilters,
+      locale: dashboardLocale(language),
+      latestDayMayBeIncomplete: collectionRateV2State.latestDayMayBeIncomplete,
+    })
+    : null,
+  [collectionRateV2State.latestDayMayBeIncomplete, collectionRateV2State.period, collectionRateV2State.publicationIds, language, taxaV2AnalysisFilters, taxaV2AnalysisPeriodIsCurrent, taxaV2FilteredRows]);
+  const taxaV2OperationalAnalysisStatus = collectionRateV2State.status === "error"
+    ? "error"
+    : collectionRateV2State.status === "empty"
+      ? "empty"
+      : !taxaV2AnalysisPeriodIsCurrent
+        ? "loading"
+        : taxaV2OperationalAnalysis?.rowCount
+          ? "ready"
+          : "empty";
   const taxaV2RegionalAttempts = useMemo(
     () => summarizeCollectionRateV3RegionalAttempts(taxaV2FilteredRows, taxaV2RegionalDates),
     [taxaV2FilteredRows, taxaV2RegionalDates],
@@ -5950,50 +5982,10 @@ export function DashboardApp() {
 
   const baseAnalysisText = useMemo(() => {
     if (view === "taxa") {
-      const byRegional = new Map<string, { toCollect: number; attempted: number; bases: Map<string, { base: string; rm: string; orders: number; toCollect: number; attempted: number }> }>();
-      for (const record of taxaFilteredRecords) {
-        const regional = byRegional.get(record.region) ?? { toCollect: 0, attempted: 0, bases: new Map() };
-        regional.toCollect += record.toCollect;
-        regional.attempted += record.collectedWithAttempts;
-        const base = regional.bases.get(record.base) ?? { base: record.base, rm: responsibilityForBase(responsibilityLoaded, record.base).rm, orders: 0, toCollect: 0, attempted: 0 };
-        base.orders += record.orders;
-        base.toCollect += record.toCollect;
-        base.attempted += record.collectedWithAttempts;
-        regional.bases.set(record.base, base);
-        byRegional.set(record.region, regional);
-      }
-      const regionals = [...byRegional.entries()].map(([regional, value]) => ({
-        regional,
-        rate: taxaRate(value.attempted, value.toCollect),
-        priorities: [...value.bases.values()].map((base) => {
-          const rate = taxaRate(base.attempted, base.toCollect);
-          return { ...base, rate, impact: Math.max(0, base.toCollect * 0.98 - base.attempted) };
-        })
-          .filter((base) => base.orders > 500 && base.toCollect > 0 && base.rate !== null && base.rate < 0.98)
-          .sort((left, right) => right.impact - left.impact || right.orders - left.orders || (left.rate ?? 0) - (right.rate ?? 0))
-          .slice(0, 2),
-      })).filter((item) => item.priorities.length > 0)
-        .sort((left, right) => right.priorities.reduce((sum, base) => sum + base.impact, 0) - left.priorities.reduce((sum, base) => sum + base.impact, 0) || (left.rate ?? -1) - (right.rate ?? -1) || left.regional.localeCompare(right.regional, "pt-BR"));
-      const selectedDate = taxaDateEnd || taxaDateStart;
-      const [, month, day] = selectedDate.split("-");
-      const messageDate = day && month ? `${day}/${month}` : selectedDate;
-      return [
-        "Bom dia, pessoal!", "大家早上好！", "",
-        `📊 **Taxa de Coleta ${messageDate} | 揽收及时率**`,
-        `Geral: **${formatTaxaRate(taxaSummary.collectionWithAttemptsRate)}** | Meta: **98%**`,
-        `整体：**${formatTaxaRate(taxaSummary.collectionWithAttemptsRate)}** | 目标：**98%**`,
-        "", "⚠️ **Pontos críticos / 重点关注**", "",
-        ...(regionals.length ? regionals.slice(0, 5).flatMap((regional) => [
-          `${regional.rate !== null && regional.rate < 0.95 ? "🔴" : "🟠"} **${regional.regional} ${formatTaxaRate(regional.rate)}**`,
-          ...regional.priorities.map((base) => {
-            const rm = base.rm.trim() || "待定";
-            return `${base.base} **${formatTaxaRate(base.rate)}** | ${formatNumber(base.orders)} pacotes | ${rm.startsWith("@") ? rm : `@${rm}`}`;
-          }),
-          "",
-        ]) : ["Nenhuma base relevante abaixo da meta no recorte selecionado.", ""]),
-        "⚠️ **Prioridade hoje: recuperar as bases de maior volume abaixo da meta.**",
-        "⚠️ **今日重点：优先改善订单量大且低于目标的网点。**", "",
-        "Contamos com a atuação dos responsáveis.", "请各负责人重点跟进改善。",
+      return taxaV2OperationalAnalysis?.message ?? [
+        "📊 **TAXA DE TENTATIVA**",
+        "A análise estará disponível quando os dados do período e filtros atuais terminarem de carregar.",
+        "当前期间和筛选条件的数据加载完成后，将显示分析结果。",
       ].join("\n");
     }
     if (view === "bipagem") {
@@ -6001,7 +5993,7 @@ export function DashboardApp() {
       return [`📊 *Falha na coleta PDD — ${formatDate(bipagemDateEnd || bipagemDateStart)}*`, `Total de pedidos: *${formatNumber(bipagemSummary.ordersToScan)}*.`, `Pedidos não bipados: *${formatNumber(bipagemSummary.notScannedCollection)}* (${formatRate(bipagemSummary.collectionFailureRate)}).`, "", "*Bases prioritárias:*", ...(priorities.length ? priorities.map((row) => `• ${row.base}: ${formatRate(row.collectionFailureRate)} — @${row.rm}`) : ["• Nenhuma base prioritária no recorte selecionado."]), "", "Contamos com a atuação dos responsáveis para reduzir as falhas."].join("\n");
     }
     return `📊 *Análise ${view === "movimentacao" ? "de sem movimentação" : view === "sellers" ? "de sellers" : "de monitoramento"}*\n\nUse os filtros do painel para definir o recorte antes de gerar a mensagem.`;
-  }, [bipagemBaseSummary, bipagemDateEnd, bipagemDateStart, bipagemSummary, responsibilityLoaded, taxaDateEnd, taxaDateStart, taxaFilteredRecords, taxaSummary.collectionWithAttemptsRate, view]);
+  }, [bipagemBaseSummary, bipagemDateEnd, bipagemDateStart, bipagemSummary, taxaV2OperationalAnalysis, view]);
 
   const taxaGeneralMonthlyTrend = useMemo(() => {
     const months = summarizeTaxaByMonth(taxaFilteredRecords);
@@ -7664,14 +7656,24 @@ export function DashboardApp() {
             <button type="button" className="upload-login-close" onClick={() => setAnalysisOpen(false)} aria-label={t("Fechar")}><X size={18} /></button>
             <span className="upload-login-icon"><Sparkles size={24} /></span>
             <h2 id="analysis-title">{t("Análise IA")}</h2>
-            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : view === "taxa" ? "Análise operacional da última publicação" : view === "bipagem" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
+            <p>{t(view === "movimentacao" ? "Análise operacional da última publicação" : view === "taxa" ? "Análise da Taxa de Tentativa no período e filtros selecionados" : view === "bipagem" ? "Análise operacional da última publicação" : "Mensagem criada com os filtros e o período atualmente selecionados.")}</p>
             {view === "movimentacao" ? (
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
                 ? <NoMovementOperationalAnalysis authorization={viewerAuthorization} t={t} />
                 : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
             ) : view === "taxa" ? (
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization
-                ? <CollectionRateOperationalAnalysis authorization={viewerAuthorization} t={t} />
+                ? <CollectionRateOperationalAnalysis
+                  analysis={taxaV2OperationalAnalysis}
+                  status={taxaV2OperationalAnalysisStatus}
+                  onRetry={() => setCollectionRateV2State((current) => ({
+                    ...current,
+                    status: "loading",
+                    progress: { loaded: 0, total: 0, stage: "records" },
+                    error: null,
+                    retryKey: current.retryKey + 1,
+                  }))}
+                  t={t} />
                 : <p className="no-movement-analysis-access" role="status">{t("A análise operacional nacional está disponível somente para o escopo MATRIZ.")}</p>
             ) : view === "bipagem" ? (
               viewerIdentity?.organizational_scope === "matrix" && viewerIdentity?.role === "matrix" && viewerAuthorization

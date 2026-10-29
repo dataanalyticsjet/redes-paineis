@@ -51,7 +51,9 @@ test("Taxa V3 reutiliza a barra corporativa sem botão Fonte de dados", () => {
   assert.match(dashboard, /view !== "taxa" && canManageActiveDataSource/);
   assert.match(dashboard, /onPrint=\{handlePrintReport\}/);
   assert.match(dashboard, /onShare=\{openPanelFeishuShare\}/);
-  assert.match(dashboard, /CollectionRateOperationalAnalysis authorization=\{viewerAuthorization\}/);
+  assert.match(dashboard, /CollectionRateOperationalAnalysis\s+analysis=\{taxaV2OperationalAnalysis\}/);
+  assert.match(dashboard, /buildCollectionRateV3OperationalAnalysis\(taxaV2FilteredRows/);
+  assert.match(dashboard, /taxaV2AnalysisPeriodIsCurrent/);
 });
 
 test("novos rótulos dos filtros têm traduções para inglês e chinês", () => {

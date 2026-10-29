@@ -21,6 +21,16 @@ export interface BilingualDashboardText {
 
 const translations: Record<string, { en: string; zh: string; pt?: string }> = {
   "CONSOLIDADO NACIONAL": { en: "NATIONAL CONSOLIDATED", zh: "全国汇总" },
+  "ANÁLISE DO RECORTE ATUAL": { en: "CURRENT FILTERED ANALYSIS", zh: "当前筛选范围分析" },
+  "Carregando dados do período selecionado…": { en: "Loading data for the selected period…", zh: "正在加载所选期间的数据…" },
+  "Não foi possível analisar os dados atuais do painel.": { en: "Unable to analyze the dashboard's current data.", zh: "无法分析仪表板当前数据。" },
+  "Não há dados publicados no período e filtros selecionados.": { en: "There is no published data for the selected period and filters.", zh: "所选期间和筛选条件没有已发布数据。" },
+  "Período analisado": { en: "Analyzed period", zh: "分析期间" },
+  "Publicações no recorte": { en: "Publications in scope", zh: "范围内的发布版本" },
+  "Taxa de Tentativa": { en: "Attempt Rate", zh: "尝试揽收率" },
+  "Esta síntese é calculada somente com os dados autorizados já carregados e filtrados no dashboard.": { en: "This summary is calculated only from authorized data already loaded and filtered in the dashboard.", zh: "此摘要仅使用仪表板中已加载并筛选的授权数据计算。" },
+  "Análise da Taxa de Tentativa no período e filtros selecionados": { en: "Attempt Rate analysis for the selected period and filters", zh: "所选期间和筛选条件下的尝试揽收率分析" },
+  "Não foi possível copiar a análise.": { en: "Unable to copy the analysis.", zh: "无法复制分析内容。" },
   "Análise operacional": { en: "Operational analysis", zh: "运营分析" },
   "Análise operacional da última publicação": { en: "Operational analysis from the latest publication", zh: "最新发布的运营分析" },
   "Total nacional": { en: "National total", zh: "全国总量" },
