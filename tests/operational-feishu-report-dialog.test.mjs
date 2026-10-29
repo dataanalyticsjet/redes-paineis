@@ -54,8 +54,46 @@ test("recipient choices come from the fixed server list and real send remains se
   assert.match(settings, /feishu_pdd_collection_failure_report_enabled: bool = False/);
 });
 
+test("Taxa V3 Feishu uses the same filtered attempt-rate synthesis as the AI modal", async () => {
+  assert.match(dialog, /collectionRateAnalysisForRegion\?\.\(region \|\| null\)/);
+  assert.match(dialog, /sourceId === "collection_rate" && \(!filteredBundle \|\| filteredBundle\.analysis\.rowCount === 0\)/);
+  assert.match(dialog, /dashboardScope: filteredBundle\.dashboardScope/);
+  assert.match(dialog, /const ready = filteredBundle \? \{ \.\.\.value, analysis: filteredBundle\.analysis\.message \} : value/);
+  assert.match(dialog, /prepareGeneration/);
+  assert.match(dialog, /collectionRateScopeKey/);
+  assert.match(dialog, /analysisText: analysis/);
+  assert.match(app, /collectionRateAnalysisForRegion=\{operationalFeishuSource === "collection_rate" \? collectionRateFeishuAnalysisForRegion : undefined\}/);
+  assert.match(app, /allowedCollectionRateRegions=\{operationalFeishuSource === "collection_rate" \? taxaV2FeishuAllowedRegions : undefined\}/);
+  assert.match(app, /buildCollectionRateV3OperationalAnalysis\(periodRows/);
+  assert.match(app, /taxaV2FilteredRows\.filter\(\(row\) => row\.region === regionCode\)/);
+  assert.match(app, /period: collectionRateV2State\.period/);
+  assert.match(app, /filters,/);
+  assert.match(app, /locale: dashboardLocale\(language\)/);
+  assert.match(app, /expectedRowIdentitySha256: identityDigest/);
+  assert.match(app, /expectedRowContentSha256: contentDigest/);
+  assert.match(app, /currentMappingRevision\(\)/);
+  assert.match(app, /publicationIds: \[\.\.\.collectionRateV2State\.publicationIds\]\.sort\(\)/);
+  assert.match(app, /taxaV2Filters/);
+  assert.match(api, /analysis_text=payload\.analysis_text/);
+  assert.match(api, /operational_feishu_dashboard_scope_required/);
+  assert.match(api, /identity=admin\.identity/);
+  const service = await readFile(new URL("../backend/app/services/operational_feishu_reports.py", import.meta.url), "utf8");
+  assert.match(service, /_feishu_interactive_content\(str\(row\["analysis_text"\]\)\)/);
+  assert.match(service, /_stream_collection_rate_scope_payload/);
+  assert.match(service, /operational_feishu_scope_changed/);
+  assert.match(service, /Resumo da tentativa/);
+});
+
+test("only Collection Rate V3 replaces backend prepared text; PDD and other report flows remain unchanged", () => {
+  assert.match(dialog, /sourceId === "collection_rate"\s*\?\s*await collectionRateAnalysisForRegion/);
+  assert.match(dialog, /const ready = filteredBundle \? \{ \.\.\.value, analysis: filteredBundle\.analysis\.message \} : value/);
+  assert.match(app, /operationalFeishuSource === "collection_rate" \? collectionRateFeishuAnalysisForRegion : undefined/);
+  assert.match(app, /operationalFeishuSource === "collection_rate" \? taxaV2FeishuAllowedRegions : undefined/);
+});
+
 test("the two report dialogs are opened only for a ready published snapshot and matrix admin", () => {
-  assert.match(app, /collectionRateV2State\.status !== "ready" \|\| !collectionRateV2State\.publicationId/);
-  assert.match(app, /pddCollectionFailureV2State\.status !== "ready" \|\| !pddCollectionFailureV2State\.publicationId/);
-  assert.match(app, /operationalFeishuSource && viewerAuthorization && isEffectiveMatrixAdminViewer/);
+  assert.ok(app.includes('collectionRateV2State.status === "ready" && collectionRateFeishuAnchorPublicationId'));
+  assert.ok(app.includes("const latestDate = periodRows.reduce"));
+  assert.ok(app.includes('pddCollectionFailureV2State.status === "ready" && pddCollectionFailureV2State.publicationId'));
+  assert.ok(app.includes("operationalFeishuSource && viewerAuthorization && isEffectiveMatrixAdminViewer"));
 });

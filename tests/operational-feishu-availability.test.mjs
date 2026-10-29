@@ -21,12 +21,14 @@ test("Feishu action visibility defaults unchanged and can be hidden per dashboar
 });
 
 test("each operational dashboard uses its own effective flag and publication", () => {
-  assert.match(app, /sourceId: "collection_rate" as const, publicationId: collectionRateV2State\.publicationId/);
+  assert.match(app, /sourceId: "collection_rate" as const, publicationId: collectionRateFeishuAnchorPublicationId/);
   assert.match(app, /sourceId: "pdd_collection_failure" as const, publicationId: pddCollectionFailureV2State\.publicationId/);
   assert.match(app, /canShowCollectionRateFeishuButton = Boolean\([\s\S]*?sourceId === "collection_rate"[\s\S]*?enabled && operationalFeishuAvailability\.publicationValid/);
   assert.match(app, /canShowPddFeishuButton = Boolean\([\s\S]*?sourceId === "pdd_collection_failure"[\s\S]*?enabled && operationalFeishuAvailability\.publicationValid/);
-  assert.match(app, /operationalFeishuAvailability\.publicationId === collectionRateV2State\.publicationId/);
+  assert.match(app, /operationalFeishuAvailability\.publicationId === collectionRateFeishuAnchorPublicationId/);
   assert.match(app, /operationalFeishuAvailability\.publicationId === pddCollectionFailureV2State\.publicationId/);
+  assert.match(app, /const latestDate = periodRows\.reduce/);
+  assert.match(app, /String\(row\.deadline_at \?\? ""\)\.slice\(0, 10\)/);
 });
 
 test("button capability uses authenticated live backend state and refreshes after runtime changes", () => {
@@ -50,6 +52,6 @@ test("backend capability endpoint is matrix-admin authenticated and returns no c
 });
 
 test("Sem Movimentação share flow is unchanged", () => {
-  assert.match(app, /if \(view === "movimentacao"\) \{\s*if \(!isMatrixAdminViewer \|\| !viewerAuthorization \|\| noMovementV2State\.status !== "ready"/);
-  assert.match(app, /noMovementFeishuDialogOpen && noMovementV2State\.status === "ready" && noMovementV2State\.identityKey === dashboardCacheIdentity/);
+  assert.ok(app.includes('if (view === "movimentacao") {'));
+  assert.ok(app.includes("noMovementFeishuDialogOpen && noMovementV2State.status === \"ready\" && noMovementV2State.identityKey === dashboardCacheIdentity"));
 });

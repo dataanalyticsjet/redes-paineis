@@ -146,11 +146,37 @@ class NoMovementFeishuConfirmPayload(BaseModel):
     analysis_text: str = Field(alias="analysisText", min_length=1, max_length=20000)
 
 
+class OperationalFeishuDashboardFilters(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    regions: list[str] = Field(default_factory=list, max_length=500)
+    rms: list[str] = Field(default_factory=list, max_length=500)
+    rm_areas: list[str] = Field(default_factory=list, alias="rmAreas", max_length=500)
+    rgms: list[str] = Field(default_factory=list, max_length=100)
+    rgm_regions: list[str] = Field(default_factory=list, alias="rgmRegions", max_length=100)
+    bases: list[str] = Field(default_factory=list, max_length=2_000)
+    origins: list[str] = Field(default_factory=list, max_length=500)
+    product_types: list[str] = Field(default_factory=list, alias="productTypes", max_length=500)
+
+
+class OperationalFeishuDashboardScope(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    date_from: date = Field(alias="dateFrom")
+    date_to: date = Field(alias="dateTo")
+    filters: OperationalFeishuDashboardFilters
+    expected_row_identity_sha256: str = Field(alias="expectedRowIdentitySha256", pattern=r"^[0-9a-f]{64}$")
+    expected_row_content_sha256: str = Field(alias="expectedRowContentSha256", pattern=r"^[0-9a-f]{64}$")
+    expected_row_count: int = Field(alias="expectedRowCount", ge=1, le=2_000_000)
+    publication_ids: list[str] = Field(alias="publicationIds", min_length=1, max_length=500)
+    mapping_revision: str = Field(alias="mappingRevision", min_length=36, max_length=110)
+    scope_label: str = Field(alias="scopeLabel", max_length=2_000)
+
+
 class OperationalFeishuPreparePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     publication_id: str = Field(alias="publicationId", min_length=36, max_length=36)
     region_code: str | None = Field(default=None, alias="regionCode", max_length=64)
     recipient_key: str = Field(alias="recipientKey", min_length=1, max_length=64)
+    dashboard_scope: OperationalFeishuDashboardScope | None = Field(default=None, alias="dashboardScope")
 
 
 class OperationalFeishuConfirmPayload(BaseModel):
@@ -1477,13 +1503,22 @@ def operational_feishu_report_prepare(
     _require_feature()
     _same_origin(request)
     _require_effective_matrix_admin(admin)
+    if source_id == "collection_rate" and payload.dashboard_scope is None:
+        raise HTTPException(status_code=422, detail="operational_feishu_dashboard_scope_required")
+    dashboard_scope = payload.dashboard_scope.model_dump(by_alias=True) if payload.dashboard_scope is not None else None
+    if dashboard_scope is not None and dashboard_scope["dateFrom"] > dashboard_scope["dateTo"]:
+        raise HTTPException(status_code=422, detail="operational_feishu_date_range_invalid")
     try:
         return prepare_operational_feishu_report(
             _engine(), source_id=source_id, publication_id=payload.publication_id,
             region_code=payload.region_code, recipient_key=payload.recipient_key,
             actor_user_id=admin.user.id, staging_directory=_operational_report_staging_directory(),
+            dashboard_scope=dashboard_scope, identity=admin.identity,
+            expected_mapping_revision=request.headers.get("X-Doomsday-Revision"),
         )
     except OperationalFeishuReportError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.code) from None
+    except DataFoundationError as error:
         raise HTTPException(status_code=error.status_code, detail=error.code) from None
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None

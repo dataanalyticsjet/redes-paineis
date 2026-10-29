@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
 from datetime import date, datetime
+from decimal import Decimal
 import os
 from pathlib import Path
 import uuid
@@ -26,21 +28,23 @@ def test_source_allowlist_and_flags_are_separate_and_off_by_default():
         service._source("collection_monitoring")
 
 
-def test_collection_rate_analysis_uses_official_weighted_formula_and_unmapped_national_rows():
+def test_collection_rate_feishu_analysis_uses_attempt_rate_and_keeps_unmapped_rows_in_national_totals():
     publication = {"version_no": 7}
     rows = [
-        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": "001", "mapping_resolution": "CODE_MATCH", "mapped_region": "SPS", "mapped_base_name": "Base Um", "mapped_rm": "RM A", "collected_quantity": 90, "quantity_to_collect": 100, "order_quantity": 105},
-        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": "002", "mapping_resolution": "NAME_APPROVED", "mapped_region": "SPE", "mapped_base_name": "Base Dois", "mapped_rm": "RM B", "collected_quantity": 40, "quantity_to_collect": 50, "order_quantity": 51},
-        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": None, "mapping_resolution": "UNMAPPED", "mapped_region": None, "mapped_base_name": None, "mapped_rm": None, "collected_quantity": 10, "quantity_to_collect": 20, "order_quantity": 22},
+        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": "001", "mapping_resolution": "CODE_MATCH", "mapped_region": "SPS", "mapped_base_name": "Base Um", "mapped_rm": "RM A", "collected_quantity": 70, "collected_plus_attempts_quantity": 90, "quantity_to_collect": 100, "order_quantity": 105},
+        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": "002", "mapping_resolution": "NAME_APPROVED", "mapped_region": "SPE", "mapped_base_name": "Base Dois", "mapped_rm": "RM B", "collected_quantity": 30, "collected_plus_attempts_quantity": 45, "quantity_to_collect": 50, "order_quantity": 51},
+        {"deadline_at": datetime(2026, 10, 22), "resolved_base_code": None, "mapping_resolution": "UNMAPPED", "mapped_region": None, "mapped_base_name": None, "mapped_rm": None, "collected_quantity": 10, "collected_plus_attempts_quantity": 15, "quantity_to_collect": 20, "order_quantity": 22},
     ]
     message, result, totals = service._analysis("collection_rate", publication, rows, None, date(2026, 10, 22))
-    assert totals == {"collected": 140, "planned": 170, "totalOrders": 178, "rateNumerator": 140, "rateDenominator": 170}
+    assert totals == {"attempted": 150, "planned": 170, "totalOrders": 178, "rateNumerator": 150, "rateDenominator": 170}
     assert result["operationalDate"] == "2026-10-22"
-    assert result["result"]["metric"]["numeratorField"] == "collected_quantity"
+    assert result["result"]["metric"]["numeratorField"] == "collected_plus_attempts_quantity"
     assert result["result"]["metric"]["denominatorField"] == "quantity_to_collect"
     assert result["result"]["unmappedPlanned"] == 20
-    assert "82,4%" in message
-    assert "Volume sem regional/base DoomsDay" in message
+    assert "88,2%" in message
+    assert "Meta: **98%**" not in message
+    assert "TAXA DE TENTATIVA" in message
+    assert "Volume sem mapeamento mantido no consolidado" in message
 
 
 def test_pdd_analysis_uses_collection_column_and_keeps_unmapped_in_national_totals():
@@ -95,6 +99,145 @@ def test_png_is_valid_image_and_reports_source_specific_metrics():
     image = Image.open(io.BytesIO(content))
     assert image.format == "PNG"
     assert image.size == (1400, 760)
+    assert service._build_collection_rate_attempt_analysis(
+        operational_date=date(2026, 10, 22), attempted=98, planned=100,
+        total_orders=100, bases=[], unmapped_planned=0,
+    )[1]["metric"]["numeratorField"] == "collected_plus_attempts_quantity"
+
+
+def test_collection_rate_scope_assets_use_same_authorized_rows_period_and_current_map(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+    from sqlalchemy import create_engine, text
+    from app.services.data_foundation.contracts import get_contract
+
+    engine = create_engine("sqlite://")
+    publication_id, map_id = uuid.uuid4(), uuid.uuid4()
+    revision = f"{map_id}:fixed-revision"
+    contract = get_contract("collection_rate", 3)
+    fact_columns = ", ".join(f'"{column.key}" TEXT' for column in contract.columns)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE source_publications(source_id TEXT, publication_id BLOB, version_no INTEGER, contract_version INTEGER, map_version_id BLOB, period_start TEXT, period_end TEXT, row_count INTEGER, publication_state TEXT)"))
+        connection.execute(text("CREATE TABLE source_publication_dates(source_id TEXT, publication_id BLOB, data_date TEXT, row_count INTEGER)"))
+        connection.execute(text("CREATE TABLE fact_collection_rate_v3(publication_id BLOB, source_row_no INTEGER, data_date TEXT, resolved_base_code TEXT, mapping_resolution TEXT, effective_base_code TEXT, effective_mapping_resolution TEXT, mapped_region TEXT, mapped_base_name TEXT, mapped_rm_area TEXT, mapped_rm TEXT, " + fact_columns + ")"))
+        connection.execute(text("INSERT INTO source_publications VALUES ('collection_rate',:pub,5,3,:map,'2026-10-21','2026-10-22',3,'PUBLISHED')"), {"pub": publication_id.bytes, "map": map_id.bytes})
+        connection.execute(text("INSERT INTO source_publication_dates VALUES ('collection_rate',:pub,'2026-10-21',1),('collection_rate',:pub,'2026-10-22',2)"), {"pub": publication_id.bytes})
+        rows = [
+            (1, "2026-10-21", "001", "CODE_MATCH", "SPS", "Base SPS", 8, 10, 11),
+            (2, "2026-10-22", "002", "NAME_APPROVED", "SPE", "Base SPE", 9, 10, 10),
+            (3, "2026-10-22", None, "UNMAPPED", None, None, 3, 10, 4),
+        ]
+        contract_rows = []
+        for number, day, code, resolution, region, base, numerator, denominator, orders in rows:
+            values = {column.key: None for column in contract.columns}
+            values.update({"deadline_at": f"{day} 12:00:00", "source_base_name": base or "Sem mapeamento", "order_quantity": orders,
+                           "quantity_to_collect": denominator, "collected_plus_attempts_quantity": numerator})
+            # This fixture declares every contract column as TEXT, so hash the
+            # values as SQLite returns them to the service.
+            contract_rows.append((day, number, {key: None if value is None else str(value) for key, value in values.items()}))
+            connection.execute(text("INSERT INTO fact_collection_rate_v3(publication_id,source_row_no,data_date,resolved_base_code,mapping_resolution,effective_base_code,effective_mapping_resolution,mapped_region,mapped_base_name,mapped_rm_area,mapped_rm," + ",".join(f'"{column.key}"' for column in contract.columns) + ") VALUES (" + ",".join(f":{name}" for name in ["pub", "row_no", "day", "code", "resolution", "code", "resolution", "region", "base", "rm_area", "rm", *[column.key for column in contract.columns]]) + ")"),
+                           {"pub": publication_id.bytes, "row_no": number, "day": day, "code": code, "resolution": resolution,
+                            "region": region, "base": base, "rm_area": "RM area" if region else None, "rm": "RM" if region else None, **values})
+
+    monkeypatch.setattr(service, "read_revision", lambda _engine: {"revision": revision, "mappingVersionId": str(map_id)})
+    monkeypatch.setattr(service, "_assert_map_available", lambda _engine: False)
+    monkeypatch.setattr(service, "_regions", lambda _engine, _map: ["SPS", "SPE"])
+    monkeypatch.setattr(service, "_publication", lambda *_args, **_kwargs: {"publication_id": publication_id.bytes, "version_no": 5, "contract_version": 3, "map_version_id": map_id.bytes, "published_at": "2026-10-22"})
+    monkeypatch.setattr(service, "_query_plan", lambda *_args, **kwargs: SimpleNamespace(
+        select_sql="fact.*", from_sql="FROM fact_collection_rate_v3 AS fact",
+        where_sql="fact.data_date >= :date_from AND fact.data_date <= :date_to",
+        parameters={"date_from": kwargs["date_from"].isoformat(), "date_to": kwargs["date_to"].isoformat()},
+    ))
+    identities = [f"{publication_id}:2", f"{publication_id}:3", f"{publication_id}:1"]
+    expected_content = service._ScopedContentDigest()
+    for _day, _number, contract_row in sorted(contract_rows, key=lambda item: item[0], reverse=True):
+        expected_content.add(contract_row, [column.key for column in contract.columns])
+    scope = {
+        "dateFrom": "2026-10-21", "dateTo": "2026-10-22", "filters": {"regions": [], "rms": [], "rmAreas": [], "rgms": [], "rgmRegions": [], "bases": [], "origins": [], "productTypes": []},
+        "expectedRowIdentitySha256": hashlib.sha256("".join(f"{item}\n" for item in identities).encode()).hexdigest(),
+        "expectedRowContentSha256": expected_content.hexdigest(),
+        "expectedRowCount": 3, "publicationIds": [str(publication_id)], "mappingRevision": revision,
+        "scopeLabel": "Todas as regionais, 21 a 22/10",
+    }
+    report_id = uuid.uuid4()
+    payload = service._stream_collection_rate_scope_payload(
+        engine, publication_id=str(publication_id), report_region=None, scope=scope,
+        identity={"role": "matrix", "organizational_scope": "matrix"}, expected_mapping_revision=revision,
+        staging_directory=tmp_path, report_id=report_id,
+    )
+    assert payload["recordCount"] == 3
+    assert payload["totals"]["rateNumerator"] == 20
+    assert payload["totals"]["rateDenominator"] == 30
+    assert Decimal(payload["analysisResult"]["result"]["metric"]["rate"]) == Decimal(20) / Decimal(30)
+    assert payload["analysisResult"]["result"]["regions"] == [
+        {"region": "Sem regional", "rate": Decimal(3) / Decimal(10), "planned": 10, "bases": []},
+    ]
+    assert payload["analysisResult"]["periodLabel"] == "2026-10-21 a 2026-10-22"
+    assert payload["analysisResult"]["scopeLabel"] == scope["scopeLabel"]
+    assert payload["analysisResult"]["result"]["unmappedPlanned"] == 10
+    assert payload["activePublications"] == [str(publication_id)]
+    workbook = load_workbook(tmp_path / ".operational-feishu-reports" / f"{report_id.hex}.xlsx", read_only=True, data_only=True)
+    assert workbook.sheetnames == ["Dados", "Resumo da tentativa"]
+    source_rows = list(workbook["Dados"].values)
+    assert len(source_rows) == 4 and len(source_rows[0]) == 22
+    summary = list(workbook["Resumo da tentativa"].values)
+    assert any(row[0] == "Taxa de Tentativa consolidada" and row[1] == "66.7%" for row in summary)
+    assert any(row[0] == "Volume sem mapeamento (incluído no consolidado)" and row[1] == 10 for row in summary)
+    regional_rows = [row for row in summary if row and row[0] in {"SPS", "SPE", "Sem regional"}]
+    assert sum(row[1] for row in regional_rows) == 20
+    assert sum(row[2] for row in regional_rows) == 30
+    assert ("Sem regional", 3, 10, "30.0%") in regional_rows
+    assert Image.open(io.BytesIO((tmp_path / ".operational-feishu-reports" / f"{report_id.hex}.png").read_bytes())).format == "PNG"
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE fact_collection_rate_v3 SET collected_plus_attempts_quantity='99' WHERE source_row_no=1"))
+    with pytest.raises(service.OperationalFeishuReportError) as content_changed:
+        service._stream_collection_rate_scope_payload(
+            engine, publication_id=str(publication_id), report_region=None, scope=scope,
+            identity={"role": "matrix", "organizational_scope": "matrix"}, expected_mapping_revision=revision,
+            staging_directory=tmp_path, report_id=uuid.uuid4(),
+        )
+    assert content_changed.value.code == "operational_feishu_scope_changed"
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE fact_collection_rate_v3 SET collected_plus_attempts_quantity='8' WHERE source_row_no=1"))
+    report = {"source_id": "collection_rate", "publication_id": publication_id.bytes,
+              "publication_version": 5, "contract_version": 3, "map_version_id": map_id.bytes,
+              "delivery_context": json.dumps({"dashboardScope": {**scope, "mapRevision": revision, "periodPublicationManifest": payload["periodPublicationManifest"]}})}
+    assert service._report_scope(engine, report)["dateFrom"] == "2026-10-21"
+    with engine.begin() as connection:
+        newer = uuid.uuid4()
+        connection.execute(text("INSERT INTO source_publications VALUES ('collection_rate',:pub,6,3,:map,'2026-10-22','2026-10-22',1,'PUBLISHED')"), {"pub": newer.bytes, "map": map_id.bytes})
+        connection.execute(text("INSERT INTO source_publication_dates VALUES ('collection_rate',:pub,'2026-10-22',1)"), {"pub": newer.bytes})
+    with pytest.raises(service.OperationalFeishuReportError) as changed:
+        service._report_scope(engine, report)
+    assert changed.value.code == "operational_feishu_scope_changed"
+    engine.dispose()
+
+
+def test_collection_rate_scope_filters_are_intersected_and_unmapped_rows_are_not_assigned_to_bases():
+    row = {"source_base_name": "  Base   SPS ", "order_origin": " Loja ", "product_type": " Produto ",
+           "effective_base_code": "001", "effective_mapping_resolution": "CODE_MATCH", "mapped_region": "SPS",
+           "mapped_base_name": "Base SPS", "mapped_rm_area": "RM Sul", "mapped_rm": "RM A"}
+    scope = {"filters": {"regions": ["SPS"], "rms": ["RM A"], "rmAreas": ["RM Sul"], "rgms": ["RGM SPS"],
+                         "rgmRegions": ["SPS"], "bases": ["Base SPS"], "origins": ["Loja"], "productTypes": ["Produto"]}}
+    assert service._collection_scope_row(row, scope, "SPS")["resolved_base_code"] == "001"
+    assert service._collection_scope_row(row, scope, "SPE") is None
+    scope["filters"]["bases"] = ["Outra base"]
+    assert service._collection_scope_row(row, scope, "SPS") is None
+    unmapped = {"source_base_name": "Sem correspondência", "effective_base_code": None,
+                "effective_mapping_resolution": "UNMAPPED", "mapped_region": None}
+    scope["filters"] = {"regions": ["Sem regional"], "rms": [], "rmAreas": [], "rgms": [], "rgmRegions": [],
+                        "bases": ["Sem correspondência"], "origins": [], "productTypes": []}
+    selected = service._collection_scope_row(unmapped, scope, None)
+    assert selected is not None and selected["resolved_base_code"] is None and selected["mapped_region"] is None
+
+
+def test_collection_rate_attempt_analysis_keeps_zero_denominator_unavailable():
+    message, result = service._build_collection_rate_attempt_analysis(
+        operational_date=date(2026, 10, 22), attempted=0, planned=0, total_orders=0,
+        bases=[], unmapped_planned=0, regional_totals=[],
+    )
+    assert result["metric"]["rate"] is None
+    assert result["targetRate"] is None
+    assert "Geral: **—**" in message
 
 
 def test_recipient_is_fixed_before_database_or_artifact_access():

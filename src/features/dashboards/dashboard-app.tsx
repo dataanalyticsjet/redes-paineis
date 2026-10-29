@@ -1,6 +1,6 @@
 "use client";
 
-import { monitorMappingRevision } from "../../lib/data-foundation/mapping-revision.ts";
+import { currentMappingRevision, monitorMappingRevision } from "../../lib/data-foundation/mapping-revision.ts";
 
 import { CollectionRateV3MonthlyChart } from "./collection-rate-v3-monthly-chart.tsx";
 import { NoMovementOperationalAnalysis } from "./no-movement-operational-analysis.tsx";
@@ -145,7 +145,7 @@ import {
   type CollectionRateV3DashboardRow,
   type CollectionRateV3Filters,
 } from "../../lib/data-foundation/collection-rate-v3-dashboard.ts";
-import { buildCollectionRateV3OperationalAnalysis } from "../../lib/data-foundation/collection-rate-v3-operational-analysis.ts";
+import { buildCollectionRateV3OperationalAnalysis, digestCollectionRateV3Rows } from "../../lib/data-foundation/collection-rate-v3-operational-analysis.ts";
 import {
   monitoringAwaitingRate,
   monitoringCollectedVolume,
@@ -3279,9 +3279,22 @@ export function DashboardApp() {
   const [mappingEpoch, setMappingEpoch] = useState(0);
   const dashboardCacheIdentity = `${dashboardIdentityCacheKey(dashboardCacheSessionId, viewerIdentity)}:map:${mappingEpoch}`;
   const pddDataAuthorized = pddCollectionFailureV2State.identityKey === dashboardCacheIdentity;
+  const collectionRateFeishuAnchorPublicationId = useMemo(() => {
+    if (collectionRateV2State.status !== "ready") return null;
+    const periodRows = collectionRateV2State.records.filter((row) => {
+      const rowDate = String(row.deadline_at ?? "").slice(0, 10);
+      return rowDate >= collectionRateV2State.period.dateFrom && rowDate <= collectionRateV2State.period.dateTo;
+    });
+    const latestDate = periodRows.reduce((latest, row) => {
+      const rowDate = String(row.deadline_at ?? "").slice(0, 10);
+      return rowDate > latest ? rowDate : latest;
+    }, "");
+    const publicationId = periodRows.find((row) => String(row.deadline_at ?? "").slice(0, 10) === latestDate)?.publication_id;
+    return typeof publicationId === "string" && publicationId ? publicationId : null;
+  }, [collectionRateV2State.period.dateFrom, collectionRateV2State.period.dateTo, collectionRateV2State.records, collectionRateV2State.status]);
   const operationalFeishuTarget = view === "taxa" && isEffectiveMatrixAdminViewer && viewerAuthorization &&
-      collectionRateV2State.status === "ready" && collectionRateV2State.publicationId
-    ? { sourceId: "collection_rate" as const, publicationId: collectionRateV2State.publicationId }
+      collectionRateV2State.status === "ready" && collectionRateFeishuAnchorPublicationId
+    ? { sourceId: "collection_rate" as const, publicationId: collectionRateFeishuAnchorPublicationId }
     : view === "bipagem" && isEffectiveMatrixAdminViewer && viewerAuthorization && pddDataAuthorized &&
         pddCollectionFailureV2State.status === "ready" && pddCollectionFailureV2State.publicationId
       ? { sourceId: "pdd_collection_failure" as const, publicationId: pddCollectionFailureV2State.publicationId }
@@ -3291,7 +3304,7 @@ export function DashboardApp() {
   const canShowCollectionRateFeishuButton = Boolean(
     view === "taxa" && isEffectiveMatrixAdminViewer && viewerAuthorization &&
     operationalFeishuAvailability?.sourceId === "collection_rate" &&
-    operationalFeishuAvailability.publicationId === collectionRateV2State.publicationId &&
+    operationalFeishuAvailability.publicationId === collectionRateFeishuAnchorPublicationId &&
     operationalFeishuAvailability.enabled && operationalFeishuAvailability.publicationValid,
   );
   const canShowPddFeishuButton = Boolean(
@@ -5956,6 +5969,66 @@ export function DashboardApp() {
         : taxaV2OperationalAnalysis?.rowCount
           ? "ready"
           : "empty";
+  const taxaV2FeishuAllowedRegions = useMemo(() => [...new Set(taxaV2FilteredRows
+    .map((row) => row.region)
+    .filter((region) => Boolean(region) && region !== "Sem regional"))].sort((left, right) => left.localeCompare(right, "pt-BR")), [taxaV2FilteredRows]);
+  const collectionRateFeishuAnalysisForRegion = useCallback(async (regionCode: string | null) => {
+    if (!taxaV2AnalysisPeriodIsCurrent) return null;
+    const rows = regionCode
+      ? taxaV2FilteredRows.filter((row) => row.region === regionCode)
+      : taxaV2FilteredRows;
+    const periodRows = rows.filter((row) => row.data_date >= collectionRateV2State.period.dateFrom && row.data_date <= collectionRateV2State.period.dateTo);
+    if (!periodRows.length || !globalThis.crypto?.subtle) return null;
+    const identities = [...periodRows].sort((left, right) => right.data_date.localeCompare(left.data_date) || Number(left.source_row_no) - Number(right.source_row_no) || String(left.publication_id).localeCompare(String(right.publication_id)))
+      .map((row) => `${String(row.publication_id).toLowerCase()}:${Number(row.source_row_no)}`);
+    const identityBytes = new TextEncoder().encode(identities.map((identity) => `${identity}\n`).join(""));
+    const identityDigest = Array.from(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", identityBytes)), (value) => value.toString(16).padStart(2, "0")).join("");
+    const contentDigest = await digestCollectionRateV3Rows([...periodRows].sort((left, right) => right.data_date.localeCompare(left.data_date) || Number(left.source_row_no) - Number(right.source_row_no) || String(left.publication_id).localeCompare(String(right.publication_id))));
+    const filters = taxaV2AnalysisFilters.map((filter) => filter.label === "Regional" && regionCode
+      ? { ...filter, values: [regionCode] }
+      : filter);
+    const analysis = buildCollectionRateV3OperationalAnalysis(periodRows, {
+      period: collectionRateV2State.period,
+      publicationIds: collectionRateV2State.publicationIds,
+      filters,
+      locale: dashboardLocale(language),
+      latestDayMayBeIncomplete: collectionRateV2State.latestDayMayBeIncomplete,
+    });
+    const selectedRgms = [...(taxaV2Filters.rgms ?? [])];
+    const rgmRegions = selectedRgms.length
+      ? [...new Set(taxaV2Rows.filter((row) => row.data_date >= collectionRateV2State.period.dateFrom && row.data_date <= collectionRateV2State.period.dateTo && selectedRgms.includes(row.rgm)).map((row) => row.region))].sort()
+      : [];
+    const mappingRevision = currentMappingRevision();
+    if (!mappingRevision) return null;
+    const dashboardScope = {
+      dateFrom: collectionRateV2State.period.dateFrom,
+      dateTo: collectionRateV2State.period.dateTo,
+      filters: {
+        regions: [...(taxaV2Filters.regions ?? [])],
+        rms: [...(taxaV2Filters.rms ?? [])],
+        rmAreas: [...(taxaV2Filters.rmAreas ?? [])],
+        rgms: selectedRgms,
+        rgmRegions,
+        bases: [...(taxaV2Filters.bases ?? [])],
+        origins: [...(taxaV2Filters.origins ?? [])],
+        productTypes: [...(taxaV2Filters.productTypes ?? [])],
+      },
+      expectedRowIdentitySha256: identityDigest,
+      expectedRowContentSha256: contentDigest,
+      expectedRowCount: periodRows.length,
+      publicationIds: [...new Set(periodRows.map((row) => String(row.publication_id).toLowerCase()))].sort(),
+      mappingRevision,
+      scopeLabel: filters.filter((filter) => filter.values.length).map((filter) => `${filter.label}: ${filter.values.join(", ")}`).join(" · ") || "Todas as opções do período selecionado",
+    };
+    return { analysis, dashboardScope };
+  }, [collectionRateV2State.latestDayMayBeIncomplete, collectionRateV2State.period, collectionRateV2State.publicationIds, language, taxaV2AnalysisFilters, taxaV2AnalysisPeriodIsCurrent, taxaV2FilteredRows, taxaV2Filters, taxaV2Rows]);
+  const collectionRateFeishuScopeKey = JSON.stringify({
+    dateFrom: collectionRateV2State.period.dateFrom,
+    dateTo: collectionRateV2State.period.dateTo,
+    publicationIds: [...collectionRateV2State.publicationIds].sort(),
+    mappingRevision: currentMappingRevision(),
+    filters: Object.fromEntries(Object.entries(taxaV2Filters).map(([key, values]) => [key, [...(values ?? [])].sort()])),
+  });
   const taxaV2RegionalAttempts = useMemo(
     () => summarizeCollectionRateV3RegionalAttempts(taxaV2FilteredRows, taxaV2RegionalDates),
     [taxaV2FilteredRows, taxaV2RegionalDates],
@@ -6841,7 +6914,7 @@ export function DashboardApp() {
       return;
     }
     if (view === "taxa") {
-      if (!canShowCollectionRateFeishuButton || !viewerAuthorization || collectionRateV2State.status !== "ready" || !collectionRateV2State.publicationId) return;
+      if (!canShowCollectionRateFeishuButton || !viewerAuthorization || collectionRateV2State.status !== "ready" || !collectionRateFeishuAnchorPublicationId) return;
       setOperationalFeishuSource("collection_rate");
       return;
     }
@@ -7701,11 +7774,14 @@ export function DashboardApp() {
       {operationalFeishuSource && viewerAuthorization && isEffectiveMatrixAdminViewer &&
         (operationalFeishuSource === "collection_rate" ? canShowCollectionRateFeishuButton : canShowPddFeishuButton) ? (
         <OperationalFeishuReportDialog
-          key={`${operationalFeishuSource}:${operationalFeishuSource === "collection_rate" ? collectionRateV2State.publicationId : pddCollectionFailureV2State.publicationId}`}
+          key={`${operationalFeishuSource}:${operationalFeishuSource === "collection_rate" ? `${collectionRateFeishuAnchorPublicationId}:${collectionRateFeishuScopeKey}` : pddCollectionFailureV2State.publicationId}`}
           sourceId={operationalFeishuSource}
-          publicationId={operationalFeishuSource === "collection_rate" ? collectionRateV2State.publicationId ?? "" : pddCollectionFailureV2State.publicationId ?? ""}
+          publicationId={operationalFeishuSource === "collection_rate" ? collectionRateFeishuAnchorPublicationId ?? "" : pddCollectionFailureV2State.publicationId ?? ""}
           authorization={viewerAuthorization}
           t={t}
+          collectionRateAnalysisForRegion={operationalFeishuSource === "collection_rate" ? collectionRateFeishuAnalysisForRegion : undefined}
+          allowedCollectionRateRegions={operationalFeishuSource === "collection_rate" ? taxaV2FeishuAllowedRegions : undefined}
+          collectionRateScopeKey={operationalFeishuSource === "collection_rate" ? collectionRateFeishuScopeKey : undefined}
           onClose={() => setOperationalFeishuSource(null)}
         />
       ) : null}

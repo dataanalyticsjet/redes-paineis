@@ -1,4 +1,40 @@
 import type { CollectionRateV3DashboardRow } from "./collection-rate-v3-dashboard.ts";
+import { COLLECTION_RATE_V3_COLUMNS, type CollectionRateV3Record } from "./collection-rate-v3.ts";
+
+const CONTENT_DIGEST_CHUNK_BYTES = 1024 * 1024;
+
+export async function digestCollectionRateV3Rows(records: readonly CollectionRateV3Record[]): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error("secure_digest_unavailable");
+  const encoder = new TextEncoder();
+  let chunk = new Uint8Array(CONTENT_DIGEST_CHUNK_BYTES);
+  let chunkLength = 0;
+  let byteCount = 0;
+  const chunkDigests: Uint8Array[] = [];
+  const flush = async () => {
+    if (!chunkLength) return;
+    chunkDigests.push(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", chunk.subarray(0, chunkLength))));
+    chunk = new Uint8Array(CONTENT_DIGEST_CHUNK_BYTES);
+    chunkLength = 0;
+  };
+  for (const record of records) {
+    const payload = encoder.encode(`${JSON.stringify(COLLECTION_RATE_V3_COLUMNS.map((field) => record[field] ?? null))}\n`);
+    byteCount += payload.byteLength;
+    let offset = 0;
+    while (offset < payload.byteLength) {
+      const take = Math.min(CONTENT_DIGEST_CHUNK_BYTES - chunkLength, payload.byteLength - offset);
+      chunk.set(payload.subarray(offset, offset + take), chunkLength);
+      chunkLength += take;
+      offset += take;
+      if (chunkLength === CONTENT_DIGEST_CHUNK_BYTES) await flush();
+    }
+  }
+  await flush();
+  const manifest = new Uint8Array(chunkDigests.length * 32 + 8);
+  chunkDigests.forEach((digest, index) => manifest.set(digest, index * 32));
+  new DataView(manifest.buffer).setBigUint64(manifest.byteLength - 8, BigInt(byteCount));
+  const finalDigest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", manifest));
+  return [...finalDigest].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
 
 export interface CollectionRateV3AnalysisPeriod {
   dateFrom: string;
@@ -175,7 +211,7 @@ export function buildCollectionRateV3OperationalAnalysis(
   const denominatorLabel = formatCount(total.denominator, locale);
   const numeratorLabel = formatCount(total.numerator, locale);
   const rateLabel = formatRate(overallRate, locale);
-  const publicationCount = new Set(options.publicationIds ?? []).size;
+  const publicationCount = new Set(periodRows.map((row) => row.publication_id).filter((id): id is string => typeof id === "string" && id.length > 0)).size;
   const lines = [
     greetingPt,
     greetingZh,

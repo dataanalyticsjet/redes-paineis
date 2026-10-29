@@ -6,11 +6,14 @@ import { DashboardSingleSelect, type DashboardSingleSelectOption } from "./dashb
 import { apiFetch } from "../../lib/api-url.ts";
 import { parseAnalysisMarkdown, serializeAnalysisRuns } from "../../lib/no-movement-analysis-editor.mjs";
 import type { DashboardTranslator } from "../../lib/i18n";
+import type { CollectionRateV3OperationalAnalysis } from "../../lib/data-foundation/collection-rate-v3-operational-analysis.ts";
 
 type OperationalSource = "collection_rate" | "pdd_collection_failure";
 type RecipientOption = { key: string; label: string; type: "email" | "chat_id"; available: boolean; unavailableReason: string | null; regionCode: string | null };
 type Options = { sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; regions: string[]; scopeRegionCode: string | null; recipients: RecipientOption[]; sendEnabled: boolean };
-type Prepared = { reportId: string; sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; operationalDate: string; regionCode: string | null; regionLabel: string; recipientKey: string; recipientLabel: string; recipientType: "email" | "chat_id"; analysis: string; recordCount: number; excelFileName: string; excelBytes: number; pngBytes: number; state: "PREPARED" | "CONFIRMED" | "PARTIAL" | "PENDING" | "SENT"; sendEnabled: boolean; previouslySent?: boolean };
+type CollectionRateDashboardScope = { dateFrom: string; dateTo: string; filters: { regions: string[]; rms: string[]; rmAreas: string[]; rgms: string[]; rgmRegions: string[]; bases: string[]; origins: string[]; productTypes: string[] }; expectedRowIdentitySha256: string; expectedRowCount: number; publicationIds: string[]; mappingRevision: string; scopeLabel: string };
+type CollectionRateAnalysisBundle = { analysis: CollectionRateV3OperationalAnalysis; dashboardScope: CollectionRateDashboardScope };
+type Prepared = { reportId: string; sourceId: OperationalSource; publicationId: string; publicationVersion: number; contractVersion: number; mapVersionId: string; publishedAt: string | null; operationalDate: string; periodStart?: string; periodEnd?: string; scopeLabel?: string; regionCode: string | null; regionLabel: string; recipientKey: string; recipientLabel: string; recipientType: "email" | "chat_id"; analysis: string; recordCount: number; excelFileName: string; excelBytes: number; pngBytes: number; state: "PREPARED" | "CONFIRMED" | "PARTIAL" | "PENDING" | "SENT"; sendEnabled: boolean; previouslySent?: boolean };
 
 async function requestJson<T>(path: string, authorization: string, method = "GET", body?: object, signal?: AbortSignal): Promise<T> {
   const headers = new Headers();
@@ -70,8 +73,11 @@ function pastePlainText(editor: HTMLElement, value: string) {
   range.collapse(true); selection.removeAllRanges(); selection.addRange(range);
 }
 
-export function OperationalFeishuReportDialog({ sourceId, publicationId, authorization, t, onClose }: {
+export function OperationalFeishuReportDialog({ sourceId, publicationId, authorization, t, onClose, collectionRateAnalysisForRegion, allowedCollectionRateRegions, collectionRateScopeKey }: {
   sourceId: OperationalSource; publicationId: string; authorization: string; t: DashboardTranslator; onClose: () => void;
+  collectionRateAnalysisForRegion?: (regionCode: string | null) => Promise<CollectionRateAnalysisBundle | null>;
+  allowedCollectionRateRegions?: readonly string[];
+  collectionRateScopeKey?: string;
 }) {
   const [options, setOptions] = useState<Options | null>(null);
   const [region, setRegion] = useState("");
@@ -84,6 +90,7 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
   const editorRef = useRef<HTMLDivElement>(null);
   const analysisRef = useRef(analysis);
   const attempted = useRef("");
+  const prepareGeneration = useRef(0);
   const scopedOptions = options?.scopeRegionCode === (region || null) ? options : null;
   const selectedOption = scopedOptions?.recipients.find(item => item.key === recipient && item.available);
   const activeRecipient = selectedOption?.key
@@ -93,7 +100,9 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
   const recipientOptions = scopedOptions?.recipients ?? [];
   const regionSelectOptions: DashboardSingleSelectOption[] = [
     { value: "", label: t("Todas as regionais") },
-    ...(scopedOptions?.regions ?? []).map(item => ({ value: item, label: item })),
+    ...(scopedOptions?.regions ?? [])
+      .filter(item => !allowedCollectionRateRegions || allowedCollectionRateRegions.includes(item))
+      .map(item => ({ value: item, label: item })),
   ];
   const recipientSelectOptions: DashboardSingleSelectOption[] = [
     ...recipientOptions.filter(item => item.type === "email").map(item => ({ value: item.key, label: `${item.label}${!item.available && item.unavailableReason ? ` — ${t(item.unavailableReason)}` : ""}`, group: t("Pessoas"), disabled: !item.available })),
@@ -120,27 +129,40 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
   }, [busy, onClose]);
 
   const prepare = useCallback(async () => {
+    const generation = ++prepareGeneration.current;
     setBusy(true); setError(null); setStatus(null); setPrepared(null); setAnalysis("");
     try {
-      const value = await requestJson<Prepared>(`${route}/prepare`, authorization, "POST", { publicationId, regionCode: region || null, recipientKey: activeRecipient });
-      setPrepared(value); setAnalysis(value.analysis);
+      const filteredBundle = sourceId === "collection_rate"
+        ? await collectionRateAnalysisForRegion?.(region || null)
+        : null;
+      if (sourceId === "collection_rate" && (!filteredBundle || filteredBundle.analysis.rowCount === 0)) {
+        throw new Error("collection_rate_filtered_analysis_unavailable");
+      }
+      if (generation !== prepareGeneration.current) return;
+      const value = await requestJson<Prepared>(`${route}/prepare`, authorization, "POST", {
+        publicationId, regionCode: region || null, recipientKey: activeRecipient,
+        ...(filteredBundle ? { dashboardScope: filteredBundle.dashboardScope } : {}),
+      });
+      if (generation !== prepareGeneration.current) return;
+      const ready = filteredBundle ? { ...value, analysis: filteredBundle.analysis.message } : value;
+      setPrepared(ready); setAnalysis(ready.analysis);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "operational_feishu_request_failed"); }
-    finally { setBusy(false); }
-  }, [activeRecipient, authorization, publicationId, region, route]);
+    finally { if (generation === prepareGeneration.current) setBusy(false); }
+  }, [activeRecipient, authorization, collectionRateAnalysisForRegion, publicationId, region, route, sourceId]);
 
   useEffect(() => {
     if (!scopedOptions || !activeRecipient) return;
-    const key = `${publicationId}|${region}|${activeRecipient}`;
+    const key = `${publicationId}|${region}|${activeRecipient}|${sourceId === "collection_rate" ? collectionRateScopeKey ?? "" : ""}`;
     if (attempted.current === key) return;
     attempted.current = key;
     void prepare();
-  }, [activeRecipient, prepare, publicationId, region, scopedOptions]);
+  }, [activeRecipient, collectionRateScopeKey, prepare, publicationId, region, scopedOptions, sourceId]);
 
   const changeScope = (nextRegion: string, nextRecipient: string) => {
     if (prepared || analysisRef.current) {
       if (!window.confirm(t("Alterar regional ou destinatário descarta a preparação e as edições. Continuar?"))) return;
     }
-    attempted.current = ""; setPrepared(null); setAnalysis(""); analysisRef.current = ""; setStatus(null); setError(null);
+    prepareGeneration.current += 1; attempted.current = ""; setPrepared(null); setAnalysis(""); analysisRef.current = ""; setStatus(null); setError(null);
     setRegion(nextRegion); setRecipient(nextRecipient);
   };
 
@@ -189,7 +211,7 @@ export function OperationalFeishuReportDialog({ sourceId, publicationId, authori
       <div className="no-movement-feishu-source">
         <p><strong>{t("Publicação:")}</strong> {publicationId}</p>
         <p><strong>{t("Contrato:")}</strong> V{scopedOptions?.contractVersion ?? "—"} · {t("Data da fonte:")} {publishedDate}</p>
-        {prepared ? <p><strong>{t("Data operacional:")}</strong> {prepared.operationalDate} · {t("Registros:")} {prepared.recordCount.toLocaleString()}</p> : null}
+        {prepared ? <p><strong>{t("Período e escopo:")}</strong> {prepared.periodStart ?? prepared.operationalDate}{prepared.periodEnd && prepared.periodEnd !== prepared.periodStart ? ` a ${prepared.periodEnd}` : ""} · {prepared.scopeLabel ?? prepared.regionLabel} · {t("Registros:")} {prepared.recordCount.toLocaleString()}</p> : null}
         {prepared ? <p><strong>{t("Destino confirmado:")}</strong> {prepared.recipientLabel} · {prepared.recipientType === "email" ? t("Pessoa · e-mail") : t("Grupo · chat Feishu")}</p> : null}
       </div>
       <label id="operational-feishu-region-label">{t("Regional do relatório")}</label>

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { CollectionRateV3DashboardRow } from "../src/lib/data-foundation/collection-rate-v3-dashboard.ts";
 import { filterCollectionRateV3Rows } from "../src/lib/data-foundation/collection-rate-v3-dashboard.ts";
-import { buildCollectionRateV3OperationalAnalysis } from "../src/lib/data-foundation/collection-rate-v3-operational-analysis.ts";
+import { buildCollectionRateV3OperationalAnalysis, digestCollectionRateV3Rows } from "../src/lib/data-foundation/collection-rate-v3-operational-analysis.ts";
 
 function row(overrides: Partial<CollectionRateV3DashboardRow> = {}): CollectionRateV3DashboardRow {
   return {
@@ -55,6 +55,18 @@ function row(overrides: Partial<CollectionRateV3DashboardRow> = {}): CollectionR
 const period = { dateFrom: "2026-10-20", dateTo: "2026-10-20" };
 const fixedTime = new Date("2026-10-20T09:00:00-03:00");
 
+test("content digest matches backend canonical encoding and detects changed values with stable row identity", async () => {
+  const original = row({ deadline_at: "2026-10-20T03:00:00", publication_id: "same-publication", source_row_no: 17,
+    collection_rate: "0.5", collection_on_time_rate: "0.4", collection_rate_with_attempts: "0.8", seller_collection_rate: "0.5" });
+  const originalDigest = await digestCollectionRateV3Rows([original]);
+  assert.equal(originalDigest, "bc5130064f434851dd15eb0135c650e1720ceadec8cfb0f31d119545c1c102aa");
+  const updated = { ...original, collected_plus_attempts_quantity: 81 };
+  assert.equal(updated.publication_id, original.publication_id);
+  assert.equal(updated.source_row_no, original.source_row_no);
+  assert.notEqual(await digestCollectionRateV3Rows([updated]), originalDigest);
+  assert.equal(await digestCollectionRateV3Rows([original]), originalDigest);
+});
+
 test("uses the dashboard's official attempt numerator and weighted denominator for the filtered period", () => {
   const rows = [
     row({ collected_plus_attempts_quantity: 50, quantity_to_collect: 100, baseCode: "A", base: "A" }),
@@ -75,8 +87,8 @@ test("uses the dashboard's official attempt numerator and weighted denominator f
 
 test("one-region and combined dashboard filters cannot leak other regional rows", () => {
   const rows = [
-    row({ region: "SPE", origin: "TikTok", productType: "EXPRESS" }),
-    row({ region: "SPS", origin: "Temu", productType: "ECONOMY", baseCode: "B2", base: "Base 2" }),
+    row({ region: "SPE", origin: "TikTok", productType: "EXPRESS", publication_id: "pub-spe" }),
+    row({ region: "SPS", origin: "Temu", productType: "ECONOMY", baseCode: "B2", base: "Base 2", publication_id: "pub-sps" }),
   ];
   const filtered = filterCollectionRateV3Rows(rows, {
     regions: new Set(["SPE"]),
@@ -98,7 +110,7 @@ test("one-region and combined dashboard filters cannot leak other regional rows"
   assert.doesNotMatch(analysis.message, /SPS|Temu|Base 2/);
   assert.match(analysis.message, /Regional: SPE/);
   assert.match(analysis.message, /区域: SPE/);
-  assert.equal(analysis.publicationCount, 2);
+  assert.equal(analysis.publicationCount, 1);
 });
 
 test("regional and base rankings use weighted rates and volume-sensitive deviation, not a fixed target", () => {
