@@ -117,7 +117,7 @@ def _seed_mapping(engine, map_id: bytes, *, version_no: int, code: str = "000001
               (map_version_id,base_code,base_name,source_row_no)
             VALUES (:map,:code,'Base Test',1)
         """), {"map": map_id, "code": code})
-        if version_no == 1:
+        if connection.execute(text("SELECT 1 FROM base_mapping_current WHERE current_key='OFFICIAL'")).first() is None:
             connection.execute(text("""
                 INSERT INTO base_mapping_current (current_key,map_version_id,changed_by_user_id)
                 VALUES ('OFFICIAL',:map,1)
