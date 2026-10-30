@@ -919,7 +919,7 @@ def load_import_job(connection: Connection, job_id: str, *, lock: bool = False) 
         SELECT job_id, source_id, contract_version, validation_map_version_id, reused_publication_id,
                job_state, original_file_name, stored_file_key, file_size_bytes,
                file_sha256, input_row_count, valid_row_count, error_count,
-               submitted_by_user_id
+               submitted_by_user_id, submitted_by_service_principal_id
         FROM import_jobs
         WHERE job_id = :job_id
     """ + (_for_update_clause(connection) if lock else "")
