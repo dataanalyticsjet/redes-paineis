@@ -277,13 +277,13 @@ def receive_part(engine: Engine, *, job_id: str, principal: str, day: str,
     with engine.connect() as connection:
         job = load_import_job(connection, job_id)
         _owned(job, principal)
-        batch = connection.execute(text("SELECT batch_state FROM data_import_batches WHERE job_id=:job"),
-                                   {"job": binary}).scalar_one_or_none()
+        batch_state = connection.execute(text("SELECT batch_state FROM data_import_batches WHERE job_id=:job"),
+                                         {"job": binary}).scalar_one_or_none()
         part = connection.execute(text("SELECT * FROM data_import_batch_parts WHERE job_id=:job AND data_date=:day"),
                                   {"job": binary, "day": date.fromisoformat(day)}).mappings().first()
-        if not batch or not part:
+        if batch_state is None or not part:
             raise DataFoundationError("t4t5_batch_part_not_found", 404)
-        if batch["batch_state"] not in {"RECEIVING", "FAILED", "INVALID"}:
+        if batch_state not in {"RECEIVING", "FAILED", "INVALID"}:
             raise DataFoundationError("t4t5_batch_not_receiving", 409)
         expected_size, expected_hash = int(part["expected_size_bytes"]), bytes(part["expected_sha256"]).hex()
         stored_key = part["stored_file_key"]
