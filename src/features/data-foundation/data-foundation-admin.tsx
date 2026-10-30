@@ -121,6 +121,9 @@ type MappingStatus = {
 };
 
 const NAME_MAPPED_SOURCES = new Set(["collection_monitoring", "collection_rate", "jt_monitoring"]);
+// Keep the legacy source and its publication history addressable by source_id,
+// but show only the official T4/T5 source card in Central de Dados.
+const HIDDEN_DUPLICATE_CENTRAL_SOURCE_IDS = new Set(["jt_monitoring"]);
 const INITIAL_MAPPING_SOURCE = "base_mapping_official";
 const T4T5_SESSION_JOB_KEY = "new-bi:t4t5:import-job";
 const API_ERROR_LABELS: Record<string, string> = {
@@ -652,7 +655,7 @@ export function DataFoundationAdmin({
       {notice ? <div className="data-foundation-notice" role="status"><Check size={17} /> {t(notice)}</div> : null}
       {loading ? <p className="data-foundation-loading">{t("Carregando fontes…")}</p> : null}
       {!loading && sources.length ? <div className="data-foundation-source-cards" aria-label={t("Fontes de dados")}>
-        {sources.filter((source) => source.source_id !== "base_mapping_official").map((source) => {
+        {sources.filter((source) => source.source_id !== "base_mapping_official" && !HIDDEN_DUPLICATE_CENTRAL_SOURCE_IDS.has(source.source_id)).map((source) => {
           const publication = publications[source.source_id]?.[0];
           const sourceContract = contracts[source.source_id];
           return <article className="data-foundation-source-card" key={source.source_id}>

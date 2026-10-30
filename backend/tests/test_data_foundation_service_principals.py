@@ -96,8 +96,10 @@ def test_only_allowlisted_source_contract_pairs_can_be_granted():
     assert allowed_bot_contracts() == frozenset({
         ("no_movement", 2), ("pdd_collection_failure", 2),
         ("collection_rate", 3), ("collection_monitoring", 2),
+        ("collection_monitoring_t4_t5", 2),
     })
     assert ("collection_monitoring_t4_t5", 1) not in allowed_bot_contracts()
+    assert ("collection_monitoring_t4_t5", 2) in allowed_bot_contracts()
     assert ("collection_rate", 2) not in allowed_bot_contracts()
 
 
@@ -108,7 +110,9 @@ def test_scope_requires_exact_source_version_and_active_grant():
         assert principal_can_publish(connection, "windows-bots", "collection_rate", 3)
         assert not principal_can_publish(connection, "windows-bots", "collection_rate", 2)
         assert not principal_can_publish(connection, "windows-bots", "collection_monitoring_t4_t5", 1)
+        assert principal_can_publish(connection, "windows-bots", "collection_monitoring_t4_t5", 2)
     with engine.begin() as connection:
         connection.execute(text("UPDATE data_service_principal_contract_scopes SET is_active=0 WHERE source_id='collection_rate'"))
+        connection.execute(text("UPDATE data_service_principal_contract_scopes SET is_active=0 WHERE source_id='collection_monitoring_t4_t5' AND contract_version=2"))
     with engine.connect() as connection:
         assert not principal_can_publish(connection, "windows-bots", "collection_rate", 3)

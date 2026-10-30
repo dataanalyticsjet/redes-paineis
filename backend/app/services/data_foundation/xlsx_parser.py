@@ -368,6 +368,8 @@ def _normalized_header(value: str) -> str:
 def _max_uncompressed_workbook_bytes(contract: SourceContract) -> int:
     if contract.source_id == "collection_monitoring_t4_t5" and contract.version == 1:
         return MAX_UNCOMPRESSED_COLLECTION_MONITORING_T4_T5_BYTES
+    if contract.source_id == "collection_monitoring_t4_t5" and contract.version == 2:
+        return 256 * 1024 * 1024
     return MAX_UNCOMPRESSED_WORKBOOK_BYTES
 
 
@@ -1636,7 +1638,7 @@ def parse_workbook(
     if not content:
         raise WorkbookValidationError("workbook_empty", 400)
     if isinstance(content, Path):
-        if contract.source_id != "collection_monitoring_t4_t5" or contract.version != 1:
+        if contract.source_id != "collection_monitoring_t4_t5" or contract.version not in {1, 2}:
             raise WorkbookValidationError("workbook_path_not_supported")
         if trusted_file_sha256 is not None and expected_file_sha256 is not None:
             raise WorkbookValidationError("workbook_hash_configuration_invalid")

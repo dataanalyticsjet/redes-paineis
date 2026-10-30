@@ -56,6 +56,8 @@ from app.services.data_foundation.repository import (
     validate_job_again,
 )
 from app.services.data_foundation.xlsx_parser import WorkbookValidationError, parse_workbook
+from app.services.data_foundation import t4t5_batches
+
 from app.services.data_foundation.network_directory_candidate import preview_network_directory
 from app.services.data_foundation.network_directory_versioning import prepare_network_directory_candidate
 from app.services.data_foundation.network_directory_activation import (
@@ -255,6 +257,24 @@ def _require_service_scope(
         raise HTTPException(status_code=503, detail="data_store_unavailable") from None
     if not allowed:
         raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+
+
+def _require_approved_service_contract(engine: Any, source_id: str, contract_version: int) -> None:
+    """Machine publishing requires an explicitly active source and approved contract."""
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(text("""
+                SELECT registry.source_state, contract.contract_state
+                FROM data_source_registry AS registry
+                JOIN source_contract_versions AS contract
+                  ON contract.source_id = registry.source_id
+                WHERE registry.source_id = :source_id
+                  AND contract.contract_version = :contract_version
+            """), {"source_id": source_id, "contract_version": contract_version}).mappings().first()
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+    if row is None or row["source_state"] != "ACTIVE" or row["contract_state"] != "APPROVED":
+        raise HTTPException(status_code=409, detail="source_contract_not_approved")
 
 
 def _require_service_job_scope(engine: Any, principal: ServicePrincipal, job_id: str) -> tuple[str, int]:
@@ -1196,6 +1216,138 @@ def publish_import(
             publication_id=str(publication["publicationId"]),
         )
     return publication
+
+
+
+
+class T4T5BatchCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    parts: list[dict[str, Any]] = Field(min_length=1, max_length=t4t5_batches.MAX_PARTS)
+
+
+@router.post("/machine/import-batches")
+def machine_create_t4t5_batch(
+    payload: T4T5BatchCreatePayload,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=8, max_length=128),
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, Any]:
+    _require_bot_publishing()
+    if not idempotency_key:
+        raise HTTPException(status_code=422, detail="idempotency_key_required")
+    source_id, version = t4t5_batches.SOURCE, t4t5_batches.VERSION
+    _require_service_scope(_engine(), principal, source_id, version)
+    if (source_id, version) not in allowed_bot_contracts():
+        raise HTTPException(status_code=403, detail="service_source_contract_forbidden")
+    _require_approved_service_contract(_engine(), source_id, version)
+    try:
+        with _engine().connect() as connection:
+            resolver = load_mapping_resolver(connection, source_id=source_id)
+        if resolver.map_version_id is None:
+            raise DataFoundationError("official_mapping_unavailable", 409)
+        return t4t5_batches.create_batch(
+            _engine(), principal=principal.principal_id, idempotency_key=idempotency_key,
+            raw_parts=payload.parts, map_version=resolver.map_version_id, request_id=_request_id(request),
+        )
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.put("/machine/import-batches/{job_id}/parts/{data_date}")
+async def machine_upload_t4t5_batch_part(
+    job_id: str,
+    data_date: date,
+    file: UploadFile = File(...),
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, Any]:
+    _require_bot_publishing()
+    _require_service_scope(_engine(), principal, t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    _require_approved_service_contract(_engine(), t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    try:
+        return await run_in_threadpool(
+            t4t5_batches.receive_part, _engine(), job_id=job_id, principal=principal.principal_id,
+            day=data_date.isoformat(), directory=settings.data_import_staging_directory, stream=file.file,
+        )
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.get("/machine/import-batches/{job_id}")
+def machine_t4t5_batch_status(
+    job_id: str,
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, Any]:
+    _require_bot_publishing()
+    _require_service_scope(_engine(), principal, t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    try:
+        return t4t5_batches.batch_status(_engine(), job_id, principal.principal_id)
+    except DataFoundationError as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/machine/import-batches/{job_id}/validate")
+def machine_validate_t4t5_batch(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, Any]:
+    _require_bot_publishing()
+    _require_service_scope(_engine(), principal, t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    _require_approved_service_contract(_engine(), t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    try:
+        status = t4t5_batches.queue_batch_validation(_engine(), job_id=job_id, principal=principal.principal_id)
+        if status.get("startWorker") is True:
+            background_tasks.add_task(
+                t4t5_batches.validate_batch_safely, _engine(), job_id=job_id,
+                principal=principal.principal_id, directory=settings.data_import_staging_directory,
+            )
+        return status
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
+
+
+@router.post("/machine/import-batches/{job_id}/publish")
+def machine_publish_t4t5_batch(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=8, max_length=128),
+    principal: ServicePrincipal = Depends(require_service_principal),
+) -> dict[str, Any]:
+    _require_bot_publishing()
+    if not idempotency_key:
+        raise HTTPException(status_code=422, detail="idempotency_key_required")
+    _require_service_scope(_engine(), principal, t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    _require_approved_service_contract(_engine(), t4t5_batches.SOURCE, t4t5_batches.VERSION)
+    settings = get_settings()
+    assert settings.data_import_staging_directory is not None
+    try:
+        queued = t4t5_batches.queue_batch_publication(
+            _engine(), job_id=job_id, principal=principal.principal_id, idempotency_key=idempotency_key,
+        )
+        if queued.get("startWorker") is True:
+            background_tasks.add_task(
+                t4t5_batches.publish_batch_safely, _engine(), job_id=job_id,
+                principal=principal.principal_id, directory=settings.data_import_staging_directory,
+                idempotency_key=idempotency_key, request_id=_request_id(request),
+            )
+        return queued
+    except (DataFoundationError, WorkbookValidationError) as error:
+        raise _error(error) from None
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="data_store_unavailable") from None
 
 
 @router.post("/machine/imports/preview")

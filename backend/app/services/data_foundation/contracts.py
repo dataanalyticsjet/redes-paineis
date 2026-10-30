@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 
@@ -451,6 +451,16 @@ NETWORK_DIRECTORY_CONTRACT = SourceContract(
     expected_sample_rows=None,
 )
 
+COLLECTION_MONITORING_T4_T5_V2_CONTRACT = replace(
+    CONTRACTS["collection_monitoring_t4_t5"],
+    version=2,
+    history_policy="DAILY_REPLACE_DATES",
+    grain_description=(
+        "Lote lógico com uma partição diária por arquivo. Todas as partições do manifesto "
+        "são publicadas juntas sob uma única publicação e um único mapa DoomsDay."
+    ),
+)
+
 CONTRACT_VERSIONS: dict[tuple[str, int], SourceContract] = {
     (source_id, contract.version): contract for source_id, contract in CONTRACTS.items()
 }
@@ -458,6 +468,7 @@ CONTRACT_VERSIONS[("pdd_collection_failure", 2)] = PDD_COLLECTION_FAILURE_V2_CON
 CONTRACT_VERSIONS[("collection_rate", 2)] = COLLECTION_RATE_V2_CONTRACT
 CONTRACT_VERSIONS[("collection_rate", 3)] = COLLECTION_RATE_V3_CONTRACT
 CONTRACT_VERSIONS[("collection_monitoring", 2)] = COLLECTION_MONITORING_V2_CONTRACT
+CONTRACT_VERSIONS[("collection_monitoring_t4_t5", 2)] = COLLECTION_MONITORING_T4_T5_V2_CONTRACT
 CONTRACT_VERSIONS[("base_mapping_official", 2)] = NETWORK_DIRECTORY_CONTRACT
 
 
@@ -467,6 +478,9 @@ def get_contract(source_id: str, version: int | None = None) -> SourceContract:
         for (registered_source_id, contract_version), contract in CONTRACT_VERSIONS.items()
         if registered_source_id == source_id
     ]
+    if version is None and source_id == "collection_monitoring_t4_t5":
+        # Preserve V1 as the administrative/default contract; V2 is selected only explicitly by the batch protocol.
+        return CONTRACTS[source_id]
     if version is not None:
         contract = CONTRACT_VERSIONS.get((source_id, version))
         if contract is None:

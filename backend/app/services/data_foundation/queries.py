@@ -184,7 +184,7 @@ def _query_plan(
              AND selected_publication.publication_state = 'PUBLISHED'
         """
         params["contract_version"] = contract.version
-    elif source_id == "collection_monitoring_t4_t5" and contract.version == 1:
+    elif source_id == "collection_monitoring_t4_t5" and contract.version in {1, 2}:
         # Drive this high-volume source from its active daily heads. On MySQL,
         # STRAIGHT_JOIN keeps the access path head -> published publication ->
         # fact lookup, using the existing fact index on source/publication/date.
@@ -196,7 +196,7 @@ def _query_plan(
             {join_operator} source_publications AS active_publication
               ON active_publication.source_id = head.source_id
              AND active_publication.publication_id = head.publication_id
-             AND active_publication.contract_version = :contract_version
+             AND active_publication.contract_version IN (1, 2)
              AND active_publication.publication_state = 'PUBLISHED'
             {join_operator} `{table}` AS fact
               ON fact.source_id = head.source_id
@@ -284,19 +284,19 @@ def _query_plan(
     where_parts = [
         "fact.source_id = :source_id",
     ]
-    if source_id == "collection_monitoring_t4_t5" and contract.version == 1 and publication_id is None:
+    if source_id == "collection_monitoring_t4_t5" and contract.version in {1, 2} and publication_id is None:
         where_parts.append("head.source_id = :source_id")
     if publication_id is not None:
         where_parts.append("fact.publication_id = :selected_publication_id")
     where_parts.append(scope_predicate)
     if date_from:
         where_parts.append("fact.data_date >= :date_from")
-        if source_id == "collection_monitoring_t4_t5" and contract.version == 1 and publication_id is None:
+        if source_id == "collection_monitoring_t4_t5" and contract.version in {1, 2} and publication_id is None:
             where_parts.append("head.data_date >= :date_from")
         params["date_from"] = date_from
     if date_to:
         where_parts.append("fact.data_date <= :date_to")
-        if source_id == "collection_monitoring_t4_t5" and contract.version == 1 and publication_id is None:
+        if source_id == "collection_monitoring_t4_t5" and contract.version in {1, 2} and publication_id is None:
             where_parts.append("head.data_date <= :date_to")
         params["date_to"] = date_to
     if _is_active_text_filter(base_code):
@@ -403,7 +403,7 @@ def _matrix_daily_metadata_eligible(
     ) or (
         source_id == "collection_monitoring" and contract_version == 2
     ) or (
-        source_id == "collection_monitoring_t4_t5" and contract_version == 1
+        source_id == "collection_monitoring_t4_t5" and contract_version in {1, 2}
     )
     return (
         supported_daily_contract
@@ -426,7 +426,7 @@ def _matrix_collection_monitoring_v2_page_eligible(
     return (
         (
             source_id == "collection_monitoring" and contract_version == 2
-            or source_id == "collection_monitoring_t4_t5" and contract_version == 1
+            or source_id == "collection_monitoring_t4_t5" and contract_version in {1, 2}
         )
         and _is_resolved_matrix_scope(identity)
         and not _is_active_text_filter(base_code)

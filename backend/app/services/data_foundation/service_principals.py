@@ -28,6 +28,7 @@ def allowed_bot_contracts() -> frozenset[tuple[str, int]]:
         ("pdd_collection_failure", 2),
         ("collection_rate", 3),
         ("collection_monitoring", 2),
+        ("collection_monitoring_t4_t5", 2),
     })
 
 
