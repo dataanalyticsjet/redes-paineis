@@ -470,8 +470,10 @@ def test_mysql8_logical_batch_publication_resume_concurrency_and_rollback(
 
     # Inject a failure after the real final transaction has switched both
     # pointers but before commit. Rollback must retain the former publication.
-    failed_payloads = [_part_workbook(day, 1) for day in partial_days]
-    failed_parts = [_manifest_part(day, content, 1) for day, content in zip(partial_days, failed_payloads)]
+    # Use a new content fingerprint so the unique publication fingerprint does
+    # not reject this batch before the injected pre-commit failure is reached.
+    failed_payloads = [_part_workbook(day, 2) for day in partial_days]
+    failed_parts = [_manifest_part(day, content, 2) for day, content in zip(partial_days, failed_payloads)]
     failed = _create_import_batch(engine, failed_parts, "mysql-precommit-failure-004")
     failed_job_id = str(failed["jobId"])
     prior_heads = {}
