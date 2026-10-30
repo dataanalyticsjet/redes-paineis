@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import re
+import uuid
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from datetime import date, datetime
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.pool import StaticPool
 
+from app.api import data_foundation as api
 from app.services.data_foundation import repository as repo
 from app.services.data_foundation.contracts import contract_sha256, get_contract
-from app.services.data_foundation.service_principals import allowed_bot_contracts
+from app.services.data_foundation.service_principals import ServicePrincipal, allowed_bot_contracts
 from app.services.data_foundation.xlsx_parser import MappingResolver, PreviewSummary
 
 
@@ -20,7 +25,9 @@ CONTENT = b"synthetic no-movement workbook bytes"
 
 
 def _engine():
-    engine = create_engine("sqlite://")
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False},
+    )
 
     @event.listens_for(engine, "before_cursor_execute", retval=True)
     def sqlite_compat(_connection, _cursor, statement, parameters, _context, _executemany):
@@ -47,6 +54,8 @@ def _engine():
             )
         """)
         connection.exec_driver_sql("CREATE TABLE data_source_registry (source_id TEXT PRIMARY KEY, source_state TEXT, history_policy TEXT)")
+        connection.exec_driver_sql("CREATE TABLE data_service_principal_contract_scopes (service_principal_id TEXT, source_id TEXT, contract_version INTEGER, is_active INTEGER)")
+        connection.execute(text("INSERT INTO data_service_principal_contract_scopes VALUES (:principal,:source,2,1)"), {"principal": PRINCIPAL, "source": "no_movement"})
         connection.exec_driver_sql("""
             CREATE TABLE source_contract_versions (
               source_id TEXT, contract_version INTEGER, contract_state TEXT,
@@ -89,6 +98,48 @@ def _engine():
             "policy": contract.history_policy, "digest": contract_sha256(contract),
         })
     return engine
+
+
+def _status_client(engine, monkeypatch):
+    monkeypatch.setattr(api, "_engine", lambda: engine)
+    monkeypatch.setattr(api, "_require_bot_publishing", lambda: None)
+    test_app = FastAPI()
+    test_app.include_router(api.router, prefix="/api")
+    test_app.dependency_overrides[api.require_service_principal] = lambda: ServicePrincipal(PRINCIPAL, "synthetic-credential")
+    return TestClient(test_app)
+
+
+def _insert_status_job(engine, *, state, owner=PRINCIPAL, reused_publication_id=None, publish_as_job=False):
+    job_bytes = uuid.uuid4().bytes
+    job_id = str(uuid.UUID(bytes=job_bytes))
+    publication_bytes = reused_publication_id or uuid.uuid4().bytes
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO import_jobs (
+              job_id, source_id, contract_version, validation_map_version_id, reused_publication_id,
+              job_state, original_file_name, stored_file_key, file_size_bytes, file_sha256,
+              input_row_count, valid_row_count, error_count, submitted_by_user_id,
+              submitted_by_service_principal_id, request_id
+            ) VALUES (
+              :job, 'no_movement', 2, :map_id, :reused, :state, 'source.xlsx', 'private.xlsx',
+              10, :digest, 165, 165, 0, NULL, :owner, 'synthetic-status-test'
+            )
+        """), {
+            "job": job_bytes, "map_id": MAP_ID, "reused": reused_publication_id,
+            "state": state, "digest": hashlib.sha256(CONTENT).digest(), "owner": owner,
+        })
+        if publish_as_job or reused_publication_id is not None:
+            connection.execute(text("""
+                INSERT INTO source_publications (
+                  publication_id, source_id, version_no, job_id, contract_version, map_version_id,
+                  file_sha256, publication_state
+                ) VALUES (:publication, 'no_movement', 9, :publication_job, 2, :map_id, :digest, 'PUBLISHED')
+            """), {
+                "publication": publication_bytes,
+                "publication_job": job_bytes if publish_as_job else uuid.uuid4().bytes,
+                "map_id": MAP_ID, "digest": hashlib.sha256(CONTENT).digest(),
+            })
+    return job_id, publication_bytes
 
 
 def _summary(content: bytes = CONTENT) -> PreviewSummary:
@@ -220,3 +271,54 @@ def test_automatic_contract_pair_remains_source_and_version_allowlisted():
     assert ("no_movement", 2) in allowed_bot_contracts()
     assert ("no_movement", 1) not in allowed_bot_contracts()
     assert ("collection_rate", 2) not in allowed_bot_contracts()
+
+
+@pytest.mark.parametrize("state", ["VALIDATED", "PUBLISHED", "REUSED"])
+def test_machine_status_route_returns_success_for_valid_owned_jobs(state, monkeypatch):
+    engine = _engine()
+    reused_publication = uuid.uuid4().bytes if state == "REUSED" else None
+    job_id, publication_id = _insert_status_job(
+        engine, state=state, reused_publication_id=reused_publication,
+        publish_as_job=state == "PUBLISHED",
+    )
+    response = _status_client(engine, monkeypatch).get(f"/api/v2/machine/imports/{job_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == state
+    assert body["jobId"] == job_id
+    if state in {"PUBLISHED", "REUSED"}:
+        assert body["publicationId"] == str(uuid.UUID(bytes=publication_id))
+        assert body["version"] == 9
+        assert body["reused"] is (state == "REUSED")
+    else:
+        assert "publicationId" not in body
+    engine.dispose()
+
+
+def test_machine_status_route_hides_jobs_owned_by_another_principal_and_missing_jobs(monkeypatch):
+    engine = _engine()
+    other_job_id, _ = _insert_status_job(engine, state="PUBLISHED", owner="different-publisher")
+    client = _status_client(engine, monkeypatch)
+
+    other_response = client.get(f"/api/v2/machine/imports/{other_job_id}")
+    missing_response = client.get("/api/v2/machine/imports/00000000-0000-0000-0000-000000000000")
+
+    assert other_response.status_code == 404
+    assert other_response.json()["detail"] == "import_job_not_found"
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"] == "import_job_not_found"
+    engine.dispose()
+
+
+def test_machine_status_route_still_enforces_source_contract_scope(monkeypatch):
+    engine = _engine()
+    job_id, _ = _insert_status_job(engine, state="VALIDATED")
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE data_service_principal_contract_scopes SET is_active=0 WHERE source_id='no_movement' AND contract_version=2"))
+
+    response = _status_client(engine, monkeypatch).get(f"/api/v2/machine/imports/{job_id}")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "service_source_contract_forbidden"
+    engine.dispose()
